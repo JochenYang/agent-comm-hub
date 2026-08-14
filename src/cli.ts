@@ -9,7 +9,7 @@
 
 import { startHub, SERVER_VERSION } from './index.js'
 import { runSetup } from './setup.js'
-import { runService, runStatus } from './ops.js'
+import { runService, runStatus, runUpdate } from './ops.js'
 
 interface CliArgs {
   [key: string]: number | string | boolean
@@ -59,6 +59,9 @@ Usage:
                                            one-shot auto-start (Windows Run
                                            key + hidden VBS launcher, no admin;
                                            Linux systemd; --dry-run prints)
+  agent-comm-hub update                  self-update from the npm registry
+                                           (files updated in place; restart
+                                           the hub afterwards)
 
 Hub options:
   --host <addr>            Bind address (default 127.0.0.1)
@@ -148,6 +151,21 @@ try {
     for (const message of result.messages) log.info(message)
     if (!result.ok) {
       console.error('service: failed — see messages above')
+      process.exit(1)
+    }
+    process.exit(0)
+  }
+
+  if (command === 'update') {
+    const args = parseArgs(rest)
+    if (args['--help'] || args['-h']) {
+      printHelp()
+      process.exit(0)
+    }
+    const result = runUpdate()
+    for (const message of result.messages) log.info(message)
+    if (!result.ok) {
+      console.error('update: failed — see messages above')
       process.exit(1)
     }
     process.exit(0)

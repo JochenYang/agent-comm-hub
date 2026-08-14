@@ -5,9 +5,9 @@
 
 import { execFileSync } from 'node:child_process'
 import { request } from 'node:http'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export interface StatusOptions {
@@ -87,6 +87,36 @@ export interface ServiceOptions {
   port?: number
   path?: string
   dryRun?: boolean
+}
+
+/** Self-update: reinstall the package from the npm registry (files in place).
+ * The global install path does not change, so a previously registered
+ * auto-start launcher (Run key / VBS or systemd unit) keeps working. */
+export function runUpdate(): { ok: boolean; messages: string[] } {
+  const messages: string[] = []
+  const pkgFile = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+  const readVersion = (): string => {
+    try {
+      return (JSON.parse(readFileSync(pkgFile, 'utf8')) as { version?: string }).version ?? '?'
+    } catch {
+      return '?'
+    }
+  }
+  try {
+    const before = readVersion()
+    messages.push(`current version: ${before}`)
+    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+    const out = execFileSync(npmBin, ['install', '-g', 'agent-comm-hub@latest'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' })
+    const tail = out.trim().split(/\r?\n/).slice(-3).filter(Boolean).join(' | ')
+    if (tail) messages.push(tail)
+    const after = readVersion()
+    if (after === before) messages.push(`already up to date (v${after})`)
+    else messages.push(`updated: v${before} -> v${after}`)
+    messages.push('restart the hub (agent-comm-hub) to pick up the new version')
+    return { ok: true, messages }
+  } catch (error) {
+    return { ok: false, messages: [`update failed: ${(error as Error).message}`] }
+  }
 }
 
 /** Path of this package's lib/cli.js (used by the auto-start task). */

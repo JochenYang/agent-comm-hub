@@ -63,6 +63,12 @@ npm install -D agent-comm-hub
 npx agent-comm-hub
 ```
 
+之后想更新（免手动重装，文件原地替换，已装的自启动器不受影响；更新后重启 hub）：
+
+```bash
+agent-comm-hub update
+```
+
 ### 2. 启动 hub
 
 ```bash

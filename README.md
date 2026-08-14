@@ -63,6 +63,13 @@ npm install -D agent-comm-hub
 npx agent-comm-hub
 ```
 
+Update later without a manual reinstall (files are replaced in place, so an
+installed auto-start launcher keeps working; restart the hub afterwards):
+
+```bash
+agent-comm-hub update
+```
+
 ### 2. Start the hub
 
 ```bash

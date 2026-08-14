@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9 (2026-08-14)
+
+- **`agent-comm-hub update`**: self-update from the npm registry — reinstalls
+  `agent-comm-hub@latest` in place (no manual global reinstall). The global
+  path and any registered auto-start launcher keep working; restart the hub
+  afterwards. Prints the before/after versions.
+
 ## 0.1.8 (2026-08-14)
 
 - **zcode support**: `setup` / `install-all.ps1` now merge the `agent-hub`
