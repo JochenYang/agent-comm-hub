@@ -52,13 +52,35 @@ opencode listening loop: bridge_wait() returns → rebuts → … (loop = live d
 "Listening" = the agent loops `bridge_wait` inside its turn. Without a loop,
 messages are not lost — they queue until the agent polls.
 
-## 4. Tools (10, symmetric on every side)
+## 4. Tools (16, symmetric on every side)
 
-`bridge_register` · `bridge_unregister` · `bridge_chat` · `bridge_task` ·
-`bridge_ack` · `bridge_wait` · `bridge_poll` · `bridge_status` · `bridge_peers` ·
-`bridge_history`
+Message tools (10): `bridge_register` · `bridge_unregister` · `bridge_chat` ·
+`bridge_task` · `bridge_ack` · `bridge_wait` · `bridge_poll` ·
+`bridge_status` · `bridge_peers` · `bridge_history`
+
+herdr control tools (6, when the [herdr](https://herdr.dev) terminal runtime
+is installed): `bridge_agent_list` · `bridge_agent_status` ·
+`bridge_agent_prompt` · `bridge_agent_wait` · `bridge_agent_read` ·
+`bridge_agent_keys`
 
 Every result is lossless JSON (compatible with DSH's strict tool registry).
+
+### Message tools vs control tools
+
+The two families are deliberately different planes:
+
+| | Message tools (`bridge_*`) | Control tools (`bridge_agent_*`) |
+|---|---|---|
+| Channel | hub mailboxes (long-poll) | herdr terminal input (physical) |
+| Delivery | queued, offline-tolerant | requires a live herdr pane |
+| Agent autonomy | the receiving model decides | executed by the target's TUI (slash commands work) |
+| Wait semantics | `bridge_wait`: next mailbox message | `agent.wait`: herdr's real state (idle/working/blocked/done) |
+| Permission | hub's loopback trust | `herdrControlPeers` gate (default `'all'`) |
+
+The control adapter (`src/herdr-ctl.ts`) shells out to the herdr CLI via
+`execFile` — args are passed verbatim (no shell), zero runtime dependencies
+are preserved. herdr's JSON error envelopes (`agent_not_found`,
+`agent_prompt_stalled`) surface as structured tool errors.
 
 ## 5. Code layout
 
@@ -67,11 +89,12 @@ src/
 ├── protocol.ts     # message kinds, task/ack payloads, peer id rules
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, idle GC
 ├── mcp-server.ts   # SessionRegistry + hand-rolled streamable-http server
-├── hub-tools.ts    # the 10 bridge tools, auto-registration, liveness wiring
+├── hub-tools.ts    # the 16 bridge tools, auto-registration, liveness wiring
+├── herdr-ctl.ts    # HerdrCtl: control-tool adapter over the herdr CLI
 ├── index.ts        # startHub() programmatic API + defaults
 └── cli.ts          # agent-comm-hub CLI
 agents/             # per-agent config templates + install-all.ps1 (incremental sync)
-test/               # multi-peer smoke suite (35 checks)
+test/               # multi-peer smoke suite (37) + herdr control suite (17)
 ```
 
 ## 6. Installing & syncing to agents
@@ -107,9 +130,12 @@ They coexist: ports 18763 vs 18764.
 
 ## 9. Facts
 
-- Version 0.1.3, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
-- Smoke suite 35/35: registration/rename/unregister, routing, broadcast, ack
-  routing, filtered waits, connect-time auto-registration, shared identity,
-  SSE liveness, idle GC, error paths.
+- Version 0.3.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
+- Smoke suite 37/37 + setup 25/25 + ops 6/6 + herdr control 17/17:
+  registration/rename/unregister, routing, broadcast, ack routing, filtered
+  waits, connect-time auto-registration, shared identity, SSE liveness, idle
+  GC, error paths, control-tool argv passthrough, permission gating, missing
+  CLI.
 - Verified live with mcode (10 tools listed via `mcode exec`), opencode, and
-  kimi-code (`kimi -p` listed all 10 tools).
+  kimi-code (`kimi -p` listed all 10 tools). herdr control tools verified
+  against the real herdr CLI (0.8.0-preview) on Windows.

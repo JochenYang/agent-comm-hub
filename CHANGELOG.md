@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 (2026-08-14)
+
+- **herdr control layer**: 6 new tools — `bridge_agent_list`,
+  `bridge_agent_status`, `bridge_agent_prompt`, `bridge_agent_wait`,
+  `bridge_agent_read`, `bridge_agent_keys` — drive agent panes owned by the
+  herdr terminal runtime (https://herdr.dev) through its CLI. Unlike
+  `bridge_chat` (a mailbox message the receiving model may ignore), a
+  `bridge_agent_prompt` is physical input to the target's terminal: slash
+  commands (`/compact`, `/model`, `/clear`) are executed by the target's TUI,
+  and `--wait`/`--until`/`--timeout` block on herdr's real agent state
+  (idle/working/blocked/done) instead of screen activity.
+- Adapter lives in `src/herdr-ctl.ts` (zero dependencies: `execFile` only,
+  args passed verbatim — no shell). CLI gains `--herdr-bin` and
+  `--herdr-timeout-ms`; programmatic `startHub()` accepts `herdrBin` /
+  `herdrBaseArgs` / `herdrTimeoutMs` / `herdrControlPeers`.
+- **Permission gating**: `herdrControlPeers` ('all' by default, or a peer id
+  list) restricts who may use the control tools — they type into real
+  terminals.
+- herdr CLI error envelopes (agent_not_found, agent_prompt_stalled) surface
+  as structured tool errors.
+- New test suite `test/herdr.mjs` (17 checks) driving a fake herdr CLI
+  fixture (`test/fixtures/fake-herdr.mjs`): results, argv passthrough,
+  error paths, permission gating, missing CLI. Suite total now 85.
+
 ## 0.2.0 (2026-08-14)
 
 - **Version numbering policy**: patch rolls over at 10 (`0.1.9 -> 0.2.0`).

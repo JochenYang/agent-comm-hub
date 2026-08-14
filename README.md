@@ -44,6 +44,7 @@ Zero runtime dependencies: the MCP streamable-http server is hand-rolled over `n
 - **Reliable identity**: the sender of every message is derived from the connection's session binding, never caller-supplied — peers cannot impersonate each other; duplicate ids are rejected. Connecting the MCP auto-registers your client name — no manual setup.
 - **Real-time by polling**: `bridge_wait` long-polls (default 30 s, server ceiling 60 s); messages queue for offline peers.
 - **Structured conversations**: `chat` / `task` / `notice` / `ack` message kinds, acks auto-routed back to the original sender, `to: "all"` broadcast.
+- **Hard control via herdr** (optional): when the [herdr](https://herdr.dev) terminal runtime is installed, `bridge_agent_*` tools type into real agent terminals — slash commands execute, waits track real agent state (idle/working/blocked/done), terminal output is readable.
 - **Zero dependencies, one process**: `npx agent-comm-hub` — no database, no daemon, no external services.
 
 ## Quickstart
@@ -242,6 +243,28 @@ Merge `agents/dsh/cordis.patch.yml` into the profile patch layer; DSH's built-in
 | `bridge_peers()` | Who is online |
 | `bridge_history(peer?, limit?)` | Recent messages (context refresh after reconnect) |
 
+### herdr control tools (optional)
+
+If the [herdr](https://herdr.dev) terminal runtime is installed, the hub also
+exposes **control tools** that type into real agent terminals — unlike
+`bridge_chat` (a mailbox message the receiving model may ignore), a prompt
+here is physical input: slash commands (`/compact`, `/model`, `/clear`) are
+executed by the target's TUI, and waits block on herdr's real agent state
+(idle/working/blocked/done), not screen activity.
+
+| Tool | Purpose |
+|---|---|
+| `bridge_agent_list()` | Agent panes herdr detects (paneId, kind, status, cwd, interactive-ready) |
+| `bridge_agent_status(target)` | Live state of one pane |
+| `bridge_agent_prompt(target, text, wait?, until?, timeoutMs?)` | Submit text / slash command into the target's input line; with `wait`, block until it settles |
+| `bridge_agent_wait(target, until?, timeoutMs?)` | Wait until the agent reaches a state (default idle/done/blocked) |
+| `bridge_agent_read(target, lines?, source?)` | Read the pane's recent terminal output (reply of an agent not on the hub) |
+| `bridge_agent_keys(target, keys)` | Raw key presses (Enter, esc, ctrl-c, arrows…) to dismiss prompts or interrupt |
+
+Control tools are gated: `herdrControlPeers` restricts who may use them
+(default `'all'`, mirroring the hub's loopback-only trust model). They are
+hard control — an injected `/clear` clears the target's context.
+
 Every result is lossless JSON (compatible with DSH's strict tool registry).
 
 ## CLI reference
@@ -263,6 +286,9 @@ agent-comm-hub service install|uninstall [options]   one-shot auto-start
 --default-wait-ms <n>    bridge_wait default budget (default 30000)
 --connected-window-ms <n>  Peer counts as active within this window (default 30000)
 --peer-idle-timeout-ms <n> Auto-unregister idle peers after this; 0 disables (default 600000)
+--herdr-bin <path>       herdr CLI binary for bridge_agent_* control tools
+                         (default herdr, resolved via PATH)
+--herdr-timeout-ms <n>   Default cap for one herdr call in ms (default 30000)
 --url <u> / --server-name <n> / --remove / --dry-run   (setup/service/status)
 -h, --help               Show help
 -V, --version            Show version

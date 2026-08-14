@@ -28,7 +28,7 @@ Key facts:
   other. Same-name connections share one peer id (N:1) and one mailbox.
 - **Offline-tolerant**: messages queue per peer (max 200, oldest dropped) and
   are delivered on the next `bridge_wait`/`bridge_poll`.
-- Version `0.2.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
+- Version `0.3.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
   manager is **pnpm** (single-package repo; `pnpm-workspace.yaml` only carries
   the pnpm 10 `allowBuilds` approval for esbuild).
 
@@ -53,7 +53,7 @@ src/
 ├── protocol.ts     # message kinds, BridgeMessage, task/ack payloads, peer id pattern
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, idle GC (transport-agnostic)
 ├── mcp-server.ts   # SessionRegistry (sessions + peer bindings) + McpStreamableHttpServer
-├── hub-tools.ts    # the 10 bridge tools, auto-registration, peerId sanitizing, result presentation
+├── hub-tools.ts    # the 16 bridge tools, auto-registration, peerId sanitizing, result presentation
 ├── index.ts        # startHub() programmatic API, DEFAULT_CONFIG, exports
 ├── cli.ts          # agent-comm-hub CLI (hub start / setup / status / service / update)
 ├── setup.ts        # `setup`: incremental sync of MCP entry + skill into every
@@ -69,12 +69,19 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 
 - `hub.ts` is deliberately transport-agnostic (no MCP, no HTTP imports) so the
   test suite drives it standalone.
+- `herdr-ctl.ts` is the optional control adapter: it shells out to the herdr
+  CLI (`execFile`, args verbatim, zero dependencies) so the hub can type into
+  real agent terminals and wait on real agent state.
 - `index.ts` exports everything public: `startHub`, `AgentHub`,
-  `McpStreamableHttpServer`, `SessionRegistry`, `hubTools`, the bridge tool
-  wiring, and `* from './protocol.js'`.
-- The 10 tools (symmetric on every side): `bridge_register`, `bridge_unregister`,
-  `bridge_chat`, `bridge_task`, `bridge_ack`, `bridge_wait`, `bridge_poll`,
-  `bridge_status`, `bridge_peers`, `bridge_history`.
+  `McpStreamableHttpServer`, `SessionRegistry`, `hubTools`, `HerdrCtl`, the
+  bridge tool wiring, and `* from './protocol.js'`.
+- The 16 tools (symmetric on every side): the 10 message tools
+  (`bridge_register`, `bridge_unregister`, `bridge_chat`, `bridge_task`,
+  `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`, `bridge_peers`,
+  `bridge_history`) plus 6 herdr control tools (`bridge_agent_list`,
+  `bridge_agent_status`, `bridge_agent_prompt`, `bridge_agent_wait`,
+  `bridge_agent_read`, `bridge_agent_keys`). Control tools are gated by
+  `herdrControlPeers` (default `'all'`).
 
 ## Build and test commands
 
@@ -82,7 +89,8 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
-                      #   + test/setup.mjs + test/ops.mjs  → 68 checks (37+25+6)
+                      #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
+                      #   → 85 checks (37+25+6+17)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -93,8 +101,8 @@ pnpm pack             # build + npm pack (publishing artifact)
   `pnpm install --frozen-lockfile` → `typecheck` → `test` → `pack` → upload the
   tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 37/37 + 25/25 + 6/6
-  on Node 24 / Windows).
+  merging, the full `pnpm test` must stay green (verified: 37/37 + 25/25 +
+  6/6 + 17/17 on Node 24 / Windows).
 
 ## Testing
 
@@ -109,9 +117,14 @@ pnpm pack             # build + npm pack (publishing artifact)
   idempotency, `remove` uninstall.
 - `test/ops.mjs` (6 checks): `runStatus` against a live hub and a dead port,
   self-exclusion and cleanup of its probe peer.
+- `test/herdr.mjs` (17 checks): the bridge_agent_* control tools against a
+  fake herdr CLI fixture (`test/fixtures/fake-herdr.mjs`) — results, argv
+  passthrough (slash commands, keys, wait flags), error envelopes
+  (agent_not_found, agent_prompt_stalled), permission gating, missing CLI.
 - The `.mjs` files in `test/` are **esbuild outputs** of the `.ts` entries
-  (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`) and are gitignored — edit the
-  `.ts` files, not the `.mjs` ones.
+  (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`) and are
+  gitignored — edit the `.ts` files, not the `.mjs` ones. `fake-herdr.mjs` is
+  a hand-written fixture and IS committed.
 - Every check uses `check(name, ok, detail)` with a behavior-description name;
   smoke tests also assert every tool result is **lossless JSON**
   (`assertLosslessJson`: no `undefined`, no non-finite numbers) — that is the
