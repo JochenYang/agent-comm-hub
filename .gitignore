@@ -6,3 +6,4 @@ test/entry.mjs
 test/setup-entry.mjs
 test/ops-entry.mjs
 test/herdr-entry.mjs
+test/discover-entry.mjs

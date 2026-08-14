@@ -2,25 +2,28 @@
  * `agent-comm-hub setup` — one-shot incremental sync of the hub's MCP entry
  * and skill into every installed agent on this machine.
  *
+ * Which agents are supported is declared in `agents/registry.json` (the
+ * single source of truth); this module discovers which of them are actually
+ * installed (PATH / config paths / npm global) and merges the hub entry into
+ * each one's config.
+ *
  * Guarantees (same contract as agents/install-all.ps1):
  *  - only the named server key/section is touched; everything else is kept
  *  - every modified file is backed up first (`<file>.bak-<timestamp>`)
  *  - UTF-8 without BOM; idempotent (re-running with same url is a no-op)
  *  - missing agent configs are skipped, never created from scratch
  *
- * Covered: MiniMax Code, opencode, Kimi Code, Gemini CLI, Codex, zcode, DSH
- * (profiles — each profile's cordis.patch.yml gets an MCP-client insert).
- * Skills go to the cross-agent `~/.agents/skills/` plus each agent's private
- * skills dir (DSH: `~/.dsh/skills/`). Claude Code (project `.mcp.json`)
- * stays manual — see agents/README.md.
+ * Skills go to the cross-agent `~/.agents/skills/` plus each discovered
+ * agent's private skills dir. Claude Code's MCP config stays manual (project
+ * `.mcp.json`) — see agents/README.md.
  */
 
-import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import type { Dirent } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { loadRegistry, discover, expandConfigFile, expandHome, type RegistryEntry } from './discover.js'
 
 export interface SetupOptions {
   /** Hub MCP endpoint URL. */
@@ -29,6 +32,12 @@ export interface SetupOptions {
   serverName?: string
   /** Uninstall instead of install. */
   remove?: boolean
+  /** Only configure the given registry agent id (e.g. `--agent codex`). */
+  agent?: string
+  /** PATH contents for discovery (tests); defaults to process.env.PATH. */
+  pathEnv?: string
+  /** Skip npm-global discovery (tests / speed). */
+  noNpm?: boolean
   /** Fake home for tests; defaults to os.homedir(). */
   homeDir?: string
   /** SKILL.md source; defaults to the package's agents/SKILL.md. */
@@ -258,6 +267,19 @@ async function rmRecursive(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true })
 }
 
+/** Substitute `{url}` / `{serverName}` placeholders in a registry entry. */
+function substitute(entry: Record<string, unknown>, values: { url: string; serverName: string }): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(entry)) {
+    if (typeof value === 'string') {
+      out[key] = value.replaceAll('{url}', values.url).replaceAll('{serverName}', values.serverName)
+    } else {
+      out[key] = value
+    }
+  }
+  return out
+}
+
 /** Run the incremental sync; returns a summary. */
 export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary> {
   const url = options.url ?? DEFAULT_URL
@@ -273,69 +295,49 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
     else if (status === 'skipped') summary.skipped.push(`${label}: ${file}`)
   }
 
-  const jsonTargets: Array<{ label: string; file: string; section: string; entry: Record<string, unknown> }> = [
-    { label: 'mcode', file: join(home, '.minimax', 'mcp.json'), section: 'mcpServers', entry: { url, type: 'streamable-http', enabled: true, configured: true, timeout: 120000, description: 'agent-comm-hub: talk to every other agent connected to the hub.' } },
-    { label: 'mcode', file: join(home, '.minimax', 'mcp', 'mcp.json'), section: 'mcpServers', entry: { url, type: 'streamable-http', enabled: true, configured: true, timeout: 120000, description: 'agent-comm-hub: talk to every other agent connected to the hub.' } },
-    { label: 'opencode', file: join(home, '.config', 'opencode', 'opencode.json'), section: 'mcp', entry: { type: 'remote', url, enabled: true } },
-    { label: 'kimi-code', file: join(home, '.kimi-code', 'mcp.json'), section: 'mcpServers', entry: { transport: 'http', url, startupTimeoutMs: 30000, toolTimeoutMs: 120000 } },
-    { label: 'gemini-cli', file: join(home, '.gemini', 'settings.json'), section: 'mcpServers', entry: { type: 'http', url } },
-    { label: 'zcode', file: join(home, '.zcode', 'cli', 'config.json'), section: 'mcp.servers', entry: { type: 'remote', url, enabled: true } },
-  ]
-
-  for (const target of jsonTargets) {
-    try {
-      const status = await mergeJsonServer(target.file, target.section, target.entry, { serverName, url, remove })
-      record(status, target.label, target.file)
-    } catch (error) {
-      summary.errors.push(`${target.label}: ${target.file} — ${(error as Error).message}`)
-      log(`  ${target.label}: SKIPPED — ${(error as Error).message}`)
+  // Registry-driven discovery: which registered agents are installed?
+  const registry = loadRegistry()
+  const found = discover(registry, { homeDir: home, pathEnv: options.pathEnv, noNpm: options.noNpm === true })
+  const only = options.agent
+  let targetAgents: RegistryEntry[] = []
+  if (only !== undefined) {
+    const match = registry.agents.find(agent => agent.id === only)
+    if (match === undefined) {
+      log(`agent '${only}' is not in the registry (see agents/registry.json)`)
+    } else {
+      // Explicit selection configures the agent even when discovery missed it.
+      targetAgents = [match]
+      log(`configure only: ${only}`)
     }
+  } else {
+    targetAgents = found.filter(agent => agent.present).map(agent => registry.agents.find(entry => entry.id === agent.id)!)
+    const present = targetAgents.map(agent => agent.id)
+    log(`discovered: ${present.length > 0 ? present.join(', ') : 'none'}`)
   }
 
-  const codexFile = join(home, '.codex', 'config.toml')
-  try {
-    const status = await mergeTomlSection(codexFile, { serverName, url, remove })
-    record(status, 'codex', codexFile)
-  } catch (error) {
-    summary.errors.push(`codex: ${codexFile} — ${(error as Error).message}`)
-    log(`  codex: SKIPPED — ${(error as Error).message}`)
-  }
-
-  // DSH: insert the MCP-client row into every profile's cordis.patch.yml
-  // (host-level composition patch; applies to all sessions of that profile).
-  const dshProfilesDir = join(home, '.dsh', 'profiles')
-  if (existsSync(dshProfilesDir)) {
-    let entries: Dirent<string>[] = []
-    try {
-      entries = await readdir(dshProfilesDir, { withFileTypes: true })
-    } catch (error) {
-      summary.errors.push(`dsh profiles scan — ${(error as Error).message}`)
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      const patch = join(dshProfilesDir, entry.name, 'cordis.patch.yml')
-      try {
-        const status = await mergeDshPatch(patch, { serverName, url, remove })
-        record(status, `dsh (${entry.name})`, patch)
-      } catch (error) {
-        summary.errors.push(`dsh (${entry.name}): ${patch} — ${(error as Error).message}`)
-        log(`  dsh (${entry.name}): SKIPPED — ${(error as Error).message}`)
+  for (const agent of targetAgents) {
+    for (const config of agent.configs) {
+      for (const file of expandConfigFile(config.file, home)) {
+        try {
+          const status = config.strategy === 'json'
+            ? await mergeJsonServer(file, config.section!, substitute(config.entry!, { url, serverName }), { serverName, url, remove })
+            : config.strategy === 'toml'
+              ? await mergeTomlSection(file, { serverName, url, remove })
+              : await mergeDshPatch(file, { serverName, url, remove })
+          record(status, agent.id, file)
+        } catch (error) {
+          summary.errors.push(`${agent.id}: ${file} — ${(error as Error).message}`)
+          log(`  ${agent.id}: SKIPPED — ${(error as Error).message}`)
+        }
       }
     }
   }
 
-  // Skills: cross-agent standard location + each agent's private dir.
-  const skillDirs = [
-    join(home, '.agents', 'skills', serverName),          // cross-agent standard
-    join(home, '.minimax', 'skills', serverName),
-    join(home, '.config', 'opencode', 'skills', serverName),
-    join(home, '.kimi-code', 'skills', serverName),
-    join(home, '.gemini', 'skills', serverName),
-    join(home, '.codex', 'skills', serverName),
-    join(home, '.zcode', 'skills', serverName),
-    join(home, '.claude', 'skills', serverName),          // config is manual; skill still useful
-    join(home, '.dsh', 'skills', serverName),             // DSH skill (config auto-installed)
-  ]
+  // Skills: cross-agent standard location + each discovered agent's private dir.
+  const skillDirs = [join(home, '.agents', 'skills', serverName)] // cross-agent standard
+  for (const agent of targetAgents) {
+    if (agent.skill !== null) skillDirs.push(join(expandHome(agent.skill, home), serverName))
+  }
   for (const dir of skillDirs) {
     try {
       await syncSkill(dir, skillSrc, remove, log)

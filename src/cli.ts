@@ -10,6 +10,7 @@
 import { startHub, SERVER_VERSION } from './index.js'
 import { runSetup } from './setup.js'
 import { runService, runStatus, runUpdate } from './ops.js'
+import { runDiscover } from './discover.js'
 
 interface CliArgs {
   [key: string]: number | string | boolean
@@ -18,7 +19,7 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
   const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
-  const string = new Set(['--host', '--path', '--url', '--server-name', '--herdr-bin'])
+  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
@@ -55,10 +56,13 @@ Usage:
                                            every installed agent (incremental,
                                            idempotent; --remove undoes)
   agent-comm-hub status [options]          show hub health + online peers
+  agent-comm-hub discover                  list installed agents (registry-
+                                           driven; no config changes)
   agent-comm-hub service install|uninstall [options]
                                            one-shot auto-start (Windows Run
                                            key + hidden VBS launcher, no admin;
-                                           Linux systemd; --dry-run prints)
+                                           Linux systemd, macOS launchd;
+                                           --dry-run prints)
   agent-comm-hub update                  self-update from the npm registry
                                            (files updated in place; restart
                                            the hub afterwards)
@@ -80,6 +84,7 @@ Hub options:
 Setup options:
   --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
   --server-name <name>     Config key (default agent-hub)
+  --agent <id>             Only configure one registry agent (e.g. codex)
   --remove                 Uninstall instead of install
 
   -h, --help               Show this help
@@ -107,9 +112,15 @@ try {
     await runSetup({
       url: args['--url'] as string | undefined,
       serverName: args['--server-name'] as string | undefined,
+      agent: args['--agent'] as string | undefined,
       remove: args['--remove'] === true,
       log: message => log.info(message),
     })
+    process.exit(0)
+  }
+
+  if (command === 'discover') {
+    runDiscover({ log: message => log.info(message) })
     process.exit(0)
   }
 

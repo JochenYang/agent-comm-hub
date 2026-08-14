@@ -1,0 +1,201 @@
+{
+  "$schema": "docs/agent-registry.schema.json",
+  "agents": [
+    {
+      "id": "mcode",
+      "probe": [],
+      "configs": [
+        {
+          "file": "~/.minimax/mcp.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": {
+            "url": "{url}",
+            "type": "streamable-http",
+            "enabled": true,
+            "configured": true,
+            "timeout": 120000,
+            "description": "agent-comm-hub: talk to every other agent connected to the hub."
+          }
+        },
+        {
+          "file": "~/.minimax/mcp/mcp.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": {
+            "url": "{url}",
+            "type": "streamable-http",
+            "enabled": true,
+            "configured": true,
+            "timeout": 120000,
+            "description": "agent-comm-hub: talk to every other agent connected to the hub."
+          }
+        }
+      ],
+      "skill": "~/.minimax/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "opencode",
+      "probe": ["opencode"],
+      "npm": ["cli"],
+      "configs": [
+        {
+          "file": "~/.config/opencode/opencode.json",
+          "section": "mcp",
+          "strategy": "json",
+          "entry": { "type": "remote", "url": "{url}", "enabled": true }
+        }
+      ],
+      "skill": "~/.config/opencode/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "kimi-code",
+      "probe": ["kimi"],
+      "configs": [
+        {
+          "file": "~/.kimi-code/mcp.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": { "transport": "http", "url": "{url}", "startupTimeoutMs": 30000, "toolTimeoutMs": 120000 }
+        }
+      ],
+      "skill": "~/.kimi-code/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "gemini-cli",
+      "probe": ["gemini"],
+      "configs": [
+        {
+          "file": "~/.gemini/settings.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": { "type": "http", "url": "{url}" }
+        }
+      ],
+      "skill": "~/.gemini/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "codex",
+      "probe": ["codex"],
+      "npm": ["codex"],
+      "configs": [
+        {
+          "file": "~/.codex/config.toml",
+          "section": null,
+          "strategy": "toml",
+          "entry": null
+        }
+      ],
+      "skill": "~/.codex/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "zcode",
+      "probe": [],
+      "configs": [
+        {
+          "file": "~/.zcode/cli/config.json",
+          "section": "mcp.servers",
+          "strategy": "json",
+          "entry": { "type": "remote", "url": "{url}", "enabled": true }
+        }
+      ],
+      "skill": "~/.zcode/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "dsh",
+      "probe": [],
+      "configs": [
+        {
+          "file": "~/.dsh/profiles/*/cordis.patch.yml",
+          "section": null,
+          "strategy": "dsh",
+          "entry": null
+        }
+      ],
+      "skill": "~/.dsh/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "claude",
+      "probe": ["claude"],
+      "npm": ["claude-code"],
+      "configs": [],
+      "skill": "~/.claude/skills",
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "qwen-code",
+      "probe": ["qwen"],
+      "npm": ["qwen-code"],
+      "configs": [
+        {
+          "file": "~/.qwen/settings.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": { "httpUrl": "{url}" }
+        }
+      ],
+      "skill": null,
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "pi",
+      "probe": ["pi"],
+      "npm": ["pi-coding-agent"],
+      "configs": [],
+      "skill": null,
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "cursor",
+      "probe": ["cursor", "cursor-agent"],
+      "npm": ["cursor"],
+      "configs": [
+        {
+          "file": "~/.cursor/mcp.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": { "url": "{url}" }
+        }
+      ],
+      "skill": null,
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "qoder",
+      "probe": ["qoder"],
+      "npm": ["qoder"],
+      "configs": [],
+      "skill": null,
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "codebuddy",
+      "probe": ["codebuddy"],
+      "npm": ["codebuddy"],
+      "configs": [],
+      "skill": null,
+      "os": ["win32", "darwin", "linux"]
+    },
+    {
+      "id": "claude-desktop",
+      "probe": [],
+      "configs": [
+        {
+          "file": "~/Library/Application Support/Claude/claude_desktop_config.json",
+          "section": "mcpServers",
+          "strategy": "json",
+          "entry": { "url": "{url}", "type": "streamable-http" }
+        }
+      ],
+      "skill": null,
+      "os": ["darwin"]
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/JochenYang/agent-comm-hub/blob/main/docs/agent-registry.schema.json",
+  "title": "agent-comm-hub agent registry",
+  "description": "Declarative registry of supported agents for `agent-comm-hub setup` / `discover`. One record per agent; adding a new agent requires a record here (plus a test), no code changes.",
+  "type": "object",
+  "required": ["agents"],
+  "properties": {
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "configs", "skill"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "description": "Stable identifier; also the config key default when not overridden."
+          },
+          "probe": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Command names checked against PATH (any hit = agent installed)."
+          },
+          "configs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["file", "strategy"],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "pattern": "^~/",
+                  "description": "Config path template, `~`-relative; one `*` path segment expands over matching subdirectories (e.g. DSH profiles). Must not contain `..`."
+                },
+                "section": {
+                  "type": ["string", "null"],
+                  "description": "JSON section path (dotted, e.g. `mcp.servers`) for strategy json; null otherwise."
+                },
+                "strategy": {
+                  "enum": ["json", "toml", "dsh"],
+                  "description": "Merge strategy: json = JSON section merge; toml = section append; dsh = YAML insert with marker."
+                },
+                "entry": {
+                  "type": ["object", "null"],
+                  "description": "Server entry template; `{url}` / `{serverName}` placeholders are substituted. Null for toml/dsh."
+                }
+              }
+            }
+          },
+          "skill": {
+            "type": ["string", "null"],
+            "description": "Private skill directory (`~`-relative) for this agent; null = no skill."
+          },
+          "os": {
+            "type": "array",
+            "items": { "enum": ["win32", "darwin", "linux"] },
+            "description": "Allowed platforms; default all three."
+          }
+        }
+      }
+    }
+  }
+}
