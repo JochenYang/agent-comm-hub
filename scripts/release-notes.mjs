@@ -22,7 +22,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 // Map git author names to GitHub handles so contributor names render as
 // clickable profile links. Names without a mapping stay plain text (a 404
 // link is worse than no link). Keep in sync when new contributors land.
-const GH_HANDLES = { dabaotongxue: 'JochenYang', Fectivnfy112357: 'Fectivnfy112357' }
+const GH_HANDLES = { dabaotongxue: 'JochenYang', JochenYang: 'JochenYang', Fectivnfy112357: 'Fectivnfy112357' }
 
 const [a, b] = process.argv.slice(2)
 const cur = b ?? a
