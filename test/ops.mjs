@@ -1,10 +1,11 @@
 /**
  * Tests for `agent-comm-hub status`: hub health probe against a live hub
- * (with a registered peer) and against a dead port.
+ * (with a registered peer) and against a dead port. Also covers the
+ * auto-start service command's per-platform dry-run output.
  */
 
 import { startHub } from './entry.mjs'
-import { runStatus } from './ops-entry.mjs'
+import { runStatus, runService } from './ops-entry.mjs'
 
 let failures = 0
 let checks = 0
@@ -44,6 +45,18 @@ try {
   console.log('== status: hub down ==')
   const down = await runStatus({ host: '127.0.0.1', port: 19999 })
   check('status reports not running on dead port', down.running === false && typeof down.error === 'string', JSON.stringify(down))
+
+  console.log('== service: dry-run per platform ==')
+  const win = runService({ action: 'install', dryRun: true, platform: 'win32' })
+  check('win32 install dry-run mentions Run key', win.ok && win.messages.some(m => m.includes('reg add')), JSON.stringify(win.messages))
+  const winRm = runService({ action: 'uninstall', dryRun: true, platform: 'win32' })
+  check('win32 uninstall dry-run mentions reg delete', winRm.ok && winRm.messages.some(m => m.includes('reg delete')), JSON.stringify(winRm.messages))
+  const lin = runService({ action: 'install', dryRun: true, platform: 'linux' })
+  check('linux install dry-run mentions systemctl', lin.ok && lin.messages.some(m => m.includes('systemctl --user')), JSON.stringify(lin.messages))
+  const mac = runService({ action: 'install', dryRun: true, platform: 'darwin' })
+  check('macos install dry-run writes plist + launchctl bootstrap', mac.ok && mac.messages.some(m => m.includes('launchctl bootstrap')) && mac.messages.some(m => m.includes('.plist')), JSON.stringify(mac.messages))
+  const macRm = runService({ action: 'uninstall', dryRun: true, platform: 'darwin' })
+  check('macos uninstall dry-run mentions bootout', macRm.ok && macRm.messages.some(m => m.includes('launchctl bootout')), JSON.stringify(macRm.messages))
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1

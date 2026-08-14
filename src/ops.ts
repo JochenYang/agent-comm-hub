@@ -87,6 +87,8 @@ export interface ServiceOptions {
   port?: number
   path?: string
   dryRun?: boolean
+  /** Platform semantics to emulate (tests); defaults to process.platform. */
+  platform?: NodeJS.Platform
 }
 
 /** Self-update: reinstall the package from the npm registry (files in place).
@@ -144,16 +146,17 @@ function run(command: string, args: string[], dryRun: boolean): string {
 }
 
 /** One-shot auto-start registration (Windows HKCU Run + hidden VBS launcher,
- * no admin; Linux systemd user unit). */
+ * no admin; Linux systemd user unit; macOS launchd LaunchAgent). */
 export function runService(options: ServiceOptions): { ok: boolean; messages: string[] } {
   const messages: string[] = []
   const port = options.port ?? 18764
   const host = options.host ?? '127.0.0.1'
   const path = options.path ?? '/mcp'
   const dryRun = options.dryRun === true
+  const platform = options.platform ?? process.platform
 
   try {
-    if (process.platform === 'win32') {
+    if (platform === 'win32') {
       // No-admin auto-start: HKCU Run key pointing at a hidden-window VBS
       // launcher (schtasks often needs elevation; this never does).
       const appData = process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming')
@@ -187,7 +190,7 @@ export function runService(options: ServiceOptions): { ok: boolean; messages: st
       return { ok: true, messages }
     }
 
-    if (process.platform === 'linux') {
+    if (platform === 'linux') {
       const unitDir = join(homedir(), '.config', 'systemd', 'user')
       const unitFile = join(unitDir, 'agent-comm-hub.service')
       if (options.action === 'install') {
@@ -215,7 +218,72 @@ export function runService(options: ServiceOptions): { ok: boolean; messages: st
       return { ok: true, messages }
     }
 
-    return { ok: false, messages: [`auto-start is not implemented for ${process.platform} — use pm2 or your platform's supervisor`] }
+    if (platform === 'darwin') {
+      // macOS launchd LaunchAgent (user scope, no admin).
+      const launchAgentsDir = join(homedir(), 'Library', 'LaunchAgents')
+      const label = 'com.agent-comm-hub'
+      const plist = join(launchAgentsDir, `${label}.plist`)
+      const logFile = join(homedir(), 'Library', 'Logs', 'agent-comm-hub.log')
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 0
+      const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${nodeExe()}</string>
+    <string>${cliPath()}</string>
+    <string>--host</string><string>${host}</string>
+    <string>--port</string><string>${port}</string>
+    <string>--path</string><string>${path}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${logFile}</string>
+  <key>StandardErrorPath</key>
+  <string>${logFile}</string>
+</dict>
+</plist>
+`
+      if (options.action === 'install') {
+        if (dryRun) {
+          messages.push(`[dry-run] write ${plist}`)
+          messages.push(`[dry-run] launchctl bootstrap gui/${uid} ${plist}`)
+        } else {
+          mkdirSync(launchAgentsDir, { recursive: true })
+          writeFileSync(plist, plistContent)
+          try {
+            execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plist], { encoding: 'utf8', windowsHide: true })
+          } catch {
+            // Older macOS: legacy load path.
+            execFileSync('launchctl', ['load', '-w', plist], { encoding: 'utf8', windowsHide: true })
+          }
+          messages.push(`auto-start registered: launchd LaunchAgent ${plist}`)
+          messages.push(`start it now with: launchctl bootstrap gui/${uid} ${plist}`)
+        }
+      } else {
+        if (dryRun) {
+          messages.push(`[dry-run] launchctl bootout gui/${uid}/${label}`)
+          messages.push(`[dry-run] rm ${plist}`)
+        } else {
+          try {
+            execFileSync('launchctl', ['bootout', `gui/${uid}/${label}`], { encoding: 'utf8', windowsHide: true })
+          } catch {
+            try { execFileSync('launchctl', ['unload', '-w', plist], { encoding: 'utf8', windowsHide: true }) } catch { /* not loaded */ }
+          }
+          rmSync(plist, { force: true })
+          messages.push('auto-start removed (launchd LaunchAgent)')
+        }
+      }
+      return { ok: true, messages }
+    }
+
+    return { ok: false, messages: [`auto-start is not implemented for ${platform} — use pm2 or your platform's supervisor`] }
   } catch (error) {
     return { ok: false, messages: [`${(error as Error).message}`] }
   }
