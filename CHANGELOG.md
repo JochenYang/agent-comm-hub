@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.13 (2026-08-14)
+
+- SKILL's plain-language workflow section is now English (it was briefly
+  added in Chinese): task delegation with wait-vs-not-wait variants and
+  multi-agent real-time discussion, each paired with the exact bridge tool
+  names.
+
+## 0.1.12 (2026-08-14)
+
+- **`update` runs npm in a throwaway child process** (`node -e`, no files on
+  disk): on Windows an inline install can race the CLI's own files — npm
+  reifies by moving the package directory out from under the still-running
+  process (observed: npm exits 0 but files stay on the old version). The
+  child lives outside the package dir, so the directory swap is uncontended;
+  the parent waits for it and reports before/after versions.
+
 ## 0.1.11 (2026-08-14)
 
 - **Fix `update` missing freshly published versions**: npm caches registry
@@ -9,7 +25,7 @@
 
 ## 0.1.10 (2026-08-14)
 
-- **SKILL gains a plain-language "典型工作流" section**: task delegation
+- **SKILL gains a plain-language "Common workflows" section**: task delegation
   (accept → develop → deliver → review, with wait-vs-not-wait variants) and
   multi-agent real-time discussion (keep long-polling until the talk ends).
   Each scenario pairs colloquial instructions with the exact bridge tool
