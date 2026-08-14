@@ -9,7 +9,7 @@
  *  - source priority: config > path > npm
  */
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadRegistry, validateRegistry, discover, expandHome, expandConfigFile } from './discover-entry.mjs'
@@ -67,8 +67,14 @@ try {
   check('non-wildcard path expands once', expandConfigFile('~/.minimax/mcp.json', home).length === 1)
 
   console.log('== PATH probing ==')
+  // Fake executables need the x bit: Windows accessSync(X_OK) only checks
+  // existence, but POSIX really checks the mode — writeFileSync defaults to
+  // 0644, which would fail the probe on linux/macos CI.
+  const makeExec = file => chmodSync(file, 0o755)
   writeFileSync(join(bin, 'opencode'), '#!/bin/sh\n')
+  makeExec(join(bin, 'opencode'))
   writeFileSync(join(bin, 'codex'), '#!/bin/sh\n')
+  makeExec(join(bin, 'codex'))
   const pathEnv = join(home, 'fake-bin') // win32 semantics: ';' separator, drive-colons harmless
   // POSIX semantics are exercised from inside `home` with a RELATIVE PATH:
   // on Windows a drive-letter path would be split at the ':' separator, which
@@ -84,6 +90,7 @@ try {
   check('win32 PATH probe also finds opencode (plain name)', win.find(a => a.id === 'opencode')?.present === true)
   // PATHEXT: a .CMD-only command resolves on win32 but not on posix.
   writeFileSync(join(bin, 'kimi.CMD'), '@echo off\r\n')
+  makeExec(join(bin, 'kimi.CMD'))
   const winExt = discover(registry, { homeDir: home, pathEnv, pathext: '.CMD', platform: 'win32', noNpm: true })
   check('win32 PATHEXT resolves kimi.CMD', winExt.find(a => a.id === 'kimi-code')?.present === true)
   process.chdir(home)
