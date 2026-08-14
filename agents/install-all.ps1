@@ -11,6 +11,7 @@ Covered agents (auto-skipped when not installed):
   - Kimi Code              ~/.kimi-code/mcp.json
   - Gemini CLI             ~/.gemini/settings.json
   - Codex                  ~/.codex/config.toml (appends the section if missing)
+  - zcode                  ~/.zcode/cli/config.json (mcp.servers)
 
 Not covered (manual, documented in agents/README.md):
   - Claude Code  -> project-level .mcp.json (copy agents/claude-code/.mcp.json)
@@ -69,11 +70,13 @@ function Merge-JsonServer($label, $file, $sectionName, $entry) {
   try {
     $doc = Read-Json $file
     if ($null -eq $doc) { Write-Step "  ${label}: empty config (skipped)"; return }
-    $servers = $doc.$sectionName
-    if ($null -eq $servers) {
-      # Incremental: create only the missing section, keep the rest untouched.
-      $servers = [ordered]@{}
-      $doc | Add-Member -NotePropertyName $sectionName -NotePropertyValue $servers -Force
+    # Resolve (creating when missing) a dotted section path like 'mcp.servers'.
+    $servers = $doc
+    foreach ($part in $sectionName.Split('.')) {
+      if ($null -eq $servers.$part) {
+        $servers | Add-Member -NotePropertyName $part -NotePropertyValue ([ordered]@{}) -Force
+      }
+      $servers = $servers.$part
     }
     $changed = $false
     if ($servers.PSObject.Properties.Name -contains $ServerName) {
@@ -161,6 +164,12 @@ if (Test-Path $codexFile) {
   Write-Step "  codex: not installed ($codexFile missing, skipped)"
 }
 
+# ---------- zcode: mcp.servers in ~/.zcode/cli/config.json
+$zcodeEntry = [ordered]@{ enabled = $true; type = 'remote'; url = $Url }
+Write-Step '- zcode'
+Merge-JsonServer 'zcode' (Join-Path $userHome '.zcode\cli\config.json') 'mcp.servers' $zcodeEntry
+Sync-Skill 'zcode' (Join-Path $userHome ".zcode\skills\$ServerName")
+
 # ---------- skills: cross-agent standard location + each agent's private dir
 $skillDirs = @(
   (Join-Path $userHome ".agents\skills\$ServerName"),   # cross-agent standard
@@ -169,6 +178,7 @@ $skillDirs = @(
   (Join-Path $userHome ".kimi-code\skills\$ServerName"),
   (Join-Path $userHome ".gemini\skills\$ServerName"),
   (Join-Path $userHome ".codex\skills\$ServerName"),
+  (Join-Path $userHome ".zcode\skills\$ServerName"),
   (Join-Path $userHome ".claude\skills\$ServerName")    # config is manual; skill still useful
 )
 foreach ($dir in $skillDirs) { Sync-Skill 'skill' $dir }

@@ -90,7 +90,7 @@ agent-comm-hub setup
 ```
 
 `setup` 会把 `agent-hub` 的 MCP 条目**增量合并**进每个已安装 agent 的配置
-（mcode / opencode / kimi-code / gemini / codex），并把英文 SKILL 装到
+（mcode / opencode / kimi-code / gemini / codex / zcode），并把英文 SKILL 装到
 `~/.agents/skills/`（跨 agent 标准位置）+ 各 agent 私有技能目录。只动
 `agent-hub` 这一个键、每个文件先备份、幂等可重跑。Claude Code 与 DSH 手动（见下）。
 
@@ -115,6 +115,7 @@ curl -X POST http://127.0.0.1:18764/mcp \
 | Kimi Code | `~/.kimi-code/mcp.json` | [`agents/kimi-code/mcp-entry.json`](agents/kimi-code/mcp-entry.json) | `~/.kimi-code/skills/agent-comm-hub/SKILL.md` |
 | Gemini CLI | `~/.gemini/settings.json` | [`agents/gemini-cli/settings.json`](agents/gemini-cli/settings.json) | `~/.gemini/skills/agent-comm-hub/SKILL.md` |
 | Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-comm-hub/SKILL.md` |
+| zcode | `~/.zcode/cli/config.json`（`mcp.servers`） | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
 | Claude Code | 项目根 `.mcp.json`（手动；**绝不碰 `~/.claude.json`**——含凭据） | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-comm-hub/SKILL.md` |
 | DeepSeek Harness (DSH) | profile `cordis.patch.yml`（手动） | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 

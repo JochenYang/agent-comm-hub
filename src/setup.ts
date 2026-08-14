@@ -8,7 +8,7 @@
  *  - UTF-8 without BOM; idempotent (re-running with same url is a no-op)
  *  - missing agent configs are skipped, never created from scratch
  *
- * Covered: MiniMax Code, opencode, Kimi Code, Gemini CLI, Codex (TOML append).
+ * Covered: MiniMax Code, opencode, Kimi Code, Gemini CLI, Codex, zcode.
  * Skills go to the cross-agent `~/.agents/skills/` plus each agent's private
  * skills dir. Claude Code (project `.mcp.json`) and DSH (cordis.patch.yml)
  * stay manual — see agents/README.md.
@@ -74,6 +74,20 @@ async function backup(file: string): Promise<string> {
   return bak
 }
 
+/** Resolve (creating when missing) a dotted section path like `mcp.servers`. */
+function resolveSection(doc: Record<string, unknown>, section: string): Record<string, unknown> {
+  let node = doc
+  for (const part of section.split('.')) {
+    let next = node[part]
+    if (next === undefined || typeof next !== 'object' || Array.isArray(next)) {
+      next = {}
+      node[part] = next
+    }
+    node = next as Record<string, unknown>
+  }
+  return node
+}
+
 /** Merge/remove one server key inside a JSON section; returns a status word. */
 async function mergeJsonServer(
   file: string,
@@ -84,11 +98,7 @@ async function mergeJsonServer(
   if (!existsSync(file)) return 'skipped'
   const doc = (await readJson(file)) as Record<string, unknown> | null
   if (doc === null) return 'skipped'
-  let servers = doc[section] as Record<string, unknown> | undefined
-  if (servers === undefined || typeof servers !== 'object' || Array.isArray(servers)) {
-    servers = {}
-    doc[section] = servers
-  }
+  const servers = resolveSection(doc, section)
   const has = Object.prototype.hasOwnProperty.call(servers, opts.serverName)
   if (opts.remove) {
     if (!has) return 'absent'
@@ -179,6 +189,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
     { label: 'opencode', file: join(home, '.config', 'opencode', 'opencode.json'), section: 'mcp', entry: { type: 'remote', url, enabled: true } },
     { label: 'kimi-code', file: join(home, '.kimi-code', 'mcp.json'), section: 'mcpServers', entry: { transport: 'http', url, startupTimeoutMs: 30000, toolTimeoutMs: 120000 } },
     { label: 'gemini-cli', file: join(home, '.gemini', 'settings.json'), section: 'mcpServers', entry: { type: 'http', url } },
+    { label: 'zcode', file: join(home, '.zcode', 'cli', 'config.json'), section: 'mcp.servers', entry: { type: 'remote', url, enabled: true } },
   ]
 
   for (const target of jsonTargets) {
@@ -208,6 +219,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
     join(home, '.kimi-code', 'skills', serverName),
     join(home, '.gemini', 'skills', serverName),
     join(home, '.codex', 'skills', serverName),
+    join(home, '.zcode', 'skills', serverName),
     join(home, '.claude', 'skills', serverName),          // config is manual; skill still useful
   ]
   for (const dir of skillDirs) {

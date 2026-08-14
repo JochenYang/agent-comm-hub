@@ -16,7 +16,7 @@ powershell -ExecutionPolicy Bypass -File install-all.ps1
 `install-all.ps1` 会把 `agent-hub` 条目**增量合并**进每个已安装 agent 的 MCP 配置
 （只动 `agent-hub` 这个键，其余内容原样保留；每个文件先备份、幂等可重跑），并同步
 英文 SKILL 到各 agent 的技能目录。覆盖：mcode / opencode / kimi-code / Gemini CLI /
-Codex（TOML 追加）。Claude Code 和 DSH 需手动（见下表）。
+Codex（TOML 追加）/ zcode（`mcp.servers`）。Claude Code 和 DSH 需手动（见下表）。
 
 接入即自动上线（MCP 握手时用客户端名注册，无需手动 register）；想要可读的 peerId
 可以让 agent 调一次 `bridge_register(peerId)`。
@@ -28,6 +28,7 @@ Codex（TOML 追加）。Claude Code 和 DSH 需手动（见下表）。
 | Kimi Code | `~/.kimi-code/mcp.json` | `kimi-code/mcp-entry.json`（`transport: "http"`，url 自动推断为 http） | `~/.kimi-code/skills/agent-comm-hub/SKILL.md` |
 | Gemini CLI | `~/.gemini/settings.json` | `gemini-cli/settings.json` | `~/.gemini/skills/agent-comm-hub/SKILL.md` |
 | Codex | `~/.codex/config.toml` | `codex/config.toml` | `~/.codex/skills/agent-comm-hub/SKILL.md` |
+| zcode | `~/.zcode/cli/config.json` | `zcode/config.json` | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
 | Claude Code | 项目根 `.mcp.json`（手动复制；**不碰 `~/.claude.json`**——含凭据且无法安全往返） | `claude-code/.mcp.json` | `~/.claude/skills/agent-comm-hub/SKILL.md` |
 | DeepSeek Harness (DSH) | profile `cordis.patch.yml`（手动合并） | `dsh/cordis.patch.yml`（用 `@deepseek-ai/dsh-mcp-client`，工具名为 `mcp__agent-hub__bridge_*`） | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 

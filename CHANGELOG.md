@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8 (2026-08-14)
+
+- **zcode support**: `setup` / `install-all.ps1` now merge the `agent-hub`
+  entry into `~/.zcode/cli/config.json` under the nested `mcp.servers` key
+  (`type: "remote"`), and install the skill to `~/.zcode/skills/`.
+- JSON merge now resolves dotted section paths (`mcp.servers`), so nested
+  config layouts are supported alongside flat `mcpServers` sections.
+- New template `agents/zcode/config.json`; README (EN + 中文) and
+  `agents/README.md` coverage tables updated.
+
 ## 0.1.7 (2026-08-14)
 
 - **Fix `agent-comm-hub status` crash on Windows**: the probe used `fetch`

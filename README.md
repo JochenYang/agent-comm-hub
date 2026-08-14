@@ -93,11 +93,11 @@ agent-comm-hub setup
 ```
 
 `setup` incrementally merges the `agent-hub` MCP entry into every installed
-agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex) and installs
-the English skill into `~/.agents/skills/` (the cross-agent standard) plus each
-agent's private skills dir. Only the `agent-hub` key is touched, every file is
-backed up first, and re-running is a no-op. Claude Code and DSH stay manual
-(see below).
+agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex, zcode) and
+installs the English skill into `~/.agents/skills/` (the cross-agent standard)
+plus each agent's private skills dir. Only the `agent-hub` key is touched,
+every file is backed up first, and re-running is a no-op. Claude Code and DSH
+stay manual (see below).
 
 **Registration is automatic**: once an agent session starts, the MCP handshake
 registers it with the hub (client name becomes the peer id) — no manual step.
@@ -117,9 +117,9 @@ Each agent gets **one MCP server entry** pointing at `http://127.0.0.1:18764/mcp
 
 **One-shot incremental sync** (recommended): `agents/install-all.ps1` merges the
 `agent-hub` entry into every installed agent's MCP config (mcode, opencode,
-Kimi Code, Gemini CLI, Codex) and installs the skill — it only touches the
-`agent-hub` key, backs up each file, and is idempotent. Claude Code and DSH are
-manual (below).
+Kimi Code, Gemini CLI, Codex, zcode) and installs the skill — it only touches
+the `agent-hub` key, backs up each file, and is idempotent. Claude Code and DSH
+are manual (below).
 
 | Agent | Config file | Template | Skill location |
 |---|---|---|---|
@@ -128,6 +128,7 @@ manual (below).
 | Kimi Code | `~/.kimi-code/mcp.json` | [`agents/kimi-code/mcp-entry.json`](agents/kimi-code/mcp-entry.json) | `~/.kimi-code/skills/agent-comm-hub/SKILL.md` |
 | Gemini CLI | `~/.gemini/settings.json` | [`agents/gemini-cli/settings.json`](agents/gemini-cli/settings.json) | `~/.gemini/skills/agent-comm-hub/SKILL.md` |
 | Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-comm-hub/SKILL.md` |
+| zcode | `~/.zcode/cli/config.json` (`mcp.servers`) | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
 | Claude Code | project `.mcp.json` (manual; `~/.claude.json` is never touched) | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-comm-hub/SKILL.md` |
 | DeepSeek Harness (DSH) | profile `cordis.patch.yml` (manual) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 

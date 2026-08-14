@@ -34,11 +34,13 @@ mkdirSync(join(home, '.gemini'), { recursive: true })
 writeFileSync(join(home, '.gemini', 'settings.json'), JSON.stringify({ general: { key: 1 } }, null, 2)) // no mcpServers yet
 mkdirSync(join(home, '.codex'), { recursive: true })
 writeFileSync(join(home, '.codex', 'config.toml'), 'model = "x"\n')
+mkdirSync(join(home, '.zcode', 'cli'), { recursive: true })
+writeFileSync(join(home, '.zcode', 'cli', 'config.json'), JSON.stringify({ mcp: { servers: { context7: { enabled: true, type: 'remote', url: 'https://mcp.exa.ai/mcp' } } }, plugins: { enabledPlugins: { guardrails: true } } }, null, 2))
 
 const quiet = { log: () => {} }
 
-const countBaks = () => ['mcp.json', 'opencode.json', 'settings.json', 'config.toml'].reduce((n, name) => {
-  const dirs = [join(home, '.minimax'), join(home, '.minimax', 'mcp'), join(home, '.config', 'opencode'), join(home, '.gemini'), join(home, '.codex')]
+const countBaks = () => ['mcp.json', 'opencode.json', 'settings.json', 'config.toml', 'config.json'].reduce((n, name) => {
+  const dirs = [join(home, '.minimax'), join(home, '.minimax', 'mcp'), join(home, '.config', 'opencode'), join(home, '.gemini'), join(home, '.codex'), join(home, '.zcode', 'cli')]
   return n + dirs.filter(d => existsSync(d)).reduce((m, d) => m + readdirSync(d).filter(f => f.startsWith(name) && f.includes('.bak-')).length, 0)
 }, 0)
 
@@ -64,8 +66,12 @@ try {
   const cx = toml(join(home, '.codex', 'config.toml'))
   check('codex original line preserved', cx.startsWith('model = "x"'))
   check('codex section appended', cx.includes('[mcp_servers.agent-hub]') && cx.includes('url = "http://127.0.0.1:18764/mcp"'))
+  const zc = read(join(home, '.zcode', 'cli', 'config.json'))
+  check('zcode agent-hub added (nested mcp.servers)', zc.mcp.servers['agent-hub']?.type === 'remote' && zc.mcp.servers['agent-hub']?.url === 'http://127.0.0.1:18764/mcp')
+  check('zcode context7 preserved', zc.mcp.servers.context7?.url === 'https://mcp.exa.ai/mcp')
+  check('zcode unrelated keys preserved', zc.plugins?.enabledPlugins?.guardrails === true)
   check('cross-agent skill installed (~/.agents/skills)', existsSync(join(home, '.agents', 'skills', 'agent-hub', 'SKILL.md')))
-  check('private skills installed', existsSync(join(home, '.minimax', 'skills', 'agent-hub', 'SKILL.md')) && existsSync(join(home, '.kimi-code', 'skills', 'agent-hub', 'SKILL.md')))
+  check('private skills installed', existsSync(join(home, '.minimax', 'skills', 'agent-hub', 'SKILL.md')) && existsSync(join(home, '.kimi-code', 'skills', 'agent-hub', 'SKILL.md')) && existsSync(join(home, '.zcode', 'skills', 'agent-hub', 'SKILL.md')))
   const baksAfterInstall = countBaks()
   check('backups created for changed files', baksAfterInstall >= 5, `got ${baksAfterInstall}`)
 
@@ -79,7 +85,8 @@ try {
   check('mcode entry removed, dsh-bridge kept', !('agent-hub' in read(join(home, '.minimax', 'mcp.json')).mcpServers) && !!read(join(home, '.minimax', 'mcp.json')).mcpServers['dsh-bridge'])
   check('opencode entry removed, other keys kept', !('agent-hub' in read(join(home, '.config', 'opencode', 'opencode.json')).mcp) && read(join(home, '.config', 'opencode', 'opencode.json')).other === 'keep-me')
   check('codex section removed, original kept', toml(join(home, '.codex', 'config.toml')).trim() === 'model = "x"')
-  check('skills dirs removed', !existsSync(join(home, '.agents', 'skills', 'agent-hub')) && !existsSync(join(home, '.minimax', 'skills', 'agent-hub')))
+  check('zcode entry removed, others kept', !('agent-hub' in read(join(home, '.zcode', 'cli', 'config.json')).mcp.servers) && !!read(join(home, '.zcode', 'cli', 'config.json')).mcp.servers.context7)
+  check('skills dirs removed', !existsSync(join(home, '.agents', 'skills', 'agent-hub')) && !existsSync(join(home, '.minimax', 'skills', 'agent-hub')) && !existsSync(join(home, '.zcode', 'skills', 'agent-hub')))
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1
