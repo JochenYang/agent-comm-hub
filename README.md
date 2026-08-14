@@ -48,8 +48,6 @@ Zero runtime dependencies: the MCP streamable-http server is hand-rolled over `n
 
 ## Quickstart
 
-> **Not published yet** — until `npm publish` happens, run the hub from the repo: `pnpm install && pnpm run build && node lib/cli.js`. Everything below assumes the package is on the npm registry.
-
 ### 1. Install the hub
 
 ```bash

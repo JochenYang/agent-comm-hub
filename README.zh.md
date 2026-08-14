@@ -48,8 +48,6 @@
 
 ## 快速开始
 
-> **尚未发布** —— 在 `npm publish` 之前，从仓库运行：`pnpm install && pnpm run build && node lib/cli.js`。以下内容假设包已在 npm registry 上。
-
 ### 1. 安装 hub
 
 ```bash
