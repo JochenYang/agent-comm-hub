@@ -5,3 +5,4 @@ lib/
 test/entry.mjs
 test/setup-entry.mjs
 test/ops-entry.mjs
+test/herdr-entry.mjs

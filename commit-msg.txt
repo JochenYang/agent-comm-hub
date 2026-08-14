@@ -1,0 +1,16 @@
+feat(setup): auto-configure DSH — install the hub MCP client into profiles
+
+`agent-comm-hub setup` now discovers DSH (~/.dsh/profiles/*/cordis.patch.yml)
+and inserts the @deepseek-ai/dsh-mcp-client plugin row pointing at the hub:
+installing the hub + running setup is all a DSH user needs for the bridge_*
+tools to appear (after a dsh restart). Same contract as the other targets:
+only the marked block is touched, backups first, idempotent, url changes
+replace the block in place, --remove undoes. Skill installs to
+~/.dsh/skills/agent-comm-hub/. DSH is no longer a manual target.
+
+Block edits are line-scoped now: replacing/removing the block when it sits
+directly after another entry (no blank line) used to glue the neighbor's
+last line to the next entry — fixed and covered by tests.
+
+setup suite: 32 checks (110 total). Live-verified on the real DSH profile:
+install → idempotent → remove → url change → reinstall, patch stays valid.

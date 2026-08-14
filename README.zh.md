@@ -40,10 +40,11 @@
 
 ## 亮点
 
-- **任意 agent，一份配置**：所有客户端指向同一个 `streamable-http` URL，无需两两接线
+- **任意 agent,一份配置**：所有客户端指向同一个 `streamable-http` URL，无需两两接线
 - **可靠身份**：消息的 `from` 由 hub 从会话绑定注入，客户端无法伪造；重名被拒；MCP 握手即自动注册（客户端名 = peer id），无需手动步骤
 - **轮询即实时**：`bridge_wait` 长轮询（默认 30s，服务端上限 60s）；离线 agent 的消息排队等它
 - **结构化会话**：`chat` / `task` / `notice` / `ack` 四类消息；回执自动路由回原发送者；`to: "all"` 广播
+- **herdr 硬控制**（可选）：装了 [herdr](https://herdr.dev) 终端运行时后，`bridge_agent_*` 工具能直接往对方终端打字——斜杠命令真实执行、等待基于真实 agent 状态（idle/working/blocked/done）、可读终端输出
 - **零依赖单进程**：`npx agent-comm-hub` —— 无数据库、无守护、无外部服务
 
 ## 快速开始
@@ -168,6 +169,34 @@ agent-comm-hub service uninstall
 | `bridge_peers()` | 谁在线 |
 | `bridge_history(peer?, limit?)` | 最近往来消息（重连后恢复上下文） |
 
+### herdr 控制工具（可选）
+
+装了 [herdr](https://herdr.dev) 终端运行时后，hub 还会暴露一组**控制工具**，直接往真实 agent 终端打字——与 `bridge_chat`（信箱消息，对方模型可能不理）不同，这里的 prompt 是物理输入：斜杠命令（`/compact`、`/model`、`/clear`）由对方 TUI 真实执行，等待基于 herdr 的真实 agent 状态（idle/working/blocked/done），而不是屏幕活动。
+
+| 工具 | 作用 |
+|---|---|
+| `bridge_agent_list()` | herdr 检测到的 agent pane（paneId、类型、状态、cwd、是否可输入） |
+| `bridge_agent_status(target)` | 单个 pane 的实时状态 |
+| `bridge_agent_prompt(target, text, wait?, until?, timeoutMs?)` | 往对方输入行提交文本/斜杠命令；`wait` 时阻塞到它安定 |
+| `bridge_agent_wait(target, until?, timeoutMs?)` | 等对方进入某状态（默认 idle/done/blocked） |
+| `bridge_agent_read(target, lines?, source?)` | 读 pane 最近终端输出（没接 hub 的 agent 的回复） |
+| `bridge_agent_keys(target, keys)` | 原始按键（Enter、esc、ctrl-c、方向键…）处理弹窗或打断 |
+
+### herdr pane 工具（驱动任意 pane，无需 agent 识别）
+
+`bridge_agent_*` 要求 herdr **认识**这个 agent（内置检测清单：claude/codex/opencode/kimi…）。对 herdr 不认识的 agent（如 MiniMax Code），用 pane 工具——通过 herdr 本地 socket 直接物理输入、读取输出：
+
+| 工具 | 作用 |
+|---|---|
+| `bridge_pane_list()` | 所有 pane（id、标题、agent 状态） |
+| `bridge_pane_send(target, text, enter?)` | 往 pane 打字（斜杠命令真实执行；默认 Enter 提交） |
+| `bridge_pane_keys(target, keys)` | 任意 pane 原始按键 |
+| `bridge_pane_read(target, lines?, source?)` | 读 pane 最近输出 |
+
+已真机验证：通过 hub 端到端驱动 MiniMax Code 会话——`bridge_pane_send` 注入 prompt、`bridge_pane_read` 取回回复，对方零配置。
+
+控制工具带权限门控：`herdrControlPeers` 限定谁能用（默认 `'all'`，与 hub 仅本机的信任模型一致）。这是**硬控制**——注入的 `/clear` 会清掉对方上下文。
+
 所有返回都是 lossless JSON（兼容 DSH 的严格工具注册表）。
 
 ## CLI 参考
@@ -189,6 +218,9 @@ agent-comm-hub service install|uninstall [options]   一键自启
 --default-wait-ms <n>     bridge_wait 默认预算（默认 30000）
 --connected-window-ms <n> 活跃窗口（默认 30000）
 --peer-idle-timeout-ms <n> 空闲 GC 超时；0 关闭（默认 600000）
+--herdr-bin <path>        bridge_agent_* 控制工具的 herdr CLI 二进制
+                          （默认 herdr，走 PATH）
+--herdr-timeout-ms <n>    单次 herdr 调用默认上限 ms（默认 30000）
 --url <u> / --server-name <n> / --remove / --dry-run   （setup/service/status 用）
 -h, --help / -V, --version
 ```

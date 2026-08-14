@@ -17,8 +17,8 @@ interface CliArgs {
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
-  const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms'])
-  const string = new Set(['--host', '--path', '--url', '--server-name'])
+  const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
+  const string = new Set(['--host', '--path', '--url', '--server-name', '--herdr-bin'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
@@ -73,6 +73,9 @@ Hub options:
   --default-wait-ms <n>    bridge_wait default budget (default 30000)
   --connected-window-ms <n>  Peer counts as active within this window (default 30000)
   --peer-idle-timeout-ms <n> Auto-unregister idle peers after this; 0 disables (default 600000)
+  --herdr-bin <path>         herdr CLI binary for bridge_agent_* control tools
+                             (default herdr, resolved via PATH)
+  --herdr-timeout-ms <n>     Default cap for one herdr call in ms (default 30000)
 
 Setup options:
   --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
@@ -190,6 +193,8 @@ try {
     defaultWaitMs: args['--default-wait-ms'] as number | undefined,
     connectedWindowMs: args['--connected-window-ms'] as number | undefined,
     peerIdleTimeoutMs: args['--peer-idle-timeout-ms'] as number | undefined,
+    herdrBin: args['--herdr-bin'] as string | undefined,
+    herdrTimeoutMs: args['--herdr-timeout-ms'] as number | undefined,
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

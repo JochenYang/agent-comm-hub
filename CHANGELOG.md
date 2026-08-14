@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.6.0 (2026-08-14)
+
+- **DSH auto-config in `setup`**: `agent-comm-hub setup` now discovers DSH
+  (`~/.dsh/profiles/*/cordis.patch.yml`) and inserts the
+  `@deepseek-ai/dsh-mcp-client` plugin row pointing at the hub — installing
+  the hub and running setup is all it takes for DSH sessions to expose the
+  `bridge_*` tools. Same contract as the other targets: only the marked
+  block is touched, every edit is backed up, idempotent, url changes replace
+  the block in place, `--remove` undoes it. Skill installs to
+  `~/.dsh/skills/agent-comm-hub/` too. DSH is no longer a manual target.
+- Fixed the block-edit boundary logic (line-scoped now): replacing/removing
+  the DSH block when it sits directly after another entry (no blank line)
+  used to glue the neighbor's last line to the next entry. Covered by tests.
+- setup suite grows to 32 checks (dsh insert/url-change/remove incl. tight
+  block). Total suite: 110 checks.
+
+## 0.5.0 (2026-08-14)
+
+- **Smart fallback in the control tools**: every `bridge_agent_*` tool now
+  auto-detects whether herdr recognizes the target (`agent.get` probe) and
+  picks the best channel:
+  - recognized agents → herdr's advanced features (`agent.prompt` with
+    state-machine wait, `agent.wait` until idle/done/blocked, structured
+    status);
+  - unrecognized panes (e.g. MiniMax Code) → pane-level fallback
+    (`pane.send_input` + Enter, output-settling wait, pane-derived status).
+  Every result reports `via: "agent" | "pane"` so callers know the channel.
+  Live-verified on Windows: a MiniMax Code session (unrecognized) and a
+  Claude Code session (recognized) both driven through the hub — Claude Code
+  answered "一切正常,待命中" / "嗨,有什么可以帮你的?" via the agent
+  channel, MiniMax Code via the pane fallback (settled in ~3.1s by output
+  stability).
+- **`bridge_pane_wait`**: pane-level output-pattern wait (`pane.wait_for_output`,
+  substring or regex) — the waiting primitive for agents herdr does not
+  recognize; returns the matched pane output or `matched: null` on timeout.
+- **Read path fixed**: `herdr agent read --format text` prints RAW text (no
+  JSON envelope), so `readSmart` now reads via the socket `pane.read` for
+  both channels (structured, carries revision/truncated).
+- `HerdrCtl` gains `detectTarget` / `promptSmart` / `waitSmart` / `readSmart` /
+  `keysSmart` / `statusSmart` / `paneWaitForOutput`.
+- herdr control suite grows to 35 checks (smart fallback both channels,
+  pane wait match + timeout, status/read/keys fallbacks).
+
+## 0.4.0 (2026-08-14)
+
+- **pane-level control tools**: `bridge_pane_list`, `bridge_pane_send`,
+  `bridge_pane_keys`, `bridge_pane_read` drive ANY herdr pane through the
+  herdr local socket (`pane.list` / `pane.send_input` / `pane.send_keys` /
+  `pane.read`, newline-delimited JSON over a named pipe / unix socket).
+  Unlike the `bridge_agent_*` tools — which require herdr to RECOGNIZE the
+  agent (built-in manifest list) — the pane tools work for every pane,
+  including agents herdr does not know (e.g. MiniMax Code): physical input
+  lands in the target terminal as keystrokes, output is read back as text.
+  Verified live: DSH drove a running MiniMax Code session through the hub
+  (prompt injected via `bridge_pane_send`, reply collected via
+  `bridge_pane_read`).
+- `HerdrCtl` gains a socket transport (platform-derived path: Windows
+  `%APPDATA%\herdr\herdr.sock` with the `\\.\pipe\` prefix, else
+  `~/.config/herdr/herdr.sock`; overridable via `socketPath`, injectable via
+  `sendRequest` for tests).
+- New config: `herdrSocketPath` / `herdrSendRequest` (programmatic API only).
+  Control-tool permission gating (`herdrControlPeers`) covers the pane tools
+  too.
+- herdr control suite grows to 24 checks (pane list shape, send + Enter,
+  enter:false, keys, read, empty-input rejection).
+
+## 0.3.0 (2026-08-14)
+
+- **herdr control layer**: 6 new tools — `bridge_agent_list`,
+  `bridge_agent_status`, `bridge_agent_prompt`, `bridge_agent_wait`,
+  `bridge_agent_read`, `bridge_agent_keys` — drive agent panes owned by the
+  herdr terminal runtime (https://herdr.dev) through its CLI. Unlike
+  `bridge_chat` (a mailbox message the receiving model may ignore), a
+  `bridge_agent_prompt` is physical input to the target's terminal: slash
+  commands (`/compact`, `/model`, `/clear`) are executed by the target's TUI,
+  and `--wait`/`--until`/`--timeout` block on herdr's real agent state
+  (idle/working/blocked/done) instead of screen activity.
+- Adapter lives in `src/herdr-ctl.ts` (zero dependencies: `execFile` only,
+  args passed verbatim — no shell). CLI gains `--herdr-bin` and
+  `--herdr-timeout-ms`; programmatic `startHub()` accepts `herdrBin` /
+  `herdrBaseArgs` / `herdrTimeoutMs` / `herdrControlPeers`.
+- **Permission gating**: `herdrControlPeers` ('all' by default, or a peer id
+  list) restricts who may use the control tools — they type into real
+  terminals.
+- herdr CLI error envelopes (agent_not_found, agent_prompt_stalled) surface
+  as structured tool errors.
+- New test suite `test/herdr.mjs` (17 checks) driving a fake herdr CLI
+  fixture (`test/fixtures/fake-herdr.mjs`): results, argv passthrough,
+  error paths, permission gating, missing CLI. Suite total now 85.
+
 ## 0.2.0 (2026-08-14)
 
 - **Version numbering policy**: patch rolls over at 10 (`0.1.9 -> 0.2.0`).

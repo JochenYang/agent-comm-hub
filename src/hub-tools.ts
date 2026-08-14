@@ -7,6 +7,7 @@
 
 import type { AgentHub } from './hub.js'
 import type { McpTool, SessionRegistry } from './mcp-server.js'
+import { AGENT_STATUSES, type HerdrCtl } from './herdr-ctl.js'
 import { decodeContent, type AckContent, type BridgeMessage, BROADCAST, type TaskContent } from './protocol.js'
 
 /** Default wait budget when a client omits timeoutMs. */
@@ -70,8 +71,21 @@ export function livePeersFor(registry: SessionRegistry): Set<string> {
   return live
 }
 
+/** Options accepted by {@link hubTools}. */
+export interface HubToolsOptions {
+  defaultWaitMs?: number
+  waitTimeoutMs: number
+  /** herdr control adapter; when omitted the bridge_agent_* tools error out
+   * with "herdr control not enabled". */
+  herdr?: HerdrCtl
+  /** Peers allowed to use the control tools (bridge_agent_*). `'all'`
+   * (default) mirrors the hub's loopback-only trust model; pass a set of
+   * peer ids to restrict who may type into agent terminals. */
+  herdrControlPeers?: ReadonlySet<string> | 'all'
+}
+
 /** Build the bridge tool set bound to one hub instance. */
-export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { defaultWaitMs?: number; waitTimeoutMs: number }): McpTool[] {
+export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubToolsOptions): McpTool[] {
 
   const schema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
     type: 'object',
@@ -113,6 +127,31 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { de
 
   const presentWait = (result: { type: 'message'; message: BridgeMessage } | { type: 'timeout'; waitedMs: number }): unknown =>
     result.type === 'timeout' ? result : { type: 'message', message: present(result.message) }
+
+  /**
+   * Gate the control tools (bridge_agent_*): they type into real terminals,
+   * so they are stricter than message tools. `'all'` keeps the hub's
+   * loopback-only trust model; an explicit peer set narrows who may control.
+   */
+  const checkControl = (peer: string): HerdrCtl => {
+    const herdr = options.herdr
+    if (herdr === undefined) {
+      throw new Error('herdr control not enabled — start the hub with --herdr-bin or pass a herdrCtl to hubTools')
+    }
+    const control = options.herdrControlPeers ?? 'all'
+    if (control !== 'all' && !control.has(peer)) {
+      throw new Error(`peer '${peer}' is not allowed to use bridge_agent_* tools`)
+    }
+    return herdr
+  }
+
+  /** Normalize an `until` array argument into herdr statuses (invalid
+   * entries are dropped; absent/empty means herdr's default settle set). */
+  const asStatuses = (value: unknown): (typeof AGENT_STATUSES)[number][] | undefined => {
+    if (!Array.isArray(value)) return undefined
+    const statuses = value.map(String).filter(status => (AGENT_STATUSES as readonly string[]).includes(status))
+    return statuses.length > 0 ? (statuses as (typeof AGENT_STATUSES)[number][]) : undefined
+  }
 
   const wrap = (peerAware: boolean, handler: (args: Record<string, unknown>, peer: string, sessionId: string | undefined) => Promise<unknown>): McpTool['handler'] =>
     async (args, sessionId) => {
@@ -243,6 +282,201 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { de
       description: 'Recent messages involving you (newest first); pass `peer` to inspect another peer\'s conversation. Use to refresh context after a reconnect.',
       inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; default: yourself.'), limit: int('How many messages to return (default 20).') }),
       handler: wrap(true, async (args, peer) => ({ messages: hub.history(args.peer === undefined ? peer : String(args.peer), Math.min(args.limit === undefined ? 20 : Number(args.limit), 100)).map(present) })),
+    },
+    // ---- herdr control tools ------------------------------------------
+    // These type into real agent terminals via the herdr runtime. They are
+    // gated by checkControl and documented as physical input: unlike
+    // bridge_chat (a mailbox message the model may ignore), a prompt here is
+    // executed by the target's TUI — slash commands included.
+    {
+      name: 'bridge_agent_list',
+      description: 'List agent panes detected by the herdr terminal runtime (paneId, agent kind, lifecycle status, cwd, interactive-ready). Use a paneId as the `target` of the other bridge_agent_* tools. Control tools: they type into the target terminal — use with care.',
+      inputSchema: schema({}),
+      handler: wrap(true, async (_args, peer) => ({ agents: await checkControl(peer).list() })),
+    },
+    {
+      name: 'bridge_agent_status',
+      description: 'Live status of a target: for agents herdr recognizes, the full lifecycle state (idle/working/blocked/done) and agent kind; for unrecognized panes, a pane-derived summary with status "unknown" and `pane` populated. `target` is a herdr paneId from bridge_pane_list / bridge_agent_list.',
+      inputSchema: schema({ target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list or bridge_pane_list.') }, ['target']),
+      handler: wrap(true, async (args, peer) => {
+        const result = await checkControl(peer).statusSmart(String(args.target))
+        return { agent: result.agent, ...(result.pane !== null ? { pane: result.pane } : {}) }
+      }),
+    },
+    {
+      name: 'bridge_agent_prompt',
+      description: 'Submit text directly into the target terminal. For agents herdr recognizes, uses agent.prompt — a state-machine wait (`wait: true` blocks until idle/done/blocked, exact states via `until`). For unrecognized panes (e.g. MiniMax Code), falls back to pane-level input (`pane.send_input`) and waits for the pane output to settle. Slash commands are executed by the target\'s TUI either way. Returns `via: "agent" | "pane"` so callers know which channel was used.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
+          text: str('Text to submit (slash commands are executed, not sent as chat).'),
+          wait: { type: 'boolean', description: 'Wait for the agent to settle after submission (default false).' },
+          until: { type: 'array', items: { type: 'string', enum: [...AGENT_STATUSES] }, description: 'Exact states to wait for (agent channel; default: idle/done/blocked).' },
+          timeoutMs: int('Wait cap in ms (default 30000).'),
+        },
+        ['target', 'text'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const waiting = args.wait === true
+        const result = await ctl.promptSmart(String(args.target), String(args.text), {
+          wait: waiting,
+          until: asStatuses(args.until),
+          timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
+        })
+        return waiting ? { submitted: true, via: result.via, settled: result.settled } : { submitted: true, via: result.via }
+      }),
+    },
+    {
+      name: 'bridge_agent_wait',
+      description: 'Wait until the target settles. For agents herdr recognizes: state-machine wait (agent.wait — idle/working/blocked/done, `until` for exact states). For unrecognized panes: falls back to polling pane output until it stops changing. Returns `via: "agent" | "pane"`; a `settled: null` result means the timeout fired first.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
+          until: { type: 'array', items: { type: 'string', enum: [...AGENT_STATUSES] }, description: 'Exact states to wait for (agent channel; default: idle/done/blocked).' },
+          timeoutMs: int('Wait cap in ms (default 30000).'),
+        },
+        ['target'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const result = await checkControl(peer).waitSmart(String(args.target), {
+          until: asStatuses(args.until),
+          timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
+        })
+        return { via: result.via, settled: result.settled }
+      }),
+    },
+    {
+      name: 'bridge_agent_read',
+      description: 'Read the target\'s recent terminal output (plain text). Uses agent.read for recognized agents, pane.read otherwise. Use to collect the reply of an agent that is not connected to the hub (its output never enters a mailbox).',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
+          lines: int('How many lines to read (default: all recent).'),
+          source: { type: 'string', enum: ['visible', 'recent', 'recent-unwrapped', 'detection'], description: 'Terminal snapshot source (default recent).' },
+        },
+        ['target'],
+      ),
+      handler: wrap(true, async (args, peer) =>
+        checkControl(peer).readSmart(String(args.target), {
+          lines: args.lines === undefined ? undefined : Number(args.lines),
+          source: args.source === undefined ? undefined : (args.source as 'visible' | 'recent' | 'recent-unwrapped' | 'detection'),
+        }),
+      ),
+    },
+    {
+      name: 'bridge_agent_keys',
+      description: 'Send raw key presses to the target terminal — Enter, esc, ctrl-c, arrows, etc. Use to dismiss permission prompts or interrupt a stuck agent. Keys are passed verbatim.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
+          keys: { type: 'array', items: { type: 'string' }, description: 'Keys to send, e.g. ["Enter"], ["esc"], ["ctrl-c", "Enter"].' },
+        },
+        ['target', 'keys'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const keys = Array.isArray(args.keys) ? args.keys.map(String) : []
+        if (keys.length === 0) throw new Error('keys: at least one key is required')
+        await ctl.keysSmart(String(args.target), keys)
+        return { ok: true, sent: keys }
+      }),
+    },
+    // ---- pane-level control tools (socket API) -----------------------
+    // Unlike the bridge_agent_* tools (which require herdr to RECOGNIZE the
+    // agent), these drive any pane through the herdr local socket: physical
+    // input and output for agents herdr does not know (e.g. MiniMax Code).
+    {
+      name: 'bridge_pane_list',
+      description: 'List every herdr pane (ids, titles, agent status, cwd) via the herdr socket — including panes running agents herdr does not recognize. Use a paneId as `target` of bridge_pane_send / bridge_pane_keys / bridge_pane_read. Control tools: they type into real terminals — use with care.',
+      inputSchema: schema({}),
+      handler: wrap(true, async (_args, peer) => ({ panes: await checkControl(peer).paneList() })),
+    },
+    {
+      name: 'bridge_pane_send',
+      description: 'Type text into a herdr pane\'s input line (physical keystrokes via the herdr socket; works for ANY pane, no agent detection needed). This is how you drive an agent herdr does not recognize: the text lands in the target\'s terminal as if typed. Slash commands are executed by the target\'s TUI. With enter: true (default), the text is submitted with Enter.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          text: str('Text to type into the pane (slash commands are executed, not sent as chat).'),
+          enter: { type: 'boolean', description: 'Submit with Enter after typing (default true).' },
+        },
+        ['target', 'text'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const paneId = String(args.target)
+        const text = String(args.text)
+        await ctl.paneSendText(paneId, text)
+        if (args.enter !== false) await ctl.paneSendKeys(paneId, ['Enter'])
+        return { ok: true, target: paneId, sent: text }
+      }),
+    },
+    {
+      name: 'bridge_pane_keys',
+      description: 'Send raw key presses to any herdr pane (Enter, esc, ctrl-c, arrows...). Use to dismiss permission prompts or interrupt a stuck program in a pane herdr does not recognize as an agent.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          keys: { type: 'array', items: { type: 'string' }, description: 'Keys to send, e.g. ["Enter"], ["esc"], ["ctrl-c"].' },
+        },
+        ['target', 'keys'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const keys = Array.isArray(args.keys) ? args.keys.map(String) : []
+        if (keys.length === 0) throw new Error('keys: at least one key is required')
+        await ctl.paneSendKeys(String(args.target), keys)
+        return { ok: true, sent: keys }
+      }),
+    },
+    {
+      name: 'bridge_pane_read',
+      description: 'Read a herdr pane\'s recent terminal output (plain text, ANSI stripped). Use to collect the reply of an agent that is not connected to the hub or not recognized by herdr.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          lines: int('How many lines to read (default: all recent).'),
+          source: { type: 'string', enum: ['visible', 'recent', 'recent-unwrapped', 'detection'], description: 'Terminal snapshot source (default recent).' },
+        },
+        ['target'],
+      ),
+      handler: wrap(true, async (args, peer) =>
+        checkControl(peer).paneRead(String(args.target), {
+          lines: args.lines === undefined ? undefined : Number(args.lines),
+          source: args.source === undefined ? undefined : (args.source as 'visible' | 'recent' | 'recent-unwrapped' | 'detection'),
+        }),
+      ),
+    },
+    {
+      name: 'bridge_pane_wait',
+      description: 'Wait until a herdr pane\'s output matches a pattern (substring or regex) or the budget elapses — the pane-level counterpart of bridge_agent_wait for agents herdr does not recognize. Returns the matched pane output, or `matched: null` on timeout.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          match: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['substring', 'regex'], description: 'Match kind (default substring).' },
+              value: { type: 'string', description: 'Text or regex to match in the pane output.' },
+            },
+            required: ['value'],
+            description: 'Output pattern to wait for.',
+          },
+          timeoutMs: int('Wait cap in ms (default 30000).'),
+        },
+        ['target', 'match'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const match = (args.match ?? {}) as { type?: string; value?: unknown }
+        if (typeof match.value !== 'string' || match.value === '') throw new Error('match.value: a non-empty string is required')
+        const type = match.type === 'regex' ? 'regex' : 'substring'
+        const read = await ctl.paneWaitForOutput(String(args.target), { type, value: match.value }, {
+          timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
+        })
+        return read === null ? { matched: null } : { matched: read }
+      }),
     },
   ]
 }

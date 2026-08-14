@@ -44,6 +44,7 @@ Zero runtime dependencies: the MCP streamable-http server is hand-rolled over `n
 - **Reliable identity**: the sender of every message is derived from the connection's session binding, never caller-supplied — peers cannot impersonate each other; duplicate ids are rejected. Connecting the MCP auto-registers your client name — no manual setup.
 - **Real-time by polling**: `bridge_wait` long-polls (default 30 s, server ceiling 60 s); messages queue for offline peers.
 - **Structured conversations**: `chat` / `task` / `notice` / `ack` message kinds, acks auto-routed back to the original sender, `to: "all"` broadcast.
+- **Hard control via herdr** (optional): when the [herdr](https://herdr.dev) terminal runtime is installed, `bridge_agent_*` tools type into real agent terminals — slash commands execute, waits track real agent state (idle/working/blocked/done), terminal output is readable.
 - **Zero dependencies, one process**: `npx agent-comm-hub` — no database, no daemon, no external services.
 
 ## Quickstart
@@ -100,11 +101,11 @@ agent-comm-hub setup
 ```
 
 `setup` incrementally merges the `agent-hub` MCP entry into every installed
-agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex, zcode) and
-installs the English skill into `~/.agents/skills/` (the cross-agent standard)
-plus each agent's private skills dir. Only the `agent-hub` key is touched,
-every file is backed up first, and re-running is a no-op. Claude Code and DSH
-stay manual (see below).
+agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex, zcode, DSH)
+and installs the English skill into `~/.agents/skills/` (the cross-agent
+standard) plus each agent's private skills dir. Only the `agent-hub` key is
+touched, every file is backed up first, and re-running is a no-op. Claude Code
+stays manual (see below).
 
 **Registration is automatic**: once an agent session starts, the MCP handshake
 registers it with the hub (client name becomes the peer id) — no manual step.
@@ -124,9 +125,9 @@ Each agent gets **one MCP server entry** pointing at `http://127.0.0.1:18764/mcp
 
 **One-shot incremental sync** (recommended): `agents/install-all.ps1` merges the
 `agent-hub` entry into every installed agent's MCP config (mcode, opencode,
-Kimi Code, Gemini CLI, Codex, zcode) and installs the skill — it only touches
-the `agent-hub` key, backs up each file, and is idempotent. Claude Code and DSH
-are manual (below).
+Kimi Code, Gemini CLI, Codex, zcode, DSH) and installs the skill — it only
+touches the `agent-hub` key, backs up each file, and is idempotent. Claude Code
+is manual (below).
 
 | Agent | Config file | Template | Skill location |
 |---|---|---|---|
@@ -137,7 +138,7 @@ are manual (below).
 | Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-comm-hub/SKILL.md` |
 | zcode | `~/.zcode/cli/config.json` (`mcp.servers`) | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
 | Claude Code | project `.mcp.json` (manual; `~/.claude.json` is never touched) | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-comm-hub/SKILL.md` |
-| DeepSeek Harness (DSH) | profile `cordis.patch.yml` (manual) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
+| DeepSeek Harness (DSH) | `~/.dsh/profiles/*/cordis.patch.yml` (auto by `setup`) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 
 > Streamable-http support varies by agent version; the templates use the fields each agent documents. If a client lacks HTTP MCP, wrap the endpoint with a stdio shim.
 
@@ -215,7 +216,10 @@ Merge into `~/.gemini/settings.json`:
 
 ### DeepSeek Harness (DSH)
 
-Merge `agents/dsh/cordis.patch.yml` into the profile patch layer; DSH's built-in `@deepseek-ai/dsh-mcp-client` connects and exposes the tools as `mcp__agent-hub__bridge_*`:
+Auto-configured by `agent-comm-hub setup`: it discovers
+`~/.dsh/profiles/*/cordis.patch.yml` and appends the `@deepseek-ai/dsh-mcp-client`
+row, so DSH sessions expose the tools as `mcp__agent-hub__bridge_*` after a dsh
+restart. Manual equivalent (or template for other profiles):
 
 ```yaml
 - insert:
@@ -242,6 +246,46 @@ Merge `agents/dsh/cordis.patch.yml` into the profile patch layer; DSH's built-in
 | `bridge_peers()` | Who is online |
 | `bridge_history(peer?, limit?)` | Recent messages (context refresh after reconnect) |
 
+### herdr control tools (optional)
+
+If the [herdr](https://herdr.dev) terminal runtime is installed, the hub also
+exposes **control tools** that type into real agent terminals — unlike
+`bridge_chat` (a mailbox message the receiving model may ignore), a prompt
+here is physical input: slash commands (`/compact`, `/model`, `/clear`) are
+executed by the target's TUI, and waits block on herdr's real agent state
+(idle/working/blocked/done), not screen activity.
+
+| Tool | Purpose |
+|---|---|
+| `bridge_agent_list()` | Agent panes herdr detects (paneId, kind, status, cwd, interactive-ready) |
+| `bridge_agent_status(target)` | Live state of one pane |
+| `bridge_agent_prompt(target, text, wait?, until?, timeoutMs?)` | Submit text / slash command into the target's input line; with `wait`, block until it settles |
+| `bridge_agent_wait(target, until?, timeoutMs?)` | Wait until the agent reaches a state (default idle/done/blocked) |
+| `bridge_agent_read(target, lines?, source?)` | Read the pane's recent terminal output (reply of an agent not on the hub) |
+| `bridge_agent_keys(target, keys)` | Raw key presses (Enter, esc, ctrl-c, arrows…) to dismiss prompts or interrupt |
+
+### herdr pane tools (drive ANY pane — no agent detection)
+
+`bridge_agent_*` requires herdr to **recognize** the agent (its built-in
+manifest list: claude/codex/opencode/kimi/…). For agents herdr does not know
+(e.g. MiniMax Code), the pane tools drive any pane through the herdr local
+socket — physical input, read output:
+
+| Tool | Purpose |
+|---|---|
+| `bridge_pane_list()` | Every pane (ids, titles, agent status) |
+| `bridge_pane_send(target, text, enter?)` | Type text into a pane (slash commands execute; Enter submits by default) |
+| `bridge_pane_keys(target, keys)` | Raw key presses to any pane |
+| `bridge_pane_read(target, lines?, source?)` | Read a pane's recent output |
+
+Verified live: a MiniMax Code session was driven end-to-end through the hub —
+prompt injected via `bridge_pane_send`, reply collected via
+`bridge_pane_read`, no agent-side configuration.
+
+Control tools are gated: `herdrControlPeers` restricts who may use them
+(default `'all'`, mirroring the hub's loopback-only trust model). They are
+hard control — an injected `/clear` clears the target's context.
+
 Every result is lossless JSON (compatible with DSH's strict tool registry).
 
 ## CLI reference
@@ -263,6 +307,9 @@ agent-comm-hub service install|uninstall [options]   one-shot auto-start
 --default-wait-ms <n>    bridge_wait default budget (default 30000)
 --connected-window-ms <n>  Peer counts as active within this window (default 30000)
 --peer-idle-timeout-ms <n> Auto-unregister idle peers after this; 0 disables (default 600000)
+--herdr-bin <path>       herdr CLI binary for bridge_agent_* control tools
+                         (default herdr, resolved via PATH)
+--herdr-timeout-ms <n>   Default cap for one herdr call in ms (default 30000)
 --url <u> / --server-name <n> / --remove / --dry-run   (setup/service/status)
 -h, --help               Show help
 -V, --version            Show version

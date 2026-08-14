@@ -1,6 +1,6 @@
 {
   "name": "agent-comm-hub",
-  "version": "0.2.0",
+  "version": "0.6.0",
   "description": "Generic multi-peer MCP hub: any MCP-capable agent (MiniMax Code, Claude Code, opencode, Codex, Gemini CLI, DSH, ...) connects to one local streamable-http endpoint and they chat, delegate tasks, and acknowledge in real time",
   "keywords": [
     "mcp",
@@ -36,9 +36,9 @@
   },
   "scripts": {
     "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=lib/cli.js && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=lib/index.js && esbuild src/setup.ts --bundle --platform=node --format=esm --outfile=lib/setup.js",
-    "build:test": "esbuild test/entry.ts --bundle --platform=node --format=esm --outfile=test/entry.mjs && esbuild test/setup-entry.ts --bundle --platform=node --format=esm --outfile=test/setup-entry.mjs && esbuild test/ops-entry.ts --bundle --platform=node --format=esm --outfile=test/ops-entry.mjs",
+    "build:test": "esbuild test/entry.ts --bundle --platform=node --format=esm --outfile=test/entry.mjs && esbuild test/setup-entry.ts --bundle --platform=node --format=esm --outfile=test/setup-entry.mjs && esbuild test/ops-entry.ts --bundle --platform=node --format=esm --outfile=test/ops-entry.mjs && esbuild test/herdr-entry.ts --bundle --platform=node --format=esm --outfile=test/herdr-entry.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm run build:test && node test/smoke.mjs && node test/setup.mjs && node test/ops.mjs",
+    "test": "pnpm run build:test && node test/smoke.mjs && node test/setup.mjs && node test/ops.mjs && node test/herdr.mjs",
     "pack": "pnpm run build && pnpm pack",
     "prepublishOnly": "pnpm run test && pnpm run build",
     "prepare": "pnpm run build"
