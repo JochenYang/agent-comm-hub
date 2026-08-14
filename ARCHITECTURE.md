@@ -100,14 +100,18 @@ test/               # multi-peer smoke suite (37) + herdr control suite (17)
 ## 6. Installing & syncing to agents
 
 - **Hub**: `npx agent-comm-hub` (or `npm i -g agent-comm-hub`).
-- **Agents**: run `agents/install-all.ps1` once. It **incrementally merges**
-  the `agent-hub` entry into each agent's own MCP config (mcode, opencode,
-  kimi-code, Gemini CLI; Codex via TOML append) and installs the English skill
-  into each agent's skills directory — it only touches the `agent-hub` key,
-  preserves everything else, backs up each file first, and is idempotent
-  (`-Remove` undoes it). Claude Code uses a project-level `.mcp.json`
-  (copy `agents/claude-code/.mcp.json`); DSH merges `agents/dsh/cordis.patch.yml`
-  manually. The npm package never rewrites agent configs by itself.
+- **Agents**: run `agent-comm-hub setup` (or `agents/install-all.ps1`) once.
+  Supported agents are declared in `agents/registry.json`; setup **discovers**
+  which are installed (PATH commands, config paths, npm global packages — pure
+  Node, no shell) and **incrementally merges** the `agent-hub` entry into each
+  one's MCP config (mcode, opencode, kimi-code, Gemini CLI, Codex via TOML
+  append, zcode via nested `mcp.servers`, DSH profiles via YAML insert,
+  claude-desktop on macOS) and installs the English skill into each agent's
+  skills directory — it only touches the `agent-hub` key, preserves everything
+  else, backs up each file first, and is idempotent (`--remove` undoes it).
+  Claude Code uses a project-level `.mcp.json` (copy
+  `agents/claude-code/.mcp.json`). The npm package never rewrites agent configs
+  by itself.
 
 ## 7. Design decisions worth sharing
 
@@ -120,6 +124,10 @@ test/               # multi-peer smoke suite (37) + herdr control suite (17)
 - **Identity is server-injected**: `from` cannot be forged; duplicates are
   rejected; explicit rename is one call.
 - **Offline-tolerant**: messages queue; nothing is lost while an agent sleeps.
+- **Agent support is data, not code**: `agents/registry.json` declares every
+  agent (config template + merge strategy + skill path + platform filter);
+  the discovery engine only probes existence and reads directory names —
+  it never executes anything it finds.
 
 ## 8. Relation to dsh-mcode-bridge
 
@@ -130,12 +138,12 @@ They coexist: ports 18763 vs 18764.
 
 ## 9. Facts
 
-- Version 0.3.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
-- Smoke suite 37/37 + setup 25/25 + ops 6/6 + herdr control 17/17:
-  registration/rename/unregister, routing, broadcast, ack routing, filtered
-  waits, connect-time auto-registration, shared identity, SSE liveness, idle
-  GC, error paths, control-tool argv passthrough, permission gating, missing
-  CLI.
+- Version 0.4.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
+- Test suite 37/37 smoke + 32/32 setup + 11/11 ops + 35/35 herdr + 23/23 discovery: registration/rename/unregister, routing, broadcast, ack routing,
+  filtered waits, connect-time auto-registration, shared identity, SSE
+  liveness, idle GC, error paths, control-tool argv passthrough, permission
+  gating, missing CLI, registry validation, PATH/PATHEXT probing, npm scoped
+  dirs, os filtering, per-platform service dry-runs.
 - Verified live with mcode (10 tools listed via `mcode exec`), opencode, and
   kimi-code (`kimi -p` listed all 10 tools). herdr control tools verified
   against the real herdr CLI (0.8.0-preview) on Windows.

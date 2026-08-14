@@ -53,17 +53,23 @@ src/
 ├── protocol.ts     # message kinds, BridgeMessage, task/ack payloads, peer id pattern
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, idle GC (transport-agnostic)
 ├── mcp-server.ts   # SessionRegistry (sessions + peer bindings) + McpStreamableHttpServer
-├── hub-tools.ts    # the 16 bridge tools, auto-registration, peerId sanitizing, result presentation
+├── hub-tools.ts    # the 21 bridge tools, auto-registration, peerId sanitizing, result presentation
 ├── index.ts        # startHub() programmatic API, DEFAULT_CONFIG, exports
-├── cli.ts          # agent-comm-hub CLI (hub start / setup / status / service / update)
-├── setup.ts        # `setup`: incremental sync of MCP entry + skill into every
-│                   #   installed agent (mcode, opencode, kimi-code, gemini-cli,
-│                   #   codex, zcode); nested sections via dotted paths
-└── ops.ts          # `status` probe, `service install/uninstall` (Windows/Linux), `update`
-agents/             # per-agent config templates (minimax-code/, claude-code/, opencode/, codex/,
-                    #   gemini-cli/, kimi-code/, zcode/, dsh/) + SKILL.md (tool reference
-                    #   + plain-language workflows) + install-all.ps1
-test/               # smoke.mjs (multi-peer), setup.mjs (installer), ops.mjs (status)
+├── cli.ts          # agent-comm-hub CLI (hub start / setup / discover / status / service / update)
+├── setup.ts        # `setup`: registry-driven incremental sync of MCP entry +
+│                   #   skill into every discovered agent (strategies: json /
+│                   #   toml / dsh; nested sections via dotted paths)
+├── discover.ts     # agent discovery + registry load/validation (PATH probing,
+│                   #   config paths, npm global; platform-injectable)
+├── herdr-ctl.ts    # optional herdr control adapter (agent CLI + pane socket)
+└── ops.ts          # `status` probe, `service install/uninstall` (Windows /
+                    #   Linux / macOS launchd), `update`
+agents/             # per-agent config templates + SKILL.md + install-all.ps1 +
+                    #   registry.json (declarative agent support — the single
+                    #   source of truth for setup/discover)
+test/               # smoke.mjs (multi-peer), setup.mjs (installer),
+                    #   ops.mjs (status + service), herdr.mjs (control),
+                    #   discover.mjs (discovery engine)
 scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGELOG.md)
 ```
 
@@ -72,16 +78,22 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 - `herdr-ctl.ts` is the optional control adapter: it shells out to the herdr
   CLI (`execFile`, args verbatim, zero dependencies) so the hub can type into
   real agent terminals and wait on real agent state.
+- `discover.ts` never executes anything found on PATH — it only probes
+  existence (`fs.accessSync`) and reads directory names; all platform
+  semantics (PATH separator, PATHEXT, npm roots) are injectable for tests.
 - `index.ts` exports everything public: `startHub`, `AgentHub`,
   `McpStreamableHttpServer`, `SessionRegistry`, `hubTools`, `HerdrCtl`, the
   bridge tool wiring, and `* from './protocol.js'`.
-- The 16 tools (symmetric on every side): the 10 message tools
+- The 21 tools (symmetric on every side): the 10 message tools
   (`bridge_register`, `bridge_unregister`, `bridge_chat`, `bridge_task`,
   `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`, `bridge_peers`,
-  `bridge_history`) plus 6 herdr control tools (`bridge_agent_list`,
+  `bridge_history`), 6 herdr agent tools (`bridge_agent_list`,
   `bridge_agent_status`, `bridge_agent_prompt`, `bridge_agent_wait`,
-  `bridge_agent_read`, `bridge_agent_keys`). Control tools are gated by
-  `herdrControlPeers` (default `'all'`).
+  `bridge_agent_read`, `bridge_agent_keys`) and 5 herdr pane tools
+  (`bridge_pane_list`, `bridge_pane_send`, `bridge_pane_keys`,
+  `bridge_pane_read`, `bridge_pane_wait`). Control tools are gated by
+  `herdrControlPeers` (default `'all'`) and error out when herdr is not
+  enabled — the message tools keep working regardless.
 
 ## Build and test commands
 
@@ -90,19 +102,19 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   → 85 checks (37+25+6+17)
+                      #   + test/discover.mjs → 138 checks (37+32+11+35+23)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
 
 - `prepublishOnly` = `pnpm test && pnpm build`; `prepare` = `pnpm build` (runs
   on install).
-- CI (`.github/workflows/ci.yml`, push to `main` / PR): pnpm 10 + Node 22,
-  `pnpm install --frozen-lockfile` → `typecheck` → `test` → `pack` → upload the
-  tarball as an artifact.
+- CI (`.github/workflows/ci.yml`, push to `main` / PR): pnpm 10 + Node 22 on
+  an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
+  `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 37/37 + 25/25 +
-  6/6 + 17/17 on Node 24 / Windows).
+  merging, the full `pnpm test` must stay green (verified: 37/37 + 32/32 +
+  11/11 + 35/35 + 19/19 on Node 24 / Windows).
 
 ## Testing
 
@@ -112,19 +124,25 @@ pnpm pack             # build + npm pack (publishing artifact)
   sender, broadcast (no echo to sender), status/peers/history, unregister /
   re-register, auto-registration (first tool call, eager at connect,
   same-name sharing, unregister suppresses), SSE liveness, idle GC.
-- `test/setup.mjs` (25 checks): `runSetup` against a fake home dir — only the
+- `test/setup.mjs` (32 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
-  idempotency, `remove` uninstall.
-- `test/ops.mjs` (6 checks): `runStatus` against a live hub and a dead port,
-  self-exclusion and cleanup of its probe peer.
-- `test/herdr.mjs` (17 checks): the bridge_agent_* control tools against a
-  fake herdr CLI fixture (`test/fixtures/fake-herdr.mjs`) — results, argv
-  passthrough (slash commands, keys, wait flags), error envelopes
-  (agent_not_found, agent_prompt_stalled), permission gating, missing CLI.
+  idempotency, `remove` uninstall, DSH patch block insert/url-change/remove.
+- `test/ops.mjs` (11 checks): `runStatus` against a live hub and a dead port,
+  self-exclusion and cleanup of its probe peer, plus per-platform service
+  `--dry-run` output (win32 / linux / darwin).
+- `test/herdr.mjs` (35 checks): the bridge_agent_* and bridge_pane_* control
+  tools against a fake herdr CLI + fake socket fixture
+  (`test/fixtures/fake-herdr.mjs`) — results, argv passthrough, error
+  envelopes, smart fallback (agent vs pane channel), permission gating,
+  missing CLI.
+- `test/discover.mjs` (23 checks): registry load/validation (bad records
+  rejected), `~`/wildcard expansion, PATH probing (win32 PATHEXT vs POSIX
+  semantics), config-path discovery, npm-global discovery incl. scoped dirs,
+  os filtering, source priority.
 - The `.mjs` files in `test/` are **esbuild outputs** of the `.ts` entries
-  (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`) and are
-  gitignored — edit the `.ts` files, not the `.mjs` ones. `fake-herdr.mjs` is
-  a hand-written fixture and IS committed.
+  (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`,
+  `discover-entry.ts`) and are gitignored — edit the `.ts` files, not the
+  `.mjs` ones. `fake-herdr.mjs` is a hand-written fixture and IS committed.
 - Every check uses `check(name, ok, detail)` with a behavior-description name;
   smoke tests also assert every tool result is **lossless JSON**
   (`assertLosslessJson`: no `undefined`, no non-finite numbers) — that is the
@@ -169,9 +187,13 @@ pnpm pack             # build + npm pack (publishing artifact)
    only the named `agent-hub` key is touched, every modified file is backed up
    (`<file>.bak-<timestamp>`), written UTF-8 without BOM, idempotent, and
    missing configs are skipped (never created). `~/.claude.json` is **never**
-   touched (contains credentials) — Claude Code stays manual via project
-   `.mcp.json`.
-7. **CHANGELOG.md is hand-written** (user-facing behavior descriptions, not
+   touched (contains credentials) — Claude Code's MCP config stays manual via
+   project `.mcp.json`.
+7. **Agent support lives in `agents/registry.json`**, not in code: adding an
+   agent is a registry record + a test. The registry is validated at load
+   time; config paths are `~`-relative and must not contain `..`; the
+   discovery engine never executes anything it finds.
+8. **CHANGELOG.md is hand-written** (user-facing behavior descriptions, not
    commit logs) and feeds `scripts/release-notes.mjs`. Version bumps follow
    `package.json` + `SERVER_VERSION` + a CHANGELOG entry. Version numbering
    convention: patch rolls over at 10 (`0.1.9 → 0.2.0`).

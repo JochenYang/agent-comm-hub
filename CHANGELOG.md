@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0 (2026-08-14)
+
+- **Agent discovery + declarative registry**: `agent-comm-hub setup` no
+  longer hard-codes its target list — supported agents are declared in
+  `agents/registry.json` (the single source of truth), and setup discovers
+  which are actually installed via PATH probing (pure Node, no shell),
+  config-path presence, and npm global packages (scoped dirs included).
+  New `agent-comm-hub discover` prints the table without touching anything;
+  `setup --agent <id>` targets a single agent. Adding a new agent is now one
+  registry record + one test — no code changes.
+- **New registry entries**: qwen-code (Alibaba, `~/.qwen/settings.json`,
+  `httpUrl` transport) and pi (pi.dev — no config file by design, but it
+  reads `~/.agents/skills` natively, so the shared skill covers it; MCP
+  needs a manual extension). Amazon Q CLI / Copilot CLI / Windsurf stay
+  unregistered until their remote-MCP formats are officially confirmed.
+- **macOS auto-start**: `agent-comm-hub service install/uninstall` now
+  supports macOS via a launchd LaunchAgent (`launchctl bootstrap`, legacy
+  `load -w` fallback) — previously "not implemented".
+- **CI matrix**: the test suite now runs on ubuntu / windows / macos
+  instead of ubuntu only.
+- Test suite grows to 138 checks (37 smoke + 32 setup + 11 ops + 35 herdr control + 23 discovery).
+
 ## 0.3.0 (2026-08-14)
 
 - **herdr control plane (optional)**: 11 new tools drive agent terminals

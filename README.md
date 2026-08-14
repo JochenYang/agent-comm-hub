@@ -84,6 +84,7 @@ Task Scheduler on Windows) — or the built-in one-shot auto-start:
 ```bash
 agent-comm-hub service install    # Windows: HKCU Run + hidden launcher (no admin)
                                   # Linux:   systemd --user unit, enabled
+                                  # macOS:   launchd LaunchAgent
 agent-comm-hub service uninstall  # undo
 agent-comm-hub status             # is the hub up? who is online?
 ```
@@ -98,13 +99,19 @@ itself).
 agent-comm-hub setup
 # or: agents/install-all.ps1 (PowerShell equivalent)
 # undo: agent-comm-hub setup --remove
+# list what is installed (no changes): agent-comm-hub discover
+# configure a single agent:           agent-comm-hub setup --agent codex
 ```
 
-`setup` incrementally merges the `agent-hub` MCP entry into every installed
-agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex, zcode, DSH)
-and installs the English skill into `~/.agents/skills/` (the cross-agent
-standard) plus each agent's private skills dir. Only the `agent-hub` key is
-touched, every file is backed up first, and re-running is a no-op. Claude Code
+`setup` **discovers** which agents are installed on this machine (PATH
+commands, config paths, npm global packages — no shell, cross-platform) and
+merges the `agent-hub` MCP entry into each one's config (mcode, opencode, Kimi
+Code, Gemini CLI, Codex, zcode, DSH, claude-desktop on macOS), plus the English
+skill into `~/.agents/skills/` (the cross-agent standard) and each agent's
+private skills dir. Which agents are supported is declared in
+[`agents/registry.json`](agents/registry.json) — adding a new agent is one
+registry record, no code change. Only the `agent-hub` key is touched, every
+file is backed up first, and re-running is a no-op. Claude Code's MCP config
 stays manual (see below).
 
 **Registration is automatic**: once an agent session starts, the MCP handshake

@@ -82,6 +82,7 @@ agent-comm-hub
 ```bash
 agent-comm-hub service install    # Windows：HKCU Run + 隐藏启动器（无需管理员）
                                   # Linux：systemd --user 单元并启用
+                                  # macOS：launchd LaunchAgent
 agent-comm-hub service uninstall  # 撤销
 agent-comm-hub status             # hub 是否在跑？谁在线？
 ```
@@ -94,12 +95,18 @@ agent-comm-hub status             # hub 是否在跑？谁在线？
 agent-comm-hub setup
 # 或 PowerShell 版：agents/install-all.ps1
 # 卸载：agent-comm-hub setup --remove
+# 查看本机装了什么（只读）：agent-comm-hub discover
+# 只配置某一个：agent-comm-hub setup --agent codex
 ```
 
-`setup` 会把 `agent-hub` 的 MCP 条目**增量合并**进每个已安装 agent 的配置
-（mcode / opencode / kimi-code / gemini / codex / zcode），并把英文 SKILL 装到
-`~/.agents/skills/`（跨 agent 标准位置）+ 各 agent 私有技能目录。只动
-`agent-hub` 这一个键、每个文件先备份、幂等可重跑。Claude Code 与 DSH 手动（见下）。
+`setup` 会**自动发现**本机安装了哪些 agent（PATH 命令 / 配置文件路径 /
+npm 全局包，纯 Node 无 shell、跨平台），并把 `agent-hub` 的 MCP 条目
+**增量合并**进每个已安装 agent 的配置（mcode / opencode / kimi-code /
+gemini / codex / zcode / DSH，macOS 上还有 claude-desktop），英文 SKILL 装到
+`~/.agents/skills/`（跨 agent 标准位置）+ 各 agent 私有技能目录。支持哪些
+agent 由 [`agents/registry.json`](agents/registry.json) 声明——新增 agent
+只需加一条注册表记录，不改代码。只动 `agent-hub` 这一个键、每个文件先备份、
+幂等可重跑。Claude Code 的 MCP 配置手动（见下）。
 
 **注册全自动**：agent 会话一启动，MCP 握手即完成注册（客户端名 = peer id），无需任何手动操作。可选：`bridge_register("工具名:项目名")` 换可读 id。
 
