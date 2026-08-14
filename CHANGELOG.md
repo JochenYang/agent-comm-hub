@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.11 (2026-08-14)
+
+- **Fix `update` missing freshly published versions**: npm caches registry
+  packuments (~5 min), so `@latest` right after a publish resolved to the old
+  version. The self-update now passes `--prefer-online` to always fetch fresh
+  metadata.
+
 ## 0.1.10 (2026-08-14)
 
 - **SKILL gains a plain-language "典型工作流" section**: task delegation

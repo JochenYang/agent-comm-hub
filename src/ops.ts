@@ -106,7 +106,9 @@ export function runUpdate(): { ok: boolean; messages: string[] } {
     const before = readVersion()
     messages.push(`current version: ${before}`)
     const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-    const out = execFileSync(npmBin, ['install', '-g', 'agent-comm-hub@latest'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' })
+    // --prefer-online: npm caches registry packuments (~5 min), which would
+    // hide a just-published version behind the @latest tag.
+    const out = execFileSync(npmBin, ['install', '-g', '--prefer-online', 'agent-comm-hub@latest'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' })
     const tail = out.trim().split(/\r?\n/).slice(-3).filter(Boolean).join(' | ')
     if (tail) messages.push(tail)
     const after = readVersion()
