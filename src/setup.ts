@@ -17,6 +17,7 @@
 
 import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -304,7 +305,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
   // (host-level composition patch; applies to all sessions of that profile).
   const dshProfilesDir = join(home, '.dsh', 'profiles')
   if (existsSync(dshProfilesDir)) {
-    let entries: Awaited<ReturnType<typeof readdir>> = []
+    let entries: Dirent<string>[] = []
     try {
       entries = await readdir(dshProfilesDir, { withFileTypes: true })
     } catch (error) {

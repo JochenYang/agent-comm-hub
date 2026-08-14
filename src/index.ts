@@ -25,7 +25,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.6.0'
+export const SERVER_VERSION = '0.3.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
