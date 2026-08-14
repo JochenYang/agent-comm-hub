@@ -15,7 +15,7 @@ import { AgentHub, type HubOptions } from './hub.js'
 import { autoRegisterPeer, hubTools, livePeersFor } from './hub-tools.js'
 import { McpStreamableHttpServer, SessionRegistry } from './mcp-server.js'
 
-export { HerdrCtl, type HerdrAgent, type HerdrRead, type HerdrSettled, AGENT_STATUSES } from './herdr-ctl.js'
+export { HerdrCtl, type HerdrAgent, type HerdrPane, type HerdrRead, type HerdrSettled, AGENT_STATUSES } from './herdr-ctl.js'
 export { AgentHub, type HubOptions, type PeerState, type HubStatus } from './hub.js'
 export { McpStreamableHttpServer, SessionRegistry, type McpTool } from './mcp-server.js'
 export { hubTools, present, autoRegisterPeer, sanitizePeerId, type PresentedMessage } from './hub-tools.js'
@@ -25,7 +25,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.3.0'
+export const SERVER_VERSION = '0.4.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -56,6 +56,11 @@ export interface HubConfig {
   herdrBaseArgs?: string[]
   /** Default cap for one herdr CLI call in ms (default 30000). */
   herdrTimeoutMs?: number
+  /** herdr server socket path for the bridge_pane_* tools (defaults:
+   * Windows `%APPDATA%\herdr\herdr.sock`, else `~/.config/herdr/herdr.sock`). */
+  herdrSocketPath?: string
+  /** Override the herdr socket transport (tests inject a fake). */
+  herdrSendRequest?: (method: string, params: Record<string, unknown>) => Promise<unknown>
   /** Peers allowed to use bridge_agent_* tools; 'all' (default) or a list. */
   herdrControlPeers?: 'all' | string[]
 }
@@ -106,6 +111,8 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     bin: resolved.herdrBin,
     baseArgs: resolved.herdrBaseArgs,
     defaultTimeoutMs: resolved.herdrTimeoutMs,
+    socketPath: resolved.herdrSocketPath,
+    sendRequest: resolved.herdrSendRequest,
   })
   const mcp = new McpStreamableHttpServer(
     hubTools(hub, registry, {

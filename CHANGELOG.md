@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 (2026-08-14)
+
+- **pane-level control tools**: `bridge_pane_list`, `bridge_pane_send`,
+  `bridge_pane_keys`, `bridge_pane_read` drive ANY herdr pane through the
+  herdr local socket (`pane.list` / `pane.send_input` / `pane.send_keys` /
+  `pane.read`, newline-delimited JSON over a named pipe / unix socket).
+  Unlike the `bridge_agent_*` tools — which require herdr to RECOGNIZE the
+  agent (built-in manifest list) — the pane tools work for every pane,
+  including agents herdr does not know (e.g. MiniMax Code): physical input
+  lands in the target terminal as keystrokes, output is read back as text.
+  Verified live: DSH drove a running MiniMax Code session through the hub
+  (prompt injected via `bridge_pane_send`, reply collected via
+  `bridge_pane_read`).
+- `HerdrCtl` gains a socket transport (platform-derived path: Windows
+  `%APPDATA%\herdr\herdr.sock` with the `\\.\pipe\` prefix, else
+  `~/.config/herdr/herdr.sock`; overridable via `socketPath`, injectable via
+  `sendRequest` for tests).
+- New config: `herdrSocketPath` / `herdrSendRequest` (programmatic API only).
+  Control-tool permission gating (`herdrControlPeers`) covers the pane tools
+  too.
+- herdr control suite grows to 24 checks (pane list shape, send + Enter,
+  enter:false, keys, read, empty-input rejection).
+
 ## 0.3.0 (2026-08-14)
 
 - **herdr control layer**: 6 new tools — `bridge_agent_list`,

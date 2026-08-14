@@ -378,5 +378,71 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         return { ok: true, sent: keys }
       }),
     },
+    // ---- pane-level control tools (socket API) -----------------------
+    // Unlike the bridge_agent_* tools (which require herdr to RECOGNIZE the
+    // agent), these drive any pane through the herdr local socket: physical
+    // input and output for agents herdr does not know (e.g. MiniMax Code).
+    {
+      name: 'bridge_pane_list',
+      description: 'List every herdr pane (ids, titles, agent status, cwd) via the herdr socket — including panes running agents herdr does not recognize. Use a paneId as `target` of bridge_pane_send / bridge_pane_keys / bridge_pane_read. Control tools: they type into real terminals — use with care.',
+      inputSchema: schema({}),
+      handler: wrap(true, async (_args, peer) => ({ panes: await checkControl(peer).paneList() })),
+    },
+    {
+      name: 'bridge_pane_send',
+      description: 'Type text into a herdr pane\'s input line (physical keystrokes via the herdr socket; works for ANY pane, no agent detection needed). This is how you drive an agent herdr does not recognize: the text lands in the target\'s terminal as if typed. Slash commands are executed by the target\'s TUI. With enter: true (default), the text is submitted with Enter.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          text: str('Text to type into the pane (slash commands are executed, not sent as chat).'),
+          enter: { type: 'boolean', description: 'Submit with Enter after typing (default true).' },
+        },
+        ['target', 'text'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const paneId = String(args.target)
+        const text = String(args.text)
+        await ctl.paneSendText(paneId, text)
+        if (args.enter !== false) await ctl.paneSendKeys(paneId, ['Enter'])
+        return { ok: true, target: paneId, sent: text }
+      }),
+    },
+    {
+      name: 'bridge_pane_keys',
+      description: 'Send raw key presses to any herdr pane (Enter, esc, ctrl-c, arrows...). Use to dismiss permission prompts or interrupt a stuck program in a pane herdr does not recognize as an agent.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          keys: { type: 'array', items: { type: 'string' }, description: 'Keys to send, e.g. ["Enter"], ["esc"], ["ctrl-c"].' },
+        },
+        ['target', 'keys'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const keys = Array.isArray(args.keys) ? args.keys.map(String) : []
+        if (keys.length === 0) throw new Error('keys: at least one key is required')
+        await ctl.paneSendKeys(String(args.target), keys)
+        return { ok: true, sent: keys }
+      }),
+    },
+    {
+      name: 'bridge_pane_read',
+      description: 'Read a herdr pane\'s recent terminal output (plain text, ANSI stripped). Use to collect the reply of an agent that is not connected to the hub or not recognized by herdr.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          lines: int('How many lines to read (default: all recent).'),
+          source: { type: 'string', enum: ['visible', 'recent', 'recent-unwrapped', 'detection'], description: 'Terminal snapshot source (default recent).' },
+        },
+        ['target'],
+      ),
+      handler: wrap(true, async (args, peer) =>
+        checkControl(peer).paneRead(String(args.target), {
+          lines: args.lines === undefined ? undefined : Number(args.lines),
+          source: args.source === undefined ? undefined : (args.source as 'visible' | 'recent' | 'recent-unwrapped' | 'detection'),
+        }),
+      ),
+    },
   ]
 }

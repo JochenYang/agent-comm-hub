@@ -13,10 +13,28 @@
  */
 
 import { execFile } from 'node:child_process'
+import net from 'node:net'
+import os from 'node:os'
+import path from 'node:path'
 
 /** Agent lifecycle statuses herdr reports for a pane. */
 export const AGENT_STATUSES = ['idle', 'working', 'blocked', 'done', 'unknown'] as const
 export type AgentStatus = (typeof AGENT_STATUSES)[number]
+
+/** One herdr pane as seen through the socket API (pane-level, no agent
+ * detection required — works for ANY pane, including agents herdr does not
+ * recognize). */
+export interface HerdrPane {
+  paneId: string
+  tabId: string
+  workspaceId: string
+  terminalId: string
+  title: string | null
+  agentStatus: AgentStatus
+  cwd: string | null
+  focused: boolean
+  revision: number
+}
 
 /** One herdr agent pane (the AgentInfo shape from the herdr API schema,
  * reduced to what bridge tools need; no undefined fields). */
@@ -64,6 +82,13 @@ export interface HerdrOptions {
   baseArgs?: string[]
   /** Default cap for one herdr CLI call in ms (0 = inherit from per-call). */
   defaultTimeoutMs?: number
+  /** Socket file / named pipe path of the herdr server. Defaults are
+   * platform-derived: Windows `%APPDATA%\herdr\herdr.sock`, elsewhere
+   * `~/.config/herdr/herdr.sock`. */
+  socketPath?: string
+  /** Override the raw socket transport (tests inject a fake). When set,
+   * `socketPath` is ignored. */
+  sendRequest?: (method: string, params: Record<string, unknown>) => Promise<unknown>
 }
 
 interface CliError extends Error {
@@ -80,12 +105,62 @@ export class HerdrCtl {
   private readonly bin: string
   private readonly baseArgs: string[]
   private readonly defaultTimeoutMs: number
+  private readonly sendRequest: (method: string, params: Record<string, unknown>) => Promise<unknown>
+  private readonly socketPath: string
 
   constructor(private readonly options: HerdrOptions = {}) {
     this.bin = options.bin ?? 'herdr'
     this.baseArgs = options.baseArgs ?? []
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000
+    this.socketPath = options.socketPath ?? defaultSocketPath()
+    this.sendRequest = options.sendRequest ?? ((method, params) => socketSend(this.socketPath, method, params))
   }
+
+  // ---- pane-level control (socket API; works for ANY pane, no agent
+  // detection required — this is the channel that drives agents herdr does
+  // not recognize, e.g. MiniMax Code) --------------------------------
+
+  /** `pane.list` — every pane in the session (ids, titles, agent states). */
+  async paneList(): Promise<HerdrPane[]> {
+    const result = await this.sendRequest('pane.list', {})
+    const raw = (result as { panes?: unknown }).panes
+    if (!Array.isArray(raw)) throw new Error(`herdr pane.list: unexpected result shape: ${JSON.stringify(result)}`)
+    return raw.map(item => toPane(item as Record<string, unknown>))
+  }
+
+  /** `pane.send_input` — type text into a pane's input (physical input; the
+   * pane's program receives it as keystrokes). */
+  async paneSendText(paneId: string, text: string): Promise<void> {
+    if (text === '') throw new Error('paneSendText: text must not be empty')
+    await this.sendRequest('pane.send_input', { pane_id: paneId, text })
+  }
+
+  /** `pane.send_keys` — raw key presses (Enter, esc, ctrl-c, ...). */
+  async paneSendKeys(paneId: string, keys: string[]): Promise<void> {
+    if (keys.length === 0) throw new Error('paneSendKeys: at least one key is required')
+    await this.sendRequest('pane.send_keys', { pane_id: paneId, keys })
+  }
+
+  /** `pane.read` — recent terminal output of a pane. */
+  async paneRead(paneId: string, options: { lines?: number; source?: 'visible' | 'recent' | 'recent-unwrapped' | 'detection' } = {}): Promise<HerdrRead> {
+    // `source` is a REQUIRED field of pane.read — default to recent.
+    const params: Record<string, unknown> = { pane_id: paneId, source: options.source ?? 'recent', format: 'text', strip_ansi: true }
+    if (options.lines !== undefined) params.lines = options.lines
+    const result = await this.sendRequest('pane.read', params)
+    const raw = (result as { read?: unknown }).read ?? result
+    const read = raw as Record<string, unknown>
+    return {
+      paneId: String(read.pane_id ?? paneId),
+      tabId: read.tab_id === undefined ? '' : String(read.tab_id),
+      workspaceId: read.workspace_id === undefined ? null : String(read.workspace_id),
+      source: String(read.source ?? options.source ?? 'recent'),
+      text: String(read.text ?? ''),
+      revision: Number(read.revision ?? 0),
+      truncated: read.truncated === true,
+    }
+  }
+
+  // ---- agent-level control (CLI; requires herdr to recognize the agent) ---
 
   /** `herdr agent list` — every agent pane herdr currently detects. */
   async list(): Promise<HerdrAgent[]> {
@@ -251,4 +326,91 @@ function settleFrom(result: unknown, target: string): HerdrSettled | null {
     }
   }
   return null
+}
+
+/** Reduce one raw pane object from the socket API; unknown fields are
+ * dropped, never undefined — lossless-JSON safe. */
+function toPane(raw: Record<string, unknown>): HerdrPane {
+  const status = raw.agent_status as string
+  return {
+    paneId: String(raw.pane_id ?? ''),
+    tabId: raw.tab_id === undefined ? '' : String(raw.tab_id),
+    workspaceId: raw.workspace_id === undefined ? '' : String(raw.workspace_id),
+    terminalId: raw.terminal_id === undefined ? '' : String(raw.terminal_id),
+    title: raw.terminal_title_stripped === undefined ? null : String(raw.terminal_title_stripped),
+    agentStatus: AGENT_STATUSES.includes(status as AgentStatus) ? (status as AgentStatus) : 'unknown',
+    cwd: raw.cwd === undefined ? null : String(raw.cwd),
+    focused: raw.focused === true,
+    revision: Number(raw.revision ?? 0),
+  }
+}
+
+/** Default herdr server socket: Windows named pipe (file-path form with the
+ * `\\.\pipe\` prefix, matching herdr's interprocess crate), else a Unix
+ * domain socket under the config dir. */
+function defaultSocketPath(): string {
+  if (process.platform === 'win32') {
+    const base = process.env.APPDATA ?? process.env.USERPROFILE ?? '.'
+    return `\\\\.\\pipe\\${path.join(base, 'herdr', 'herdr.sock')}`
+  }
+  return path.join(os.homedir(), '.config', 'herdr', 'herdr.sock')
+}
+
+/** Send one newline-delimited JSON request over the herdr local socket and
+ * resolve with the response envelope's `result` (or throw on `error`). */
+function socketSend(socketPath: string, method: string, params: Record<string, unknown>): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath)
+    let buffer = ''
+    let settled = false
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      reject(error)
+    }
+    const timeout = setTimeout(() => fail(new Error(`herdr socket request timed out: ${method}`)), 15_000)
+    socket.on('connect', () => {
+      socket.write(JSON.stringify({ id: `dsh-${Date.now()}`, method, params }) + '\n')
+    })
+    socket.on('data', chunk => {
+      buffer += chunk.toString('utf8')
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.trim() === '') continue
+        let envelope: { result?: unknown; error?: { code?: string; message?: string } }
+        try {
+          envelope = JSON.parse(line) as { result?: unknown; error?: { code?: string; message?: string } }
+        } catch {
+          continue
+        }
+        if (settled) continue
+        settled = true
+        clearTimeout(timeout)
+        socket.destroy()
+        if (envelope.error !== undefined) {
+          reject(new Error(`${envelope.error.code ?? 'herdr error'}: ${envelope.error.message ?? 'unknown error'}`))
+        } else {
+          resolve(envelope.result)
+        }
+      }
+    })
+    socket.on('error', error => fail(error))
+    socket.on('close', () => {
+      if (!settled && buffer.trim() !== '') {
+        try {
+          const envelope = JSON.parse(buffer) as { result?: unknown; error?: { code?: string; message?: string } }
+          settled = true
+          clearTimeout(timeout)
+          if (envelope.error !== undefined) reject(new Error(`${envelope.error.code ?? 'herdr error'}: ${envelope.error.message ?? 'unknown error'}`))
+          else resolve(envelope.result)
+        } catch {
+          fail(new Error(`herdr socket closed without a response: ${method}`))
+        }
+      } else if (!settled) {
+        fail(new Error(`herdr socket closed without a response: ${method}`))
+      }
+    })
+  })
 }

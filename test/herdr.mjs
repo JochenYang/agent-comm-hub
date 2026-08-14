@@ -100,6 +100,40 @@ const tmp = mkdtempSync(join(tmpdir(), 'herdr-test-'))
 const logFile = join(tmp, 'herdr-calls.jsonl')
 process.env.FAKE_HERDR_LOG = logFile
 
+// Fake socket transport: records pane requests and answers from a fixed
+// dataset, mirroring the pane.list / pane.send_input / pane.send_keys /
+// pane.read envelopes of the herdr socket API.
+const socketCalls = []
+const fakePanes = [
+  { pane_id: 'wT:p1', tab_id: 'wT:t1', workspace_id: 'wT', terminal_id: 'term_a', terminal_title_stripped: 'shell', agent_status: 'unknown', cwd: 'C:\\proj', focused: true, revision: 1 },
+  { pane_id: 'wT:p2', tab_id: 'wT:t1', workspace_id: 'wT', terminal_id: 'term_b', terminal_title_stripped: 'Minimax Code', agent_status: 'unknown', cwd: 'C:\\proj', focused: false, revision: 9 },
+]
+async function fakeSendRequest(method, params) {
+  socketCalls.push({ method, params })
+  switch (method) {
+    case 'pane.list':
+      return { panes: fakePanes }
+    case 'pane.send_input':
+    case 'pane.send_keys':
+      return { type: 'ok' }
+    case 'pane.read':
+      return {
+        read: {
+          pane_id: params.pane_id,
+          tab_id: 'wT:t1',
+          workspace_id: 'wT',
+          source: params.source ?? 'recent',
+          format: 'text',
+          text: `[pane output for ${params.pane_id}]\nhello from the pane\n`,
+          revision: 42,
+          truncated: false,
+        },
+      }
+    default:
+      throw new Error(`fake socket: unexpected method ${method}`)
+  }
+}
+
 const hub = startHub(
   {
     port: PORT,
@@ -109,6 +143,7 @@ const hub = startHub(
     herdrBin: process.execPath,
     herdrBaseArgs: [FAKE],
     herdrTimeoutMs: 5000,
+    herdrSendRequest: fakeSendRequest,
   },
   { info: () => {}, warn: () => {} },
 )
@@ -180,6 +215,38 @@ try {
 
   const emptyKeys = await mavis.callRaw('bridge_agent_keys', { target: 'w1:p1', keys: [] })
   check('empty keys rejected', emptyKeys.isError === true && /at least one key/.test(emptyKeys.text), emptyKeys.text)
+
+  console.log('== pane control tools (fake socket) ==')
+
+  const panes = await mavis.call('bridge_pane_list')
+  check(
+    'bridge_pane_list returns panes incl. unrecognized agents',
+    Array.isArray(panes.panes) && panes.panes.length === 2 && panes.panes[1]?.title === 'Minimax Code' && panes.panes[1]?.agentStatus === 'unknown' && panes.panes[1]?.paneId === 'wT:p2',
+    JSON.stringify(panes),
+  )
+
+  const sent = await mavis.call('bridge_pane_send', { target: 'wT:p2', text: '/compact' })
+  check('bridge_pane_send reports sent text', sent.ok === true && sent.target === 'wT:p2' && sent.sent === '/compact', JSON.stringify(sent))
+  check(
+    'pane.send_input + Enter delivered to the pane',
+    socketCalls.some(call => call.method === 'pane.send_input' && call.params.pane_id === 'wT:p2' && call.params.text === '/compact') &&
+      socketCalls.some(call => call.method === 'pane.send_keys' && call.params.pane_id === 'wT:p2' && call.params.keys[0] === 'Enter'),
+    JSON.stringify(socketCalls),
+  )
+
+  const beforeNoEnter = socketCalls.length
+  const noEnter = await mavis.call('bridge_pane_send', { target: 'wT:p2', text: 'dir', enter: false })
+  const afterNoEnter = socketCalls.slice(beforeNoEnter)
+  check('bridge_pane_send respects enter: false', noEnter.ok === true && afterNoEnter.some(call => call.method === 'pane.send_input') && !afterNoEnter.some(call => call.method === 'pane.send_keys'), JSON.stringify(afterNoEnter))
+
+  const paneKeys = await mavis.call('bridge_pane_keys', { target: 'wT:p2', keys: ['ctrl-c'] })
+  check('bridge_pane_keys sends keys to any pane', paneKeys.ok === true && socketCalls.some(call => call.method === 'pane.send_keys' && call.params.pane_id === 'wT:p2' && call.params.keys[0] === 'ctrl-c'), JSON.stringify(paneKeys))
+
+  const paneRead = await mavis.call('bridge_pane_read', { target: 'wT:p2', lines: 10 })
+  check('bridge_pane_read returns pane output', paneRead.paneId === 'wT:p2' && paneRead.text.includes('[pane output for wT:p2]') && paneRead.revision === 42 && paneRead.truncated === false, JSON.stringify(paneRead))
+
+  const paneEmpty = await mavis.callRaw('bridge_pane_send', { target: 'wT:p2', text: '' })
+  check('empty pane text rejected', paneEmpty.isError === true && /must not be empty/.test(paneEmpty.text), paneEmpty.text)
 
   console.log('== permission gating ==')
   hub.close()
