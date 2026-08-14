@@ -182,6 +182,19 @@ agent-comm-hub service uninstall
 | `bridge_agent_read(target, lines?, source?)` | 读 pane 最近终端输出（没接 hub 的 agent 的回复） |
 | `bridge_agent_keys(target, keys)` | 原始按键（Enter、esc、ctrl-c、方向键…）处理弹窗或打断 |
 
+### herdr pane 工具（驱动任意 pane，无需 agent 识别）
+
+`bridge_agent_*` 要求 herdr **认识**这个 agent（内置检测清单：claude/codex/opencode/kimi…）。对 herdr 不认识的 agent（如 MiniMax Code），用 pane 工具——通过 herdr 本地 socket 直接物理输入、读取输出：
+
+| 工具 | 作用 |
+|---|---|
+| `bridge_pane_list()` | 所有 pane（id、标题、agent 状态） |
+| `bridge_pane_send(target, text, enter?)` | 往 pane 打字（斜杠命令真实执行；默认 Enter 提交） |
+| `bridge_pane_keys(target, keys)` | 任意 pane 原始按键 |
+| `bridge_pane_read(target, lines?, source?)` | 读 pane 最近输出 |
+
+已真机验证：通过 hub 端到端驱动 MiniMax Code 会话——`bridge_pane_send` 注入 prompt、`bridge_pane_read` 取回回复，对方零配置。
+
 控制工具带权限门控：`herdrControlPeers` 限定谁能用（默认 `'all'`，与 hub 仅本机的信任模型一致）。这是**硬控制**——注入的 `/clear` 会清掉对方上下文。
 
 所有返回都是 lossless JSON（兼容 DSH 的严格工具注册表）。

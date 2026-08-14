@@ -261,6 +261,24 @@ executed by the target's TUI, and waits block on herdr's real agent state
 | `bridge_agent_read(target, lines?, source?)` | Read the pane's recent terminal output (reply of an agent not on the hub) |
 | `bridge_agent_keys(target, keys)` | Raw key presses (Enter, esc, ctrl-c, arrows…) to dismiss prompts or interrupt |
 
+### herdr pane tools (drive ANY pane — no agent detection)
+
+`bridge_agent_*` requires herdr to **recognize** the agent (its built-in
+manifest list: claude/codex/opencode/kimi/…). For agents herdr does not know
+(e.g. MiniMax Code), the pane tools drive any pane through the herdr local
+socket — physical input, read output:
+
+| Tool | Purpose |
+|---|---|
+| `bridge_pane_list()` | Every pane (ids, titles, agent status) |
+| `bridge_pane_send(target, text, enter?)` | Type text into a pane (slash commands execute; Enter submits by default) |
+| `bridge_pane_keys(target, keys)` | Raw key presses to any pane |
+| `bridge_pane_read(target, lines?, source?)` | Read a pane's recent output |
+
+Verified live: a MiniMax Code session was driven end-to-end through the hub —
+prompt injected via `bridge_pane_send`, reply collected via
+`bridge_pane_read`, no agent-side configuration.
+
 Control tools are gated: `herdrControlPeers` restricts who may use them
 (default `'all'`, mirroring the hub's loopback-only trust model). They are
 hard control — an injected `/clear` clears the target's context.
