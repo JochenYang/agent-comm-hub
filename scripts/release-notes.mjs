@@ -32,8 +32,8 @@ const date = execFileSync('git', ['show', '-s', '--format=%cs', cur], { encoding
 
 // Body: the CHANGELOG.md paragraph for this version.
 const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
-const sectionRe = new RegExp(`^## ${version.replace(/\./g, '\\.')} \\([^)]*\\)([\\s\\S]*?)(?=^## |\\z)`, 'm')
-const section = sectionRe.exec(changelog)?.[1]?.trim() ?? ''
+const blocks = changelog.split(/(?=^## )/m).filter(block => block.startsWith(`## ${version} (`))
+const section = blocks.length > 0 ? blocks[0].replace(/^## [^\n]*\n/, '').trim() : ''
 if (!section) console.error(`warning: no CHANGELOG section for ${version}`)
 
 const compare = prev
@@ -49,5 +49,5 @@ out.push(`## ${cur} — ${date}`)
 out.push('')
 if (section) out.push(section)
 out.push('')
-out.push(`**Commits:** ${compare} · **Contributors:** ${contributors.join(', ')} · [CHANGELOG](https://github.com/${REPO}/blob/main/CHANGELOG.md)`)
+out.push(`Commits: ${compare} · Contributors: ${contributors.join(', ')} · [CHANGELOG](https://github.com/${REPO}/blob/main/CHANGELOG.md)`)
 process.stdout.write(out.join('\n'))
