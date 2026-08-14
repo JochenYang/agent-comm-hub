@@ -26,8 +26,53 @@ export function present(message: BridgeMessage): PresentedMessage {
   }
 }
 
+/** Sanitize a client-reported name into a valid peer id base. */
+export function sanitizePeerId(name: string): string {
+  const cleaned = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+  return cleaned === '' ? 'agent' : cleaned
+}
+
+/**
+ * Auto-register a session using its client-reported name (or the `agent`
+ * fallback). Same-name connections ATTACH to the same peer (one stable
+ * identity per agent regardless of how many sessions it opens), so there are
+ * no `-2`/`-3` suffixes for identical client names. No-op when the session
+ * is already bound or explicitly unregistered. Returns the peer id.
+ */
+export function autoRegisterPeer(
+  hub: AgentHub,
+  registry: SessionRegistry,
+  sessionId: string | undefined,
+  clientName: string | undefined,
+): string | undefined {
+  if (sessionId === undefined) return undefined
+  const bound = registry.peerFor(sessionId)
+  if (bound !== undefined) return bound
+  if (registry.isSuppressed(sessionId)) return undefined
+  const peerId = sanitizePeerId(clientName ?? 'agent')
+  if (!hub.has(peerId)) hub.register(peerId)
+  registry.bindPeer(sessionId, peerId)
+  hub.touch(peerId)
+  return peerId
+}
+
+/** Peers whose session has a live SSE stream (count as connected, GC-safe). */
+export function livePeersFor(registry: SessionRegistry): Set<string> {
+  const live = new Set<string>()
+  const streams = registry.liveSessions()
+  for (const [sessionId, peerId] of registry.peerBindings) {
+    if (streams.has(sessionId)) live.add(peerId)
+  }
+  return live
+}
+
 /** Build the bridge tool set bound to one hub instance. */
 export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { defaultWaitMs?: number; waitTimeoutMs: number }): McpTool[] {
+
   const schema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
     type: 'object',
     properties,
@@ -38,11 +83,23 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { de
   const int = (description: string): Record<string, unknown> => ({ type: 'integer', description })
   const optStr = str
 
+  /**
+   * Resolve the calling peer. Unregistered sessions auto-register using the
+   * client-reported name (from the MCP initialize clientInfo) unless the
+   * session explicitly unregistered — connecting the MCP is enough to join.
+   */
   const requirePeer = (sessionId: string | undefined): string => {
-    const peer = registry.peerFor(sessionId)
-    if (peer === undefined) throw new Error('not registered — call bridge_register(peerId) first')
-    hub.touch(peer)
-    return peer
+    const bound = registry.peerFor(sessionId)
+    if (bound !== undefined) {
+      hub.touch(bound)
+      return bound
+    }
+    const auto = autoRegisterPeer(hub, registry, sessionId, registry.clientName(sessionId))
+    if (auto !== undefined) {
+      hub.touch(auto)
+      return auto
+    }
+    throw new Error('not registered — call bridge_register(peerId) first')
   }
 
   const receipt = (message: BridgeMessage): unknown => ({
@@ -66,7 +123,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { de
   return [
     {
       name: 'bridge_register',
-      description: 'Claim your identity on the hub. Call this FIRST in every session: pick a unique peerId (e.g. "claude-code:myproject", "opencode", "mavis"). Rejects when the id is already claimed by another connection. Returns the current peer list.',
+      description: 'Claim or rename your identity on the hub. Sessions auto-share a peer id derived from the client name; call this to switch to a readable unique peerId such as "mavis" or "opencode:myproject". Rejects when the id is claimed by another connection. Returns the current peer list.',
       inputSchema: schema({ peerId: str('Unique peer id: letters/digits/._:- , 1-64 chars.') }, ['peerId']),
       handler: async (args, sessionId) => {
         const peerId = String(args.peerId)
@@ -76,22 +133,31 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { de
         if (hub.has(peerId) && registry.peerFor(sessionId) !== peerId) {
           throw new Error(`peer already registered by another connection: ${peerId}`)
         }
+        const current = registry.peerFor(sessionId)
+        if (current !== undefined && current !== peerId) {
+          // Rename: detach first, then drop the old peer when no other
+          // session is still attached to it (same-name sessions share it).
+          registry.unbindPeer(sessionId)
+          if (registry.attachedCount(current) === 0) hub.unregister(current)
+        }
         registry.bindPeer(sessionId, peerId)
         if (!hub.has(peerId)) hub.register(peerId)
+        registry.clearSuppress(sessionId)
         hub.touch(peerId)
         return { ok: true, peerId, peers: hub.peers() }
       },
     },
     {
       name: 'bridge_unregister',
-      description: 'Leave the hub: removes your peer id, queued messages, and the session binding. Idempotent.',
+      description: 'Leave the hub: detaches your session (and drops the peer when no other session shares it); auto-registration stays off until an explicit bridge_register. Idempotent.',
       inputSchema: schema({}),
       handler: async (_args, sessionId) => {
         const peer = registry.peerFor(sessionId)
         if (peer !== undefined) {
-          hub.unregister(peer)
           registry.unbindPeer(sessionId)
+          if (registry.attachedCount(peer) === 0) hub.unregister(peer)
         }
+        registry.suppressAuto(sessionId)
         return { ok: true, peerId: peer ?? null }
       },
     },
@@ -159,16 +225,16 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: { de
     },
     {
       name: 'bridge_status',
-      description: 'Hub health: server info, every registered peer with connected/queued/waiting state.',
+      description: 'Hub health: server info, every registered peer with connected/queued/waiting state. A peer is connected when it was active recently or its SSE channel is alive.',
       inputSchema: schema({}),
-      handler: wrap(true, async () => hub.status()),
+      handler: wrap(true, async () => hub.status(livePeersFor(registry))),
     },
     {
       name: 'bridge_peers',
-      description: 'List registered peers and whether each is connected (activity in the last 30s).',
+      description: 'List registered peers and whether each is connected (recent activity or a live SSE channel).',
       inputSchema: schema({}),
       handler: wrap(true, async () => {
-        const status = hub.status()
+        const status = hub.status(livePeersFor(registry))
         return { peers: hub.peers().map(id => ({ id, connected: status.peers.find(peer => peer.id === id)?.connected ?? false })) }
       }),
     },

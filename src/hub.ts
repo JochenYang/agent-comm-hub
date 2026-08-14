@@ -26,10 +26,18 @@ export interface HubOptions {
   historyLimit: number
   /** Long-poll ceiling enforced by {@link wait}. */
   waitTimeoutMs: number
+  /** A peer counts as "active" while its last activity is this fresh (ms). */
+  connectedWindowMs?: number
+  /** Auto-unregister peers idle for this long (ms); 0 disables the GC. */
+  peerIdleTimeoutMs?: number
   /** Called when a message lands in a queue with no matching waiter. */
   onQueued?: (message: BridgeMessage) => void
   /** Called when a peer is registered or unregistered. */
   onPeersChanged?: (peers: string[]) => void
+  /** Called when the idle GC evicts a peer. */
+  onPeerGc?: (peerId: string) => void
+  /** Live-channel check: peers returning true are skipped by the idle GC. */
+  isPeerLive?: (peerId: string) => boolean
 }
 
 /** One peer's live state. */
@@ -55,8 +63,34 @@ export class AgentHub {
   private readonly waiters = new Map<string, Waiter[]>()
   private readonly historyRing: BridgeMessage[] = []
   private readonly lastSeen = new Map<string, number>()
+  private readonly gcTimer: NodeJS.Timeout | undefined
 
-  constructor(private readonly options: HubOptions) {}
+  constructor(private readonly options: HubOptions) {
+    // Idle GC: auto-unregister peers idle beyond peerIdleTimeoutMs (0 disables).
+    const idle = options.peerIdleTimeoutMs ?? 600_000
+    if (idle > 0) {
+      const interval = Math.min(60_000, Math.max(1_000, idle / 2))
+      this.gcTimer = setInterval(() => this.gcTick(idle), interval)
+      this.gcTimer.unref?.()
+    }
+  }
+
+  /** Stop the idle GC (call when the hub shuts down). */
+  dispose(): void {
+    if (this.gcTimer !== undefined) clearInterval(this.gcTimer)
+  }
+
+  private gcTick(idleTimeoutMs: number): void {
+    const now = Date.now()
+    for (const peerId of this.peers()) {
+      if (now - (this.lastSeen.get(peerId) ?? 0) > idleTimeoutMs) {
+        // A live channel (SSE) means the session is genuinely open — keep it.
+        if (this.options.isPeerLive?.(peerId) === true) continue
+        this.options.onPeerGc?.(peerId)
+        this.unregister(peerId)
+      }
+    }
+  }
 
   /** All registered peer ids, insertion order. */
   peers(): string[] {
@@ -92,6 +126,12 @@ export class AgentHub {
     return this.lastSeen.has(peerId)
   }
 
+  /** Is the peer "active" (tool/activity within the connected window)? */
+  isActive(peerId: string): boolean {
+    const last = this.lastSeen.get(peerId)
+    return last !== undefined && Date.now() - last < (this.options.connectedWindowMs ?? 30_000)
+  }
+
   /** Send a chat/notice text message to `to` (or {@link BROADCAST}). */
   send(from: string, to: string, kind: 'chat' | 'notice', content: string): BridgeMessage {
     return this.route(from, to, kind, content)
@@ -115,14 +155,17 @@ export class AgentHub {
     return filtered.slice(-Math.max(0, limit)).reverse()
   }
 
-  /** Live summary for the status tool. */
-  status(): HubStatus {
+  /**
+   * Live summary for the status tool. `livePeers` (sessions with a live SSE
+   * stream) count as connected even without recent tool activity.
+   */
+  status(livePeers?: ReadonlySet<string>): HubStatus {
     const now = Date.now()
     return {
       server: 'agent-comm-hub',
       peers: this.peers().map(peer => ({
         id: peer,
-        connected: now - (this.lastSeen.get(peer) ?? 0) < 30_000,
+        connected: this.isActive(peer) || livePeers?.has(peer) === true,
         lastSeenMs: this.lastSeen.get(peer) ?? 0,
         queued: (this.queues.get(peer) ?? []).length,
         waiting: (this.waiters.get(peer) ?? []).length,

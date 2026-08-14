@@ -80,6 +80,73 @@ export class SessionRegistry {
   unbindPeer(sessionId: string | undefined): void {
     if (sessionId !== undefined) this.peerBindings.delete(sessionId)
   }
+
+  /** Client-reported name per session (from the initialize clientInfo). */
+  readonly clientNames = new Map<string, string>()
+
+  /** Remember the client name reported by a session (on initialize). */
+  noteClient(sessionId: string, name: string): void {
+    this.clientNames.set(sessionId, name)
+  }
+
+  /** Client-reported name for a session, if any. */
+  clientName(sessionId: string | undefined): string | undefined {
+    if (sessionId === undefined) return undefined
+    return this.clientNames.get(sessionId)
+  }
+
+  /** Sessions whose owner explicitly unregistered; auto-registration is
+   * suppressed for them until an explicit `bridge_register`. */
+  private readonly suppressedAuto = new Set<string>()
+
+  /** Suppress auto-registration for this session (on bridge_unregister). */
+  suppressAuto(sessionId: string | undefined): void {
+    if (sessionId !== undefined) this.suppressedAuto.add(sessionId)
+  }
+
+  /** Allow auto-registration again (on explicit bridge_register). */
+  clearSuppress(sessionId: string | undefined): void {
+    if (sessionId !== undefined) this.suppressedAuto.delete(sessionId)
+  }
+
+  /** Whether this session may not auto-register. */
+  isSuppressed(sessionId: string | undefined): boolean {
+    return sessionId !== undefined && this.suppressedAuto.has(sessionId)
+  }
+
+  /** Sessions with a live SSE stream (server→client channel). */
+  private readonly liveStreams = new Set<string>()
+
+  /** Mark a session's SSE stream open (server→client channel alive). */
+  markSseOpen(sessionId: string): void {
+    this.liveStreams.add(sessionId)
+  }
+
+  /** Mark a session's SSE stream closed. */
+  markSseClosed(sessionId: string): void {
+    this.liveStreams.delete(sessionId)
+  }
+
+  /** Session ids with a live SSE stream. */
+  liveSessions(): ReadonlySet<string> {
+    return this.liveStreams
+  }
+
+  /** Drop every binding that points at `peerId` (used by the idle GC). */
+  unbindPeerId(peerId: string): void {
+    for (const [sessionId, bound] of this.peerBindings) {
+      if (bound === peerId) this.peerBindings.delete(sessionId)
+    }
+  }
+
+  /** How many sessions are currently attached to `peerId`. */
+  attachedCount(peerId: string): number {
+    let count = 0
+    for (const bound of this.peerBindings.values()) {
+      if (bound === peerId) count++
+    }
+    return count
+  }
 }
 
 /** A minimal MCP server bound to one URL path of an http.Server. */
@@ -91,6 +158,8 @@ export class McpStreamableHttpServer {
     private readonly info: { name: string; version: string },
     private readonly registry: SessionRegistry,
     private readonly log: (message: string) => void = () => {},
+    /** Called right after a session initializes (eager auto-registration hook). */
+    private readonly onInitialize: (sessionId: string, clientName: string | undefined) => void = () => {},
   ) {}
 
   /** Attach request handling for `path` (e.g. `/mcp`) to an http server. */
@@ -134,7 +203,11 @@ export class McpStreamableHttpServer {
     })
     res.write(': connected\n\n')
     this.sseStreams.set(sessionId, res)
-    req.on('close', () => this.sseStreams.delete(sessionId))
+    this.registry.markSseOpen(sessionId)
+    req.on('close', () => {
+      this.sseStreams.delete(sessionId)
+      this.registry.markSseClosed(sessionId)
+    })
   }
 
   private async handlePost(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -188,6 +261,13 @@ export class McpStreamableHttpServer {
     switch (method) {
       case 'initialize': {
         const newSessionId = this.registry.ensureSession(sessionId)
+        const clientInfo = (message.params as { clientInfo?: { name?: unknown } })?.clientInfo
+        const clientName = typeof clientInfo?.name === 'string' && clientInfo.name !== '' ? clientInfo.name : undefined
+        if (clientName !== undefined) {
+          this.registry.noteClient(newSessionId, clientName)
+        }
+        // Eager auto-registration: connecting the MCP is enough to join.
+        this.onInitialize(newSessionId, clientName)
         const requested = (message.params as { protocolVersion?: unknown })?.protocolVersion
         const protocolVersion = typeof requested === 'string' && (SUPPORTED_VERSIONS as readonly string[]).includes(requested)
           ? requested
@@ -198,7 +278,7 @@ export class McpStreamableHttpServer {
             protocolVersion,
             capabilities: { tools: { listChanged: false } },
             serverInfo: { name: this.info.name, version: this.info.version },
-            instructions: 'Call bridge_register(peerId) first to claim your identity, then use bridge_chat / bridge_task / bridge_wait / bridge_poll / bridge_status / bridge_history / bridge_ack to talk to other agents.',
+            instructions: 'You are already registered with the hub (auto-registered at connect). Use bridge_chat / bridge_task / bridge_wait / bridge_poll / bridge_status / bridge_peers / bridge_history / bridge_ack to talk to other agents; bridge_register(peerId) renames your identity.',
           },
         }
       }

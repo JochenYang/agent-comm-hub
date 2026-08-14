@@ -11,19 +11,19 @@
 
 import { createServer, type Server } from 'node:http'
 import { AgentHub, type HubOptions } from './hub.js'
-import { hubTools } from './hub-tools.js'
+import { autoRegisterPeer, hubTools, livePeersFor } from './hub-tools.js'
 import { McpStreamableHttpServer, SessionRegistry } from './mcp-server.js'
 
-export { AgentHub, type HubOptions, type PeerState } from './hub.js'
+export { AgentHub, type HubOptions, type PeerState, type HubStatus } from './hub.js'
 export { McpStreamableHttpServer, SessionRegistry, type McpTool } from './mcp-server.js'
-export { hubTools, present, type PresentedMessage } from './hub-tools.js'
+export { hubTools, present, autoRegisterPeer, sanitizePeerId, type PresentedMessage } from './hub-tools.js'
 export * from './protocol.js'
 
 /** Default server name reported to MCP clients. */
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.1.0'
+export const SERVER_VERSION = '0.1.6'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -42,6 +42,10 @@ export interface HubConfig {
   historyLimit: number
   waitTimeoutMs: number
   defaultWaitMs: number
+  /** A peer counts as "active" while its last activity is this fresh (ms). */
+  connectedWindowMs: number
+  /** Auto-unregister peers idle for this long (ms); 0 disables the GC. */
+  peerIdleTimeoutMs: number
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -52,6 +56,8 @@ export const DEFAULT_CONFIG: HubConfig = {
   historyLimit: 100,
   waitTimeoutMs: 60_000,
   defaultWaitMs: 30_000,
+  connectedWindowMs: 30_000,
+  peerIdleTimeoutMs: 600_000,
 }
 
 export interface HubLogger {
@@ -77,6 +83,11 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     maxQueue: resolved.maxQueue,
     historyLimit: resolved.historyLimit,
     waitTimeoutMs: resolved.waitTimeoutMs,
+    connectedWindowMs: resolved.connectedWindowMs,
+    peerIdleTimeoutMs: resolved.peerIdleTimeoutMs,
+    onPeerGc: peerId => registry.unbindPeerId(peerId),
+    // The idle GC must never evict a peer whose session has a live SSE channel.
+    isPeerLive: peerId => livePeersFor(registry).has(peerId),
   })
   const registry = new SessionRegistry()
   const mcp = new McpStreamableHttpServer(
@@ -84,6 +95,15 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     { name: SERVER_NAME, version: SERVER_VERSION },
     registry,
     message => log.warn(message),
+    (sessionId, clientName) => {
+      // Eager auto-registration at MCP handshake: connecting = joining.
+      try {
+        const peer = autoRegisterPeer(hub, registry, sessionId, clientName)
+        if (peer !== undefined) log.info(`peer joined: ${peer}`)
+      } catch (error) {
+        log.warn(`auto-register failed: ${(error as Error).message}`)
+      }
+    },
   )
   const server = createServer()
   mcp.attach(server, resolved.path)
@@ -97,6 +117,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     server,
     mcp,
     close: () => {
+      hub.dispose()
       mcp.close()
       server.closeAllConnections?.()
       server.close()

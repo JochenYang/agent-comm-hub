@@ -48,13 +48,14 @@ function assertLosslessJson(value, path = 'root') {
 }
 
 /** One simulated agent: an MCP session with rpc helpers and a result parser. */
-function makeClient(name) {
+function makeClient(name, base = BASE) {
   const headers = {}
   let id = 0
   return {
     name,
+    sessionId: () => headers['Mcp-Session-Id'],
     async rpc(method, params) {
-      const res = await fetch(BASE, {
+      const res = await fetch(base, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...headers },
         body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, ...(params !== undefined ? { params } : {}) }),
@@ -105,7 +106,7 @@ try {
 
   console.log('== registration ==')
   const reg = await mavis.register('mavis')
-  check('mavis registers', reg.ok === true && reg.peerId === 'mavis' && reg.peers.length === 1, JSON.stringify(reg))
+  check('mavis registers', reg.ok === true && reg.peerId === 'mavis' && reg.peers.includes('mavis'), JSON.stringify(reg))
   await claude.register('claude')
   await opencode.register('opencode')
   const regAgain = await mavis.register('mavis')
@@ -183,6 +184,99 @@ try {
 
   const badStatus = await mavis.callRaw('bridge_ack', { ref: 'does-not-exist', status: 'done' })
   check('ack of unknown ref rejected', badStatus.error !== undefined, JSON.stringify(badStatus))
+
+  console.log('== auto-registration ==')
+  const auto = makeClient('autobot')
+  await auto.init()
+  const autoPeers = await auto.call('bridge_peers') // first tool call auto-registers
+  check('auto-register on first tool call', autoPeers.peers.some(p => p.id === 'autobot'), JSON.stringify(autoPeers))
+  const renamed = await auto.register('autobot:proj')
+  check('explicit register renames auto id', renamed.peers.includes('autobot:proj') && !renamed.peers.includes('autobot'), JSON.stringify(renamed))
+  const dup1 = makeClient('dupname')
+  const dup2 = makeClient('dupname')
+  await dup1.init()
+  await dup2.init()
+  await dup1.call('bridge_peers')
+  await dup2.call('bridge_peers')
+  const dupPeers = await auto.call('bridge_peers')
+  const dupIds = dupPeers.peers.map(p => p.id).filter(id => id.startsWith('dupname'))
+  check('same-name sessions share one peer id', JSON.stringify(dupIds) === JSON.stringify(['dupname']), JSON.stringify(dupIds))
+  // Shared mailbox: dup1 sends to its own shared peer, dup2 (same name) receives.
+  await dup1.call('bridge_chat', { to: 'dupname', message: 'shared mailbox ping' })
+  const shared = await dup2.call('bridge_wait', { timeoutMs: 3000 })
+  check('same-name sessions share the mailbox', shared.type === 'message' && shared.message.content === 'shared mailbox ping', JSON.stringify(shared))
+  const explicitLeave = makeClient('leaver')
+  await explicitLeave.init()
+  await explicitLeave.call('bridge_peers')
+  await explicitLeave.call('bridge_unregister')
+  const left = await explicitLeave.callRaw('bridge_chat', { to: 'mavis', message: 'x' })
+  check('unregister suppresses re-auto-register', left.error !== undefined, JSON.stringify(left))
+
+  console.log('== eager registration at connect ==')
+  const eager = makeClient('eager') // initialize ONLY — no tool calls at all
+  await eager.init()
+  const eagerPeers = await mavis.call('bridge_peers')
+  check('peer appears after initialize alone', eagerPeers.peers.some(p => p.id === 'eager' && p.connected === true), JSON.stringify(eagerPeers))
+  const de1 = makeClient('dupeager')
+  const de2 = makeClient('dupeager')
+  await de1.init()
+  await de2.init()
+  const dePeers = await mavis.call('bridge_peers')
+  const deIds = dePeers.peers.map(p => p.id).filter(id => id.startsWith('dupeager'))
+  check('connect-time same-name sessions merge into one peer', JSON.stringify(deIds) === JSON.stringify(['dupeager']), JSON.stringify(deIds))
+
+  console.log('== liveness semantics (SSE counts as connected) ==')
+  const hubSse = startHub({ port: 18999, connectedWindowMs: 400, peerIdleTimeoutMs: 60_000, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 10 }, { info: () => {}, warn: () => {} })
+  try {
+    const sseA = makeClient('ssepeer', 'http://127.0.0.1:18999/mcp')
+    const checker = makeClient('checker2', 'http://127.0.0.1:18999/mcp')
+    await sseA.init()
+    await checker.init()
+    const sseRes = await fetch('http://127.0.0.1:18999/mcp', { headers: { Accept: 'text/event-stream', 'Mcp-Session-Id': sseA.sessionId() } })
+    const sseReader = sseRes.body.getReader()
+    await sseReader.read() // consume the ": connected" comment; stream stays open
+    await new Promise(resolve => setTimeout(resolve, 600)) // beyond the 400ms activity window
+    const alive = await checker.call('bridge_peers')
+    check('SSE stream counts as connected without activity', alive.peers.find(p => p.id === 'ssepeer')?.connected === true, JSON.stringify(alive))
+    await sseReader.cancel()
+    await new Promise(resolve => setTimeout(resolve, 600))
+    const gone = await checker.call('bridge_peers')
+    check('peer shows offline after SSE closes', gone.peers.find(p => p.id === 'ssepeer')?.connected === false, JSON.stringify(gone))
+  } finally {
+    hubSse.close()
+  }
+
+  console.log('== idle GC evicts ghosts ==')
+  const hubGc = startHub({ port: 19000, peerIdleTimeoutMs: 700, connectedWindowMs: 60_000, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 10 }, { info: () => {}, warn: () => {} })
+  try {
+    const ghost = makeClient('gcpear', 'http://127.0.0.1:19000/mcp')
+    const checkerGc = makeClient('checker3', 'http://127.0.0.1:19000/mcp')
+    await ghost.init()
+    await checkerGc.init()
+    const before = await checkerGc.call('bridge_peers')
+    check('peer registered before GC', before.peers.some(p => p.id === 'gcpear'), JSON.stringify(before))
+    await new Promise(resolve => setTimeout(resolve, 2200)) // idle 700ms + 1s GC interval
+    const after = await checkerGc.call('bridge_peers')
+    check('idle peer evicted by GC', !after.peers.some(p => p.id === 'gcpear'), JSON.stringify(after))
+    const rejoined = await ghost.call('bridge_peers') // next call re-auto-registers
+    check('evicted session re-registers on next call', rejoined.peers.some(p => p.id === 'gcpear'), JSON.stringify(rejoined))
+
+    // A peer with a live SSE channel must survive the idle GC (open session = online).
+    const liveGc = makeClient('livegc', 'http://127.0.0.1:19000/mcp')
+    await liveGc.init()
+    const liveGcSse = await fetch('http://127.0.0.1:19000/mcp', { headers: { Accept: 'text/event-stream', 'Mcp-Session-Id': liveGc.sessionId() } })
+    const liveGcReader = liveGcSse.body.getReader()
+    await liveGcReader.read()
+    await new Promise(resolve => setTimeout(resolve, 2200)) // far past the 700ms idle budget
+    const during = await checkerGc.call('bridge_peers')
+    check('live SSE peer survives idle GC', during.peers.some(p => p.id === 'livegc'), JSON.stringify(during))
+    await liveGcReader.cancel()
+    await new Promise(resolve => setTimeout(resolve, 1500)) // next GC tick evicts it
+    const afterClose = await checkerGc.call('bridge_peers')
+    check('peer evicted after SSE closes', !afterClose.peers.some(p => p.id === 'livegc'), JSON.stringify(afterClose))
+  } finally {
+    hubGc.close()
+  }
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1
