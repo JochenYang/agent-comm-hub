@@ -101,11 +101,11 @@ agent-comm-hub setup
 ```
 
 `setup` incrementally merges the `agent-hub` MCP entry into every installed
-agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex, zcode) and
-installs the English skill into `~/.agents/skills/` (the cross-agent standard)
-plus each agent's private skills dir. Only the `agent-hub` key is touched,
-every file is backed up first, and re-running is a no-op. Claude Code and DSH
-stay manual (see below).
+agent's own config (mcode, opencode, Kimi Code, Gemini CLI, Codex, zcode, DSH)
+and installs the English skill into `~/.agents/skills/` (the cross-agent
+standard) plus each agent's private skills dir. Only the `agent-hub` key is
+touched, every file is backed up first, and re-running is a no-op. Claude Code
+stays manual (see below).
 
 **Registration is automatic**: once an agent session starts, the MCP handshake
 registers it with the hub (client name becomes the peer id) — no manual step.
@@ -125,9 +125,9 @@ Each agent gets **one MCP server entry** pointing at `http://127.0.0.1:18764/mcp
 
 **One-shot incremental sync** (recommended): `agents/install-all.ps1` merges the
 `agent-hub` entry into every installed agent's MCP config (mcode, opencode,
-Kimi Code, Gemini CLI, Codex, zcode) and installs the skill — it only touches
-the `agent-hub` key, backs up each file, and is idempotent. Claude Code and DSH
-are manual (below).
+Kimi Code, Gemini CLI, Codex, zcode, DSH) and installs the skill — it only
+touches the `agent-hub` key, backs up each file, and is idempotent. Claude Code
+is manual (below).
 
 | Agent | Config file | Template | Skill location |
 |---|---|---|---|
@@ -138,7 +138,7 @@ are manual (below).
 | Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-comm-hub/SKILL.md` |
 | zcode | `~/.zcode/cli/config.json` (`mcp.servers`) | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
 | Claude Code | project `.mcp.json` (manual; `~/.claude.json` is never touched) | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-comm-hub/SKILL.md` |
-| DeepSeek Harness (DSH) | profile `cordis.patch.yml` (manual) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
+| DeepSeek Harness (DSH) | `~/.dsh/profiles/*/cordis.patch.yml` (auto by `setup`) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 
 > Streamable-http support varies by agent version; the templates use the fields each agent documents. If a client lacks HTTP MCP, wrap the endpoint with a stdio shim.
 
@@ -216,7 +216,10 @@ Merge into `~/.gemini/settings.json`:
 
 ### DeepSeek Harness (DSH)
 
-Merge `agents/dsh/cordis.patch.yml` into the profile patch layer; DSH's built-in `@deepseek-ai/dsh-mcp-client` connects and exposes the tools as `mcp__agent-hub__bridge_*`:
+Auto-configured by `agent-comm-hub setup`: it discovers
+`~/.dsh/profiles/*/cordis.patch.yml` and appends the `@deepseek-ai/dsh-mcp-client`
+row, so DSH sessions expose the tools as `mcp__agent-hub__bridge_*` after a dsh
+restart. Manual equivalent (or template for other profiles):
 
 ```yaml
 - insert:

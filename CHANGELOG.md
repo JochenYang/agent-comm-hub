@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 (2026-08-14)
+
+- **DSH auto-config in `setup`**: `agent-comm-hub setup` now discovers DSH
+  (`~/.dsh/profiles/*/cordis.patch.yml`) and inserts the
+  `@deepseek-ai/dsh-mcp-client` plugin row pointing at the hub — installing
+  the hub and running setup is all it takes for DSH sessions to expose the
+  `bridge_*` tools. Same contract as the other targets: only the marked
+  block is touched, every edit is backed up, idempotent, url changes replace
+  the block in place, `--remove` undoes it. Skill installs to
+  `~/.dsh/skills/agent-comm-hub/` too. DSH is no longer a manual target.
+- Fixed the block-edit boundary logic (line-scoped now): replacing/removing
+  the DSH block when it sits directly after another entry (no blank line)
+  used to glue the neighbor's last line to the next entry. Covered by tests.
+- setup suite grows to 32 checks (dsh insert/url-change/remove incl. tight
+  block). Total suite: 110 checks.
+
 ## 0.5.0 (2026-08-14)
 
 - **Smart fallback in the control tools**: every `bridge_agent_*` tool now
