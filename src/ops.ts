@@ -91,29 +91,37 @@ export interface ServiceOptions {
 
 /** Self-update: reinstall the package from the npm registry (files in place).
  * The global install path does not change, so a previously registered
- * auto-start launcher (Run key / VBS or systemd unit) keeps working. */
+ * auto-start launcher (Run key / VBS or systemd unit) keeps working.
+ *
+ * npm runs in a THROWAWAY child process (`node -e`, no files on disk): npm
+ * reifies by moving the package directory, which races this process's own
+ * open files on Windows (observed: npm exits 0 but the files are left on the
+ * old version). The child lives outside the package dir, so the swap is
+ * uncontended, and the parent stays alive until it finishes. --prefer-online
+ * forces fresh registry metadata (npm caches packuments ~5 min, which would
+ * hide a just-published version). */
 export function runUpdate(): { ok: boolean; messages: string[] } {
   const messages: string[] = []
-  const pkgFile = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
-  const readVersion = (): string => {
-    try {
-      return (JSON.parse(readFileSync(pkgFile, 'utf8')) as { version?: string }).version ?? '?'
-    } catch {
-      return '?'
-    }
-  }
   try {
-    const before = readVersion()
+    const pkgFile = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+    const before = (JSON.parse(readFileSync(pkgFile, 'utf8')) as { version?: string }).version ?? '?'
     messages.push(`current version: ${before}`)
-    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-    // --prefer-online: npm caches registry packuments (~5 min), which would
-    // hide a just-published version behind the @latest tag.
-    const out = execFileSync(npmBin, ['install', '-g', '--prefer-online', 'agent-comm-hub@latest'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' })
-    const tail = out.trim().split(/\r?\n/).slice(-3).filter(Boolean).join(' | ')
-    if (tail) messages.push(tail)
-    const after = readVersion()
-    if (after === before) messages.push(`already up to date (v${after})`)
-    else messages.push(`updated: v${before} -> v${after}`)
+    const script = [
+      "import { execFileSync } from 'node:child_process'",
+      "import { readFileSync } from 'node:fs'",
+      `const pkg = ${JSON.stringify(pkgFile)}`,
+      "const read = () => JSON.parse(readFileSync(pkg, 'utf8')).version",
+      "const before = read()",
+      "const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'",
+      "const out = execFileSync(npmBin, ['install', '-g', '--prefer-online', 'agent-comm-hub@latest'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' })",
+      "const tail = out.trim().split(/\\r?\\n/).slice(-3).filter(Boolean).join(' | ')",
+      "if (tail) console.log(tail)",
+      "const after = read()",
+      "if (after === before) console.log('already up to date (v' + after + ')')",
+      "else console.log('updated: v' + before + ' -> v' + after)",
+    ].join('\n')
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', windowsHide: true })
+    messages.push(out.trim())
     messages.push('restart the hub (agent-comm-hub) to pick up the new version')
     return { ok: true, messages }
   } catch (error) {
