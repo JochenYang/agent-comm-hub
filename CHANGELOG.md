@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.10 (2026-08-14)
+
+- **SKILL gains a plain-language "典型工作流" section**: task delegation
+  (accept → develop → deliver → review, with wait-vs-not-wait variants) and
+  multi-agent real-time discussion (keep long-polling until the talk ends).
+  Each scenario pairs colloquial instructions with the exact bridge tool
+  names, so agents map everyday wording to the right calls.
+
 ## 0.1.9 (2026-08-14)
 
 - **`agent-comm-hub update`**: self-update from the npm registry — reinstalls

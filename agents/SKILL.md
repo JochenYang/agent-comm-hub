@@ -52,6 +52,26 @@ Optional: call `bridge_register(peerId)` to claim a readable id
    decline and `"failed"` when it could not be completed (always with a note).
 5. Unsure whether the peer is online: check `bridge_peers()` first.
 
+## 典型工作流（口语化示例）
+
+按场景直接照做（工具名保持英文）：
+
+**1. 别人派活给你（如 codex 规划 → 你开发）**
+- 收到任务：先 `bridge_ack(ref, "accepted")` 回执，说"收到，开始干"。
+- 干完：把成果和交付说明发回给派活的人（`bridge_chat` / `bridge_task`），
+  再 `bridge_ack(ref, "done", 交付说明)`，让它审查。
+- 干不了：`bridge_ack(ref, "rejected")` 并说明原因。
+
+**2. 你派活给别人（等 vs 不等）**
+- 挂着等：`bridge_task` 发出去后循环 `bridge_wait()`，直到收到交付，接手检查。
+- 不等：发完就干别的；对方完成会主动发回结果，你之后随时用
+  `bridge_poll()` / `bridge_wait()` / `bridge_history()` 查收（消息会排队存着）。
+
+**3. 多 agent 实时讨论**
+- 说完自己的观点后不要散场：循环 `bridge_wait()` 继续听，一轮没消息就再等
+  一轮，直到讨论有结论或用户说"结束"。
+- 超时（`{type:"timeout"}`）不是失败，继续等。
+
 ## Notes
 
 - Messages travel on loopback only (127.0.0.1:18764); never put credentials
