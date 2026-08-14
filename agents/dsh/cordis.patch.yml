@@ -1,0 +1,7 @@
+- insert:
+    - id: agent-comm-hub
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agent-hub
+        transport: streamable-http
+        url: http://127.0.0.1:18764/mcp

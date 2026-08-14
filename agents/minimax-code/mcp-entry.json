@@ -1,0 +1,10 @@
+{
+  "agent-hub": {
+    "url": "http://127.0.0.1:18764/mcp",
+    "type": "streamable-http",
+    "enabled": true,
+    "configured": true,
+    "timeout": 120000,
+    "description": "agent-comm-hub: talk to every other agent connected to the hub. Call bridge_register(peerId) first, then bridge_chat / bridge_task / bridge_ack / bridge_wait / bridge_poll / bridge_status / bridge_peers / bridge_history."
+  }
+}
