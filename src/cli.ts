@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 /**
- * agent-comm-hub CLI: start the multi-peer MCP hub.
+ * agent-comm-hub CLI.
  *
- *   agent-comm-hub [--port 18764] [--host 127.0.0.1] [--path /mcp]
- *                 [--max-queue 200] [--history-limit 100]
- *                 [--wait-timeout-ms 60000] [--default-wait-ms 30000]
+ *   agent-comm-hub [--port 18764] [--host 127.0.0.1] [--path /mcp] ...   start the hub
+ *   agent-comm-hub setup [--url <hub-url>] [--server-name agent-hub]     sync MCP entry
+ *                                                          [--remove]    + skill to agents
  */
 
 import { startHub, SERVER_VERSION } from './index.js'
+import { runSetup } from './setup.js'
+import { runService, runStatus } from './ops.js'
 
 interface CliArgs {
   [key: string]: number | string | boolean
@@ -15,11 +17,15 @@ interface CliArgs {
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
-  const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms'])
-  const string = new Set(['--host', '--path'])
+  const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms'])
+  const string = new Set(['--host', '--path', '--url', '--server-name'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
+      args[flag] = true
+      continue
+    }
+    if (flag === '--remove' || flag === '--dry-run') {
       args[flag] = true
       continue
     }
@@ -44,9 +50,17 @@ function printHelp(): void {
   console.log(`agent-comm-hub v${SERVER_VERSION} — generic multi-peer MCP hub
 
 Usage:
-  agent-comm-hub [options]
+  agent-comm-hub [options]                 start the hub
+  agent-comm-hub setup [options]           sync the MCP entry + skill into
+                                           every installed agent (incremental,
+                                           idempotent; --remove undoes)
+  agent-comm-hub status [options]          show hub health + online peers
+  agent-comm-hub service install|uninstall [options]
+                                           one-shot auto-start (Windows
+                                           Task Scheduler / Linux systemd;
+                                           --dry-run prints commands)
 
-Options:
+Hub options:
   --host <addr>            Bind address (default 127.0.0.1)
   --port <n>               Listen port (default 18764)
   --path <p>               MCP endpoint path (default /mcp)
@@ -54,11 +68,19 @@ Options:
   --history-limit <n>      Retained history messages (default 100)
   --wait-timeout-ms <n>    Long-poll ceiling for bridge_wait (default 60000)
   --default-wait-ms <n>    bridge_wait default budget (default 30000)
+  --connected-window-ms <n>  Peer counts as active within this window (default 30000)
+  --peer-idle-timeout-ms <n> Auto-unregister idle peers after this; 0 disables (default 600000)
+
+Setup options:
+  --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
+  --server-name <name>     Config key (default agent-hub)
+  --remove                 Uninstall instead of install
+
   -h, --help               Show this help
   -V, --version            Show version
 
-Agents connect via MCP streamable-http at http://<host>:<port><path> and call
-bridge_register first — see agents/ for per-agent config templates.`)
+Agents connect via MCP streamable-http at http://<host>:<port><path> and are
+auto-registered at connect (client name becomes the peer id).`)
 }
 
 const log = {
@@ -67,7 +89,71 @@ const log = {
 }
 
 try {
-  const args = parseArgs(process.argv.slice(2))
+  const argv = process.argv.slice(2)
+  const [command, ...rest] = argv
+
+  if (command === 'setup' || command === 'install') {
+    const args = parseArgs(rest)
+    if (args['--help'] || args['-h']) {
+      printHelp()
+      process.exit(0)
+    }
+    await runSetup({
+      url: args['--url'] as string | undefined,
+      serverName: args['--server-name'] as string | undefined,
+      remove: args['--remove'] === true,
+      log: message => log.info(message),
+    })
+    process.exit(0)
+  }
+
+  if (command === 'status') {
+    const args = parseArgs(rest)
+    const result = await runStatus({
+      host: args['--host'] as string | undefined,
+      port: args['--port'] as number | undefined,
+      path: args['--path'] as string | undefined,
+      url: args['--url'] as string | undefined,
+    })
+    if (!result.running) {
+      console.error(`hub is not running at ${result.url}${result.error ? ` (${result.error})` : ''}`)
+      console.error('start it with: agent-comm-hub')
+      process.exit(1)
+    }
+    console.log(`agent-comm-hub${result.version ? ` v${result.version}` : ''} at ${result.url}`)
+    if (result.peers.length === 0) {
+      console.log('no peers online yet — start an agent session to see it appear')
+    } else {
+      for (const peer of result.peers) {
+        console.log(`  ${peer.id.padEnd(32)} ${peer.connected ? 'connected' : 'offline'}`)
+      }
+    }
+    process.exit(0)
+  }
+
+  if (command === 'service') {
+    const [action, ...serviceRest] = rest
+    if (action !== 'install' && action !== 'uninstall') {
+      console.error(`service: expected 'install' or 'uninstall', got '${action ?? ''}'`)
+      process.exit(1)
+    }
+    const args = parseArgs(serviceRest)
+    const result = runService({
+      action,
+      host: args['--host'] as string | undefined,
+      port: args['--port'] as number | undefined,
+      path: args['--path'] as string | undefined,
+      dryRun: args['--dry-run'] === true,
+    })
+    for (const message of result.messages) log.info(message)
+    if (!result.ok) {
+      console.error('service: failed — see messages above')
+      process.exit(1)
+    }
+    process.exit(0)
+  }
+
+  const args = parseArgs(argv)
   if (args['--help'] || args['-h']) {
     printHelp()
     process.exit(0)
@@ -84,6 +170,8 @@ try {
     historyLimit: args['--history-limit'] as number | undefined,
     waitTimeoutMs: args['--wait-timeout-ms'] as number | undefined,
     defaultWaitMs: args['--default-wait-ms'] as number | undefined,
+    connectedWindowMs: args['--connected-window-ms'] as number | undefined,
+    peerIdleTimeoutMs: args['--peer-idle-timeout-ms'] as number | undefined,
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

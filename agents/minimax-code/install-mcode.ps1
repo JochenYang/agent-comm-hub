@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 Install the agent-comm-hub client into MiniMax Code (mcode): register the hub
 MCP endpoint and install the hub skill. Run as the same user that runs mcode.

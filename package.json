@@ -1,7 +1,18 @@
 {
   "name": "agent-comm-hub",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "description": "Generic multi-peer MCP hub: any MCP-capable agent (MiniMax Code, Claude Code, opencode, Codex, Gemini CLI, DSH, ...) connects to one local streamable-http endpoint and they chat, delegate tasks, and acknowledge in real time",
+  "keywords": [
+    "mcp",
+    "agent",
+    "hub",
+    "multi-agent",
+    "communication",
+    "streamable-http",
+    "cli",
+    "ai"
+  ],
+  "author": "agent-comm-hub contributors",
   "type": "module",
   "main": "lib/index.js",
   "bin": {
@@ -10,6 +21,7 @@
   "files": [
     "lib",
     "agents",
+    "assets",
     "README.md"
   ],
   "engines": {
@@ -23,10 +35,10 @@
     "typescript": "^5.8.0"
   },
   "scripts": {
-    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=lib/cli.js && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=lib/index.js",
-    "build:test": "esbuild test/entry.ts --bundle --platform=node --format=esm --outfile=test/entry.mjs",
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --outfile=lib/cli.js && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=lib/index.js && esbuild src/setup.ts --bundle --platform=node --format=esm --outfile=lib/setup.js",
+    "build:test": "esbuild test/entry.ts --bundle --platform=node --format=esm --outfile=test/entry.mjs && esbuild test/setup-entry.ts --bundle --platform=node --format=esm --outfile=test/setup-entry.mjs && esbuild test/ops-entry.ts --bundle --platform=node --format=esm --outfile=test/ops-entry.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm run build:test && node test/smoke.mjs",
+    "test": "pnpm run build:test && node test/smoke.mjs && node test/setup.mjs && node test/ops.mjs",
     "pack": "pnpm run build && pnpm pack",
     "prepublishOnly": "pnpm run test && pnpm run build",
     "prepare": "pnpm run build"

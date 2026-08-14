@@ -3,3 +3,5 @@ lib/
 *.tgz
 .pack-staging/
 test/entry.mjs
+test/setup-entry.mjs
+test/ops-entry.mjs

@@ -1,42 +1,62 @@
 ---
 name: agent-comm-hub
 description:
-  与连接到本机 agent-comm-hub 的其他 AI agent 实时双向通信。当用户提到另一个 agent、
-  hub、群聊、给其他 agent 发消息/任务、等别的 agent 回复，或需要把结果转交给别的
-  agent 时使用。工具：bridge_register / bridge_chat / bridge_task / bridge_ack /
-  bridge_wait / bridge_poll / bridge_status / bridge_peers / bridge_history。
+  Real-time two-way communication with other AI agents connected to the local
+  agent-comm-hub. Use when the user mentions another agent, the hub, group
+  chat, sending messages or tasks to another agent, waiting for another
+  agent's reply, or forwarding results between agents. Tools:
+  bridge_register / bridge_chat / bridge_task / bridge_ack / bridge_wait /
+  bridge_poll / bridge_status / bridge_peers / bridge_history.
 ---
 
-# agent-comm-hub 使用约定
+# agent-comm-hub usage
 
-本机运行着 agent-comm-hub（MCP 桥接枢纽），其他 AI agent（Claude Code、opencode、
-MiniMax Code、DSH 等）可能也在线。每次会话**第一步**：
+A local hub (`agent-comm-hub` on 127.0.0.1:18764) connects this agent with
+every other MCP-capable agent on this machine (MiniMax Code, opencode, Kimi
+Code, Claude Code, DeepSeek Harness, …).
 
-1. 调 `bridge_register(peerId)` 认领身份——peerId 用 `工具名:项目名` 风格，
-   如 `claude-code:myproject`。已占用会报错，换一个即可。
-2. 调 `bridge_peers()` 看谁在线。
+**You are already registered**: connecting to the hub auto-registers you at
+the MCP handshake using your client name — no manual step needed. Same-name
+connections share one peer id, so your identity is stable across sessions.
+Optional: call `bridge_register(peerId)` to claim a readable id
+(`tool:project`, e.g. `claude-code:myproject`; errors when taken).
 
-工具速查：
+## Tools
 
-- `bridge_chat(to, message)` —— 给某个 peer 发消息；`to: "all"` 广播。
-- `bridge_task(to, prompt, context?, deliverable?)` —— 派任务。
-- `bridge_ack(ref, status, note?)` —— 回执（accepted/rejected/done/failed），自动回到原发送者。
-- `bridge_wait(from?, timeoutMs?)` —— 长轮询等消息（默认 30s，可循环）。
-- `bridge_poll(from?)` —— 非阻塞取走所有排队消息。
-- `bridge_status()` / `bridge_peers()` —— 枢纽健康与在线列表。
-- `bridge_history(peer?, limit?)` —— 最近往来消息。
+- `bridge_chat(to, message)` — send a chat message to a peer; `to: "all"`
+  broadcasts.
+- `bridge_task(to, prompt, context?, deliverable?)` — delegate a structured
+  task.
+- `bridge_ack(ref, status, note?)` — acknowledge a task
+  (`accepted`/`rejected`/`done`/`failed`), auto-routed back to the original
+  sender.
+- `bridge_wait(from?, timeoutMs?)` — long-poll for the next message (default
+  30 s; loop it to hold a real-time conversation).
+- `bridge_poll(from?)` — non-blocking drain of every queued message.
+- `bridge_status()` / `bridge_peers()` — hub health and who is online.
+- `bridge_history(peer?, limit?)` — recent messages (newest first).
 
-## 何时使用
+## When to use
 
-1. 用户提到"另一个 agent / hub / 那边"且指向其他 agent 时，用桥接工具沟通。
-2. 收消息：先 `bridge_poll()`，没有就循环 `bridge_wait()` 直到拿到或超时。
-3. 收到 `task`（content 为 `{prompt, context?, deliverable?}`）：
-   先 `bridge_ack(ref, "accepted")` 接下，完成后 `bridge_ack(ref, "done"[, note])`；
-   拒绝用 `rejected`，失败用 `failed`（附原因）。
-4. 不确定对端在线：先 `bridge_peers()`。
+1. The user mentions "another agent / the hub / over there" pointing at a
+   different agent — use the bridge tools.
+2. **Before messaging a specific agent, call `bridge_peers()` first and use
+   its exact peerId.** If the target is not listed, it is not connected yet —
+   do NOT guess a peerId or send blindly; tell the user the other agent needs
+   to be running (it registers automatically on connect).
+3. Receiving: try `bridge_poll()` first; if empty, loop `bridge_wait()` until
+   a message arrives or you give up.
+4. On receiving a `task` (content is `{prompt, context?, deliverable?}`):
+   acknowledge with `bridge_ack(ref, "accepted")` when you take it on, then
+   `bridge_ack(ref, "done"[, note])` when finished; use `"rejected"` to
+   decline and `"failed"` when it could not be completed (always with a note).
+5. Unsure whether the peer is online: check `bridge_peers()` first.
 
-## 注意
+## Notes
 
-- 消息只走本机回环（默认 127.0.0.1:18764）；不要把敏感凭据写进消息。
-- 超时不是失败：`bridge_wait` 返回 `{type:"timeout"}` 时可稍后再试。
-- 对话节奏：对方在线时用 10–30s 短轮询；不确定时先 `bridge_peers`。
+- Messages travel on loopback only (127.0.0.1:18764); never put credentials
+  in bridge messages.
+- A timeout is not a failure: `bridge_wait` returning `{type:"timeout"}` just
+  means nothing arrived — try again.
+- Cadence: use 10–30 s short polls when the peer is active; check
+  `bridge_peers()` when unsure.

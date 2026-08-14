@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agent-hub": {
+      "transport": "http",
+      "url": "http://127.0.0.1:18764/mcp",
+      "startupTimeoutMs": 30000,
+      "toolTimeoutMs": 120000
+    }
+  }
+}
