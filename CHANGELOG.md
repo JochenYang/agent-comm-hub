@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.0 (2026-08-14)
+
+- **Smart fallback in the control tools**: every `bridge_agent_*` tool now
+  auto-detects whether herdr recognizes the target (`agent.get` probe) and
+  picks the best channel:
+  - recognized agents → herdr's advanced features (`agent.prompt` with
+    state-machine wait, `agent.wait` until idle/done/blocked, structured
+    status);
+  - unrecognized panes (e.g. MiniMax Code) → pane-level fallback
+    (`pane.send_input` + Enter, output-settling wait, pane-derived status).
+  Every result reports `via: "agent" | "pane"` so callers know the channel.
+  Live-verified on Windows: a MiniMax Code session (unrecognized) and a
+  Claude Code session (recognized) both driven through the hub — Claude Code
+  answered "一切正常,待命中" / "嗨,有什么可以帮你的?" via the agent
+  channel, MiniMax Code via the pane fallback (settled in ~3.1s by output
+  stability).
+- **`bridge_pane_wait`**: pane-level output-pattern wait (`pane.wait_for_output`,
+  substring or regex) — the waiting primitive for agents herdr does not
+  recognize; returns the matched pane output or `matched: null` on timeout.
+- **Read path fixed**: `herdr agent read --format text` prints RAW text (no
+  JSON envelope), so `readSmart` now reads via the socket `pane.read` for
+  both channels (structured, carries revision/truncated).
+- `HerdrCtl` gains `detectTarget` / `promptSmart` / `waitSmart` / `readSmart` /
+  `keysSmart` / `statusSmart` / `paneWaitForOutput`.
+- herdr control suite grows to 35 checks (smart fallback both channels,
+  pane wait match + timeout, status/read/keys fallbacks).
+
 ## 0.4.0 (2026-08-14)
 
 - **pane-level control tools**: `bridge_pane_list`, `bridge_pane_send`,

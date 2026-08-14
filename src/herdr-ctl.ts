@@ -74,6 +74,22 @@ export interface HerdrSettled {
   waitedMs: number | null
 }
 
+/** Which channel a smart control call actually used. */
+export type ControlChannel = 'agent' | 'pane'
+
+/** Outcome of a smart prompt/wait: the channel used plus the settled state
+ * (null when the wait budget ran out without settling). */
+export interface HerdrSmartResult {
+  via: ControlChannel
+  settled: HerdrSettled | null
+}
+
+/** Text match for `pane.wait_for_output`. */
+export interface HerdrOutputMatch {
+  type: 'substring' | 'regex'
+  value: string
+}
+
 export interface HerdrOptions {
   /** herdr CLI binary (default 'herdr', resolved via PATH). */
   bin?: string
@@ -157,6 +173,153 @@ export class HerdrCtl {
       text: String(read.text ?? ''),
       revision: Number(read.revision ?? 0),
       truncated: read.truncated === true,
+    }
+  }
+
+  /** `pane.wait_for_output` — block until the pane output matches a pattern
+   * (substring or regex), or the budget elapses. Returns the matched pane
+   * output, or null on timeout. */
+  async paneWaitForOutput(paneId: string, match: HerdrOutputMatch, options: { lines?: number; timeoutMs?: number; source?: 'visible' | 'recent' | 'recent-unwrapped' | 'detection' } = {}): Promise<HerdrRead | null> {
+    const params: Record<string, unknown> = {
+      pane_id: paneId,
+      source: options.source ?? 'recent',
+      match: { type: match.type, value: match.value },
+      strip_ansi: true,
+    }
+    if (options.lines !== undefined) params.lines = options.lines
+    if (options.timeoutMs !== undefined) params.timeout_ms = options.timeoutMs
+    let result: unknown
+    try {
+      result = await this.sendRequest('pane.wait_for_output', params)
+    } catch (error) {
+      // herdr reports a wait timeout as an error envelope; treat it as a
+      // non-match, not a failure.
+      if (/(timeout|timed out)/i.test((error as Error).message)) return null
+      throw error
+    }
+    const raw = (result as { read?: unknown }).read ?? result
+    if (raw === null || typeof raw !== 'object') return null
+    const read = raw as Record<string, unknown>
+    return {
+      paneId: String(read.pane_id ?? paneId),
+      tabId: read.tab_id === undefined ? '' : String(read.tab_id),
+      workspaceId: read.workspace_id === undefined ? null : String(read.workspace_id),
+      source: String(read.source ?? options.source ?? 'recent'),
+      text: String(read.text ?? ''),
+      revision: Number(read.revision ?? 0),
+      truncated: read.truncated === true,
+    }
+  }
+
+  // ---- smart control: use herdr's agent features when the target is
+  // recognized, transparently fall back to pane-level control otherwise ---
+
+  /** Detect whether herdr recognizes `target` as an agent (i.e. its
+   * agent.get succeeds). Unrecognized panes fall back to pane control. */
+  async detectTarget(target: string): Promise<ControlChannel> {
+    try {
+      await this.get(target)
+      return 'agent'
+    } catch {
+      return 'pane'
+    }
+  }
+
+  /** Prompt with automatic fallback: agent.prompt for recognized agents
+   * (state-machine wait), pane.send_input + output-settling wait otherwise. */
+  async promptSmart(target: string, text: string, options: { wait?: boolean; until?: AgentStatus[]; timeoutMs?: number; enter?: boolean } = {}): Promise<HerdrSmartResult> {
+    if (await this.detectTarget(target) === 'agent') {
+      const settled = await this.prompt(target, text, {
+        wait: options.wait,
+        until: options.until,
+        timeoutMs: options.timeoutMs,
+      })
+      return { via: 'agent', settled }
+    }
+    await this.paneSendText(target, text)
+    if (options.enter !== false) await this.paneSendKeys(target, ['Enter'])
+    if (options.wait !== true) return { via: 'pane', settled: null }
+    const budget = options.timeoutMs ?? this.defaultTimeoutMs
+    const settled = await this.waitForPaneSettled(target, budget)
+    return { via: 'pane', settled }
+  }
+
+  /** Wait with automatic fallback: agent.wait (state machine) for recognized
+   * agents; pane output-settling heuristic otherwise. */
+  async waitSmart(target: string, options: { until?: AgentStatus[]; timeoutMs?: number } = {}): Promise<HerdrSmartResult> {
+    if (await this.detectTarget(target) === 'agent') {
+      const settled = await this.wait(target, options)
+      return { via: 'agent', settled }
+    }
+    const budget = options.timeoutMs ?? this.defaultTimeoutMs
+    const settled = await this.waitForPaneSettled(target, budget)
+    return { via: 'pane', settled }
+  }
+
+  /** Read terminal output of a target. Uses the socket `pane.read` for both
+   * recognized agents and plain panes: the CLI's `agent read --format text`
+   * prints RAW text to stdout (no JSON envelope), so it cannot feed the
+   * structured result path — the socket request is uniform and carries
+   * revision/truncated metadata. */
+  async readSmart(target: string, options: { lines?: number; source?: 'visible' | 'recent' | 'recent-unwrapped' | 'detection' } = {}): Promise<HerdrRead> {
+    return this.paneRead(target, options)
+  }
+
+  /** Key presses with automatic fallback: agent.send_keys for recognized
+   * agents, pane.send_keys otherwise. */
+  async keysSmart(target: string, keys: string[]): Promise<void> {
+    if (keys.length === 0) throw new Error('keysSmart: at least one key is required')
+    if (await this.detectTarget(target) === 'agent') {
+      await this.sendKeys(target, keys)
+      return
+    }
+    await this.paneSendKeys(target, keys)
+  }
+
+  /** Status with automatic fallback: agent.get for recognized agents; a
+   * pane-derived summary (status unknown) otherwise. */
+  async statusSmart(target: string): Promise<{ agent: HerdrAgent | null; pane: HerdrPane | null }> {
+    try {
+      const agent = await this.get(target)
+      return { agent, pane: null }
+    } catch {
+      try {
+        const panes = await this.paneList()
+        const pane = panes.find(p => p.paneId === target)
+        return { agent: null, pane: pane ?? null }
+      } catch {
+        return { agent: null, pane: null }
+      }
+    }
+  }
+
+  /** Heuristic settle for unrecognized panes: poll pane.read revisions until
+   * the output stops changing for a short window, or the budget elapses. */
+  private async waitForPaneSettled(paneId: string, timeoutMs: number): Promise<HerdrSettled | null> {
+    const startedAt = Date.now()
+    let lastRevision = -1
+    let stableTicks = 0
+    // Two consecutive unchanged polls (~3s) count as "settled".
+    const stableTarget = 2
+    const pollMs = 1500
+    for (;;) {
+      const elapsed = Date.now() - startedAt
+      if (elapsed >= timeoutMs) return null
+      try {
+        const read = await this.paneRead(paneId, { source: 'recent' })
+        if (read.revision === lastRevision) {
+          stableTicks++
+          if (stableTicks >= stableTarget) {
+            return { paneId, status: 'idle', waitedMs: Date.now() - startedAt }
+          }
+        } else {
+          stableTicks = 0
+          lastRevision = read.revision
+        }
+      } catch {
+        // pane may be briefly unreadable; keep polling
+      }
+      await new Promise(resolve => setTimeout(resolve, pollMs))
     }
   }
 

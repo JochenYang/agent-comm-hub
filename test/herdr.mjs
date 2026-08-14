@@ -129,6 +129,27 @@ async function fakeSendRequest(method, params) {
           truncated: false,
         },
       }
+    case 'pane.wait_for_output': {
+      const match = params.match ?? {}
+      if (match.value === 'NEVER') {
+        throw new Error('wait_timeout: pane output did not match within the budget')
+      }
+      return {
+        type: 'output_matched',
+        pane_id: params.pane_id,
+        revision: 43,
+        read: {
+          pane_id: params.pane_id,
+          tab_id: 'wT:t1',
+          workspace_id: 'wT',
+          source: 'recent',
+          format: 'text',
+          text: `[matched output for ${params.pane_id}] ${match.value}`,
+          revision: 43,
+          truncated: false,
+        },
+      }
+    }
     default:
       throw new Error(`fake socket: unexpected method ${method}`)
   }
@@ -176,8 +197,8 @@ try {
   const status = await mavis.call('bridge_agent_status', { target: 'w1:p1' })
   check('bridge_agent_status resolves one agent', status.agent?.status === 'idle' && status.agent?.cwd === 'C:\\projects\\demo', JSON.stringify(status))
 
-  const missing = await claude.callRaw('bridge_agent_status', { target: 'w7:p9' })
-  check('unknown target surfaces agent_not_found', missing.isError === true && /agent_not_found/.test(missing.text), missing.text)
+  const missing = await claude.call('bridge_agent_status', { target: 'w7:p9' })
+  check('unknown target status returns null agent and no pane', missing.agent === null && missing.pane === undefined, JSON.stringify(missing))
 
   const prompted = await mavis.call('bridge_agent_prompt', { target: 'w1:p1', text: '/compact' })
   check('bridge_agent_prompt submits without waiting', prompted.submitted === true && prompted.settled === undefined, JSON.stringify(prompted))
@@ -203,7 +224,7 @@ try {
   check('bridge_agent_wait returns the matched status', settled.settled?.status === 'blocked' && settled.settled?.waitedMs === 12, JSON.stringify(settled))
 
   const read = await mavis.call('bridge_agent_read', { target: 'w1:p1', lines: 10 })
-  check('bridge_agent_read returns pane output', read.paneId === 'w1:p1' && typeof read.text === 'string' && read.text.includes('[fake output for w1:p1]') && read.truncated === false, JSON.stringify(read))
+  check('bridge_agent_read returns pane output', read.paneId === 'w1:p1' && typeof read.text === 'string' && read.text.includes('[pane output for w1:p1]') && read.truncated === false, JSON.stringify(read))
 
   const keys = await mavis.call('bridge_agent_keys', { target: 'w1:p1', keys: ['esc', 'Enter'] })
   check('bridge_agent_keys sends keys verbatim', keys.ok === true && keys.sent?.length === 2 && keys.sent[0] === 'esc', JSON.stringify(keys))
@@ -247,6 +268,50 @@ try {
 
   const paneEmpty = await mavis.callRaw('bridge_pane_send', { target: 'wT:p2', text: '' })
   check('empty pane text rejected', paneEmpty.isError === true && /must not be empty/.test(paneEmpty.text), paneEmpty.text)
+
+  console.log('== smart fallback (recognized agent vs unrecognized pane) ==')
+
+  const smartAgent = await mavis.call('bridge_agent_prompt', { target: 'w1:p1', text: 'hi', wait: true, timeoutMs: 8000 })
+  check('recognized agent prompt uses agent channel', smartAgent.via === 'agent' && smartAgent.settled?.status === 'idle', JSON.stringify(smartAgent))
+  check(
+    'recognized agent prompt goes through herdr CLI',
+    callsFor('prompt').some(call => call.rest[0] === 'w1:p1' && call.rest[1] === 'hi'),
+    JSON.stringify(callsFor('prompt')),
+  )
+
+  const beforeFallback = socketCalls.length
+  const smartPane = await mavis.call('bridge_agent_prompt', { target: 'wT:p2', text: 'hello pane', wait: true, timeoutMs: 8000 })
+  const fallbackCalls = socketCalls.slice(beforeFallback)
+  check('unrecognized pane prompt falls back to pane channel', smartPane.via === 'pane' && smartPane.settled?.status === 'idle', JSON.stringify(smartPane))
+  check(
+    'fallback path sends pane.send_input + Enter',
+    fallbackCalls.some(call => call.method === 'pane.send_input' && call.params.pane_id === 'wT:p2' && call.params.text === 'hello pane') &&
+      fallbackCalls.some(call => call.method === 'pane.send_keys' && call.params.pane_id === 'wT:p2'),
+    JSON.stringify(fallbackCalls),
+  )
+
+  const smartWait = await mavis.call('bridge_agent_wait', { target: 'wT:p2', timeoutMs: 8000 })
+  check('unrecognized pane wait settles via output stability', smartWait.via === 'pane' && smartWait.settled?.status === 'idle' && smartWait.settled?.paneId === 'wT:p2', JSON.stringify(smartWait))
+
+  const smartStatus = await mavis.call('bridge_agent_status', { target: 'wT:p2' })
+  check('unrecognized status falls back to pane summary', smartStatus.agent === null && smartStatus.pane?.paneId === 'wT:p2' && smartStatus.pane?.agentStatus === 'unknown', JSON.stringify(smartStatus))
+
+  const smartRead = await mavis.call('bridge_agent_read', { target: 'wT:p2', lines: 5 })
+  check('unrecognized read falls back to pane read', smartRead.paneId === 'wT:p2' && smartRead.text.includes('[pane output for wT:p2]'), JSON.stringify(smartRead))
+
+  const smartKeys = await mavis.call('bridge_agent_keys', { target: 'wT:p2', keys: ['esc'] })
+  check('unrecognized keys fall back to pane keys', smartKeys.ok === true && socketCalls.some(call => call.method === 'pane.send_keys' && call.params.pane_id === 'wT:p2' && call.params.keys[0] === 'esc'), JSON.stringify(smartKeys))
+
+  const paneWait = await mavis.call('bridge_pane_wait', { target: 'wT:p2', match: { value: 'hello' } })
+  check('bridge_pane_wait matches output', paneWait.matched?.text?.includes('hello') && paneWait.matched?.revision === 43, JSON.stringify(paneWait))
+  check(
+    'pane.wait_for_output params carry substring match',
+    socketCalls.some(call => call.method === 'pane.wait_for_output' && call.params.match?.type === 'substring' && call.params.match?.value === 'hello'),
+    JSON.stringify(socketCalls),
+  )
+
+  const paneWaitTimeout = await mavis.call('bridge_pane_wait', { target: 'wT:p2', match: { value: 'NEVER' }, timeoutMs: 3000 })
+  check('bridge_pane_wait timeout returns matched: null', paneWaitTimeout.matched === null, JSON.stringify(paneWaitTimeout))
 
   console.log('== permission gating ==')
   hub.close()

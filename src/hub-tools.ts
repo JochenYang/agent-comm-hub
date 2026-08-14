@@ -296,19 +296,22 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_agent_status',
-      description: 'Live status of one herdr agent pane: lifecycle (idle/working/blocked/done/unknown), agent kind, and whether its input line is ready. `target` is a herdr paneId from bridge_agent_list.',
-      inputSchema: schema({ target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list.') }, ['target']),
-      handler: wrap(true, async (args, peer) => ({ agent: await checkControl(peer).get(String(args.target)) })),
+      description: 'Live status of a target: for agents herdr recognizes, the full lifecycle state (idle/working/blocked/done) and agent kind; for unrecognized panes, a pane-derived summary with status "unknown" and `pane` populated. `target` is a herdr paneId from bridge_pane_list / bridge_agent_list.',
+      inputSchema: schema({ target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list or bridge_pane_list.') }, ['target']),
+      handler: wrap(true, async (args, peer) => {
+        const result = await checkControl(peer).statusSmart(String(args.target))
+        return { agent: result.agent, ...(result.pane !== null ? { pane: result.pane } : {}) }
+      }),
     },
     {
       name: 'bridge_agent_prompt',
-      description: 'Submit text directly into the target agent\'s terminal input line (herdr). Unlike bridge_chat (a mailbox message the model may ignore), this is physical input: slash commands such as /compact, /model or /clear are executed by the target\'s TUI. With wait: true, blocks until the agent settles (default idle/done/blocked; pass `until` for exact states) or timeoutMs elapses.',
+      description: 'Submit text directly into the target terminal. For agents herdr recognizes, uses agent.prompt — a state-machine wait (`wait: true` blocks until idle/done/blocked, exact states via `until`). For unrecognized panes (e.g. MiniMax Code), falls back to pane-level input (`pane.send_input`) and waits for the pane output to settle. Slash commands are executed by the target\'s TUI either way. Returns `via: "agent" | "pane"` so callers know which channel was used.',
       inputSchema: schema(
         {
-          target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list.'),
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
           text: str('Text to submit (slash commands are executed, not sent as chat).'),
           wait: { type: 'boolean', description: 'Wait for the agent to settle after submission (default false).' },
-          until: { type: 'array', items: { type: 'string', enum: [...AGENT_STATUSES] }, description: 'Exact states to wait for (default: idle/done/blocked).' },
+          until: { type: 'array', items: { type: 'string', enum: [...AGENT_STATUSES] }, description: 'Exact states to wait for (agent channel; default: idle/done/blocked).' },
           timeoutMs: int('Wait cap in ms (default 30000).'),
         },
         ['target', 'text'],
@@ -316,45 +319,46 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       handler: wrap(true, async (args, peer) => {
         const ctl = checkControl(peer)
         const waiting = args.wait === true
-        const settled = await ctl.prompt(String(args.target), String(args.text), {
+        const result = await ctl.promptSmart(String(args.target), String(args.text), {
           wait: waiting,
           until: asStatuses(args.until),
           timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
         })
-        return waiting ? { submitted: true, settled } : { submitted: true }
+        return waiting ? { submitted: true, via: result.via, settled: result.settled } : { submitted: true, via: result.via }
       }),
     },
     {
       name: 'bridge_agent_wait',
-      description: 'Wait until the target herdr agent reaches one of the requested states (default idle/done/blocked) or timeoutMs elapses. Use after bridge_agent_prompt to know when the agent finished its turn — herdr tracks real agent state (working/blocked/idle), not screen activity. A `settled: null` result means the timeout fired first.',
+      description: 'Wait until the target settles. For agents herdr recognizes: state-machine wait (agent.wait — idle/working/blocked/done, `until` for exact states). For unrecognized panes: falls back to polling pane output until it stops changing. Returns `via: "agent" | "pane"`; a `settled: null` result means the timeout fired first.',
       inputSchema: schema(
         {
-          target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list.'),
-          until: { type: 'array', items: { type: 'string', enum: [...AGENT_STATUSES] }, description: 'Exact states to wait for (default: idle/done/blocked).' },
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
+          until: { type: 'array', items: { type: 'string', enum: [...AGENT_STATUSES] }, description: 'Exact states to wait for (agent channel; default: idle/done/blocked).' },
           timeoutMs: int('Wait cap in ms (default 30000).'),
         },
         ['target'],
       ),
-      handler: wrap(true, async (args, peer) => ({
-        settled: await checkControl(peer).wait(String(args.target), {
+      handler: wrap(true, async (args, peer) => {
+        const result = await checkControl(peer).waitSmart(String(args.target), {
           until: asStatuses(args.until),
           timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
-        }),
-      })),
+        })
+        return { via: result.via, settled: result.settled }
+      }),
     },
     {
       name: 'bridge_agent_read',
-      description: 'Read the target herdr agent pane\'s recent terminal output (plain text). Use to collect the reply of an agent that is not connected to the hub (its output never enters a mailbox).',
+      description: 'Read the target\'s recent terminal output (plain text). Uses agent.read for recognized agents, pane.read otherwise. Use to collect the reply of an agent that is not connected to the hub (its output never enters a mailbox).',
       inputSchema: schema(
         {
-          target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list.'),
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
           lines: int('How many lines to read (default: all recent).'),
           source: { type: 'string', enum: ['visible', 'recent', 'recent-unwrapped', 'detection'], description: 'Terminal snapshot source (default recent).' },
         },
         ['target'],
       ),
       handler: wrap(true, async (args, peer) =>
-        checkControl(peer).read(String(args.target), {
+        checkControl(peer).readSmart(String(args.target), {
           lines: args.lines === undefined ? undefined : Number(args.lines),
           source: args.source === undefined ? undefined : (args.source as 'visible' | 'recent' | 'recent-unwrapped' | 'detection'),
         }),
@@ -362,10 +366,10 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_agent_keys',
-      description: 'Send raw key presses to the target herdr agent terminal — Enter, esc, ctrl-c, arrows, etc. Use to dismiss permission prompts or interrupt a stuck agent. Keys are passed to herdr verbatim.',
+      description: 'Send raw key presses to the target terminal — Enter, esc, ctrl-c, arrows, etc. Use to dismiss permission prompts or interrupt a stuck agent. Keys are passed verbatim.',
       inputSchema: schema(
         {
-          target: str('herdr paneId, e.g. w1:p1, from bridge_agent_list.'),
+          target: str('herdr paneId, e.g. w1:p1, from bridge_pane_list / bridge_agent_list.'),
           keys: { type: 'array', items: { type: 'string' }, description: 'Keys to send, e.g. ["Enter"], ["esc"], ["ctrl-c", "Enter"].' },
         },
         ['target', 'keys'],
@@ -374,7 +378,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         const ctl = checkControl(peer)
         const keys = Array.isArray(args.keys) ? args.keys.map(String) : []
         if (keys.length === 0) throw new Error('keys: at least one key is required')
-        await ctl.sendKeys(String(args.target), keys)
+        await ctl.keysSmart(String(args.target), keys)
         return { ok: true, sent: keys }
       }),
     },
@@ -443,6 +447,36 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
           source: args.source === undefined ? undefined : (args.source as 'visible' | 'recent' | 'recent-unwrapped' | 'detection'),
         }),
       ),
+    },
+    {
+      name: 'bridge_pane_wait',
+      description: 'Wait until a herdr pane\'s output matches a pattern (substring or regex) or the budget elapses — the pane-level counterpart of bridge_agent_wait for agents herdr does not recognize. Returns the matched pane output, or `matched: null` on timeout.',
+      inputSchema: schema(
+        {
+          target: str('herdr paneId, e.g. wT:p2, from bridge_pane_list.'),
+          match: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['substring', 'regex'], description: 'Match kind (default substring).' },
+              value: { type: 'string', description: 'Text or regex to match in the pane output.' },
+            },
+            required: ['value'],
+            description: 'Output pattern to wait for.',
+          },
+          timeoutMs: int('Wait cap in ms (default 30000).'),
+        },
+        ['target', 'match'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const ctl = checkControl(peer)
+        const match = (args.match ?? {}) as { type?: string; value?: unknown }
+        if (typeof match.value !== 'string' || match.value === '') throw new Error('match.value: a non-empty string is required')
+        const type = match.type === 'regex' ? 'regex' : 'substring'
+        const read = await ctl.paneWaitForOutput(String(args.target), { type, value: match.value }, {
+          timeoutMs: args.timeoutMs === undefined ? undefined : Number(args.timeoutMs),
+        })
+        return read === null ? { matched: null } : { matched: read }
+      }),
     },
   ]
 }

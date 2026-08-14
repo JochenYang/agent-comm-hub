@@ -1,0 +1,21 @@
+feat: smart channel detection + pane.wait_for_output
+
+bridge_agent_* tools now auto-detect whether herdr recognizes the target
+(agent.get probe) and route through the best channel, reporting
+via: "agent" | "pane":
+
+- recognized agents: herdr's advanced features — agent.prompt with
+  state-machine wait (until idle/done/blocked), agent.wait, structured status
+- unrecognized panes (e.g. MiniMax Code): pane-level fallback —
+  pane.send_input + Enter, output-settling wait (revision stability),
+  pane-derived status summary
+
+New bridge_pane_wait: pane.wait_for_output (substring/regex) — the waiting
+primitive for unrecognized agents; returns matched output or null on timeout.
+
+Fix: herdr agent read --format text prints RAW text (no JSON envelope), so
+readSmart now uses the socket pane.read for both channels.
+
+Live-verified on Windows: Claude Code (recognized) answered via the agent
+channel; MiniMax Code (unrecognized) via the pane fallback (~3.1s settle).
+herdr suite: 35 checks (103 total).
