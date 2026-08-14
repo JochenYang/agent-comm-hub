@@ -4,6 +4,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { request } from 'node:http'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -35,15 +36,35 @@ export async function runStatus(options: StatusOptions = {}): Promise<StatusResu
   try {
     const headers: Record<string, string> = {}
     let id = 0
+    // Plain node:http instead of fetch: undici's keep-alive pool can race
+    // process.exit() on Windows (libuv UV_HANDLE_CLOSING assertion). Each
+    // probe request gets its own socket (agent: false) and a hard timeout,
+    // so the process always exits cleanly.
     const rpc = async (method: string, params?: unknown): Promise<{ result?: { content?: Array<{ text?: string }>; [k: string]: unknown }; error?: { message?: string } }> => {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...headers },
-        body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, ...(params !== undefined ? { params } : {}) }),
+      const body = JSON.stringify({ jsonrpc: '2.0', id: ++id, method, ...(params !== undefined ? { params } : {}) })
+      const res = await new Promise<{ status: number; contentType: string; text: string; sessionId: string | undefined }>((resolve, reject) => {
+        const req = request(url, {
+          method: 'POST',
+          agent: false,
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'Content-Length': Buffer.byteLength(body), ...headers },
+        }, (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => chunks.push(chunk))
+          response.on('end', () => resolve({
+            status: response.statusCode ?? 0,
+            contentType: response.headers['content-type'] ?? '',
+            sessionId: typeof response.headers['mcp-session-id'] === 'string' ? response.headers['mcp-session-id'] : undefined,
+            text: Buffer.concat(chunks).toString('utf8'),
+          }))
+        })
+        req.setTimeout(5000, () => req.destroy(new Error(`probe timed out after 5s`)))
+        req.on('error', reject)
+        req.end(body)
       })
-      const session = res.headers.get('mcp-session-id')
-      if (session) headers['Mcp-Session-Id'] = session
-      const json = await res.json() as { result?: unknown; error?: { message?: string } }
+      if (res.sessionId) headers['Mcp-Session-Id'] = res.sessionId
+      const json = res.contentType.includes('text/event-stream')
+        ? JSON.parse(res.text.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5)).join(''))
+        : JSON.parse(res.text)
       return json as { result?: { content?: Array<{ text?: string }> }; error?: { message?: string } }
     }
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: probeName, version: 'cli' } })

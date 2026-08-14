@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.7 (2026-08-14)
+
+- **Fix `agent-comm-hub status` crash on Windows**: the probe used `fetch`
+  (undici); its keep-alive pool could race `process.exit()` and abort the
+  process with a libuv `UV_HANDLE_CLOSING` assertion (exit 0xC0000409).
+  The probe now uses plain `node:http` requests with per-request sockets
+  (`agent: false`) and a 5 s hard timeout, so status always exits cleanly.
+- CLI help now describes the actual auto-start mechanism (Windows Run key +
+  hidden VBS launcher, no admin) instead of "Task Scheduler".
+
 ## 0.1.6 (2026-08-14)
 
 - **`agent-comm-hub status`**: probe the hub endpoint and list every registered

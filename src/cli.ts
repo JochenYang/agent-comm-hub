@@ -56,9 +56,9 @@ Usage:
                                            idempotent; --remove undoes)
   agent-comm-hub status [options]          show hub health + online peers
   agent-comm-hub service install|uninstall [options]
-                                           one-shot auto-start (Windows
-                                           Task Scheduler / Linux systemd;
-                                           --dry-run prints commands)
+                                           one-shot auto-start (Windows Run
+                                           key + hidden VBS launcher, no admin;
+                                           Linux systemd; --dry-run prints)
 
 Hub options:
   --host <addr>            Bind address (default 127.0.0.1)
