@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 (2026-08-14)
+
+- **Version numbering policy**: patch rolls over at 10 (`0.1.9 -> 0.2.0`).
+  This release renumbers the 0.1.13 code as 0.2.0 — no code changes.
+
 ## 0.1.13 (2026-08-14)
 
 - SKILL's plain-language workflow section is now English (it was briefly
