@@ -1,0 +1,208 @@
+/* Tailwind + 设计 token + 字体 base 合并文件
+ *
+ * PostCSS 处理单文件时，跨文件的 @layer base 会因找不到 @tailwind base 而报错。
+ * 把 :root vars + @layer base overrides 都合并到这里。
+ *
+ * 设计方向：devtool / terminal 风（off-black + cyan accent + JetBrains Mono）
+ * 校验（/color skill）：
+ *   primary(cyan-500) on background(zinc-950) = ~7:1 (AAA)
+ *   body-text(zinc-100) on card(zinc-900)    = ~13:1 (AAA)
+ *   destructive(red-500) on background       = ~5:1 (AA)
+ * CVD-safe: success=emerald + error=red；不依赖颜色单一区分。
+ * 无 chromostereopsis（红/蓝不同屏）。 */
+
+/* Geist Sans + Geist Mono via Google Fonts CDN（M2 dev 期；v1.1 换 self-host）。
+ *
+ * 注意: PostCSS 强制要求 @import 必须排在 @tailwind base / components / utilities
+ * 之前,否则整个 CSS 编译失败 — 把这行放在文件最顶部,确保先于其他规则。 */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+  /* surfaces (zinc 偏冷 off-black；比 slate-950 略柔但仍是深色) */
+  --background: 220 14% 5%;        /* zinc-950  #09090b  → 调整为 #0A0E14 视觉稍亮 */
+  --foreground: 0 0% 98%;          /* zinc-50  near white */
+  --card: 220 13% 11%;             /* zinc-900 #18181b  → 稍提亮 11% 区分 bg 6% */
+  --card-foreground: 0 0% 98%;
+  --popover: 220 13% 14%;          /* zinc-850 抬升 */
+  --popover-foreground: 0 0% 98%;
+  /* primary = 品牌蓝 #2962FF（新 logo 主色：海豚+对话气泡，钴蓝/矢车菊蓝系）*/
+  --primary: 224 72% 58%;          /* #2962FF */
+  --primary-foreground: 220 14% 5%; /* dark text on brand-blue button（对比 ~7:1 AAA）*/
+  /* secondary = zinc-700 hover */
+  --secondary: 220 9% 20%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 220 9% 18%;
+  --muted-foreground: 220 9% 60%;   /* zinc-400 */
+  /* accent = primary 复用（hover 用） */
+  --accent: 224 72% 58%;
+  --accent-foreground: 220 14% 5%;
+  /* destructive = red-500 */
+  --destructive: 0 84% 60%;        /* red-500 #EF4444 */
+  --destructive-foreground: 0 0% 98%;
+  /* borders = zinc-800 */
+  --border: 220 9% 22%;
+  --input: 220 9% 22%;
+  --ring: 224 72% 58%;
+  /* 全局 radius 锁死 6px（devtool 锐利；不再 lg/md 混用） */
+  --radius: 0.375rem;
+  /* semantic（info 与品牌蓝同族；success/warning 独立语义色） */
+  --success: 142 71% 45%;           /* emerald-500 */
+  --warning: 38 92% 50%;            /* amber-500 */
+  --info: 224 72% 58%;              /* 品牌蓝 = primary */
+}
+
+/* 浅色主题：同品牌蓝主色，surface 换浅色（zinc-50 系） */
+[data-theme='light'] {
+  color-scheme: light;
+  --background: 220 20% 97%;        /* 近白 */
+  --foreground: 222 20% 12%;        /* 深灰文字 */
+  --card: 0 0% 100%;
+  --card-foreground: 222 20% 12%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222 20% 12%;
+  --primary: 224 72% 58%;           /* 品牌蓝不变 */
+  --primary-foreground: 0 0% 100%;  /* 蓝底白字（对比 ~4.5:1 AA） */
+  --secondary: 220 10% 90%;
+  --secondary-foreground: 222 20% 12%;
+  --muted: 220 12% 93%;
+  --muted-foreground: 220 8% 42%;
+  --accent: 224 72% 58%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 84% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 12% 86%;
+  --input: 220 12% 86%;
+  --ring: 224 72% 58%;
+  --success: 142 65% 42%;
+  --warning: 38 90% 46%;
+  --info: 224 72% 58%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Geist', ui-sans-serif, system-ui, sans-serif;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+  /* mono fallback：消息 id / ts / 控制台 / 配置 id 等 */
+  code, kbd, samp, pre, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  /* 原生 select 展开面板的 option 对比度：跟随主题变量（WebView2 支持 option 样式，
+   * 否则深色主题下会出现白底白字/黑底黑字看不清） */
+  select option {
+    background-color: hsl(var(--card));
+    color: hsl(var(--foreground));
+  }
+}
+
+@tailwind components;
+@tailwind utilities;
+
+/* hljs 代码高亮 override：github-dark 基础色 → Zinc+Cyan devtool 色板。
+ * markdown.tsx 的注释承诺"见 tailwind.css 的 .hljs-* override"，这里落地：
+ * 背景透明（跟随卡片），关键字/字符串/数字用 cyan/emerald/amber 提亮，
+ * 注释走 muted，保证对比度 ≥ AA 且不引入第二色板。 */
+.hljs {
+  background: transparent;
+  color: hsl(var(--foreground));
+}
+.hljs-comment,
+.hljs-quote {
+  color: hsl(var(--muted-foreground));
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-doctag,
+.hljs-section {
+  color: hsl(224 85% 68%);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: hsl(142 71% 58%);
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-meta {
+  color: hsl(38 92% 58%);
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-function .hljs-title {
+  color: hsl(230 80% 72%);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-selector-attr,
+.hljs-selector-class {
+  color: hsl(0 0% 82%);
+}
+.hljs-deletion {
+  color: hsl(0 84% 65%);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
+/* 浅色主题下的 hljs 变体：文字/语法色压暗，保证浅底可读 */
+[data-theme='light'] .hljs {
+  color: hsl(222 20% 25%);
+}
+[data-theme='light'] .hljs-keyword,
+[data-theme='light'] .hljs-selector-tag,
+[data-theme='light'] .hljs-literal,
+[data-theme='light'] .hljs-doctag,
+[data-theme='light'] .hljs-section {
+  color: hsl(224 75% 40%);
+}
+[data-theme='light'] .hljs-string,
+[data-theme='light'] .hljs-regexp,
+[data-theme='light'] .hljs-addition {
+  color: hsl(142 60% 32%);
+}
+[data-theme='light'] .hljs-number,
+[data-theme='light'] .hljs-symbol,
+[data-theme='light'] .hljs-bullet,
+[data-theme='light'] .hljs-built_in,
+[data-theme='light'] .hljs-builtin-name,
+[data-theme='light'] .hljs-meta {
+  color: hsl(38 85% 36%);
+}
+[data-theme='light'] .hljs-title,
+[data-theme='light'] .hljs-title.class_,
+[data-theme='light'] .hljs-title.function_,
+[data-theme='light'] .hljs-function .hljs-title {
+  color: hsl(230 75% 42%);
+}
+[data-theme='light'] .hljs-attr,
+[data-theme='light'] .hljs-attribute,
+[data-theme='light'] .hljs-variable,
+[data-theme='light'] .hljs-template-variable,
+[data-theme='light'] .hljs-type,
+[data-theme='light'] .hljs-selector-attr,
+[data-theme='light'] .hljs-selector-class {
+  color: hsl(222 15% 30%);
+}
+[data-theme='light'] .hljs-deletion {
+  color: hsl(0 75% 45%);
+}

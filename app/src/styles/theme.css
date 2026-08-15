@@ -1,0 +1,36 @@
+/* SPEC §5.4 — Slate + Teal dark-mode-only.
+   校验（/color skill）：
+     primary(teal-500) on background(slate-950) = 7.8:1 (AAA)
+     body-text(slate-50) on card(slate-900)    = 14.2:1 (AAA)
+     destructive(rose-500) on background       = 5.1:1 (AA)
+   CVD-safe: success=emerald + error=rose 配图标；不依赖颜色单一区分。
+   无 chromostereopsis 风险（红/蓝不同屏）。 */
+@layer base {
+  :root {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 217.2 32.6% 17.5%;
+    --card-foreground: 210 40% 98%;
+    --popover: 215 27.9% 16.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 173 80% 40%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 215 25% 27%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 215 25% 27%;
+    --muted-foreground: 217.9 10.6% 64.9%;
+    --accent: 173 80% 40%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 351 89% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 215 25% 27%;
+    --input: 215 25% 27%;
+    --ring: 173 80% 40%;
+    --radius: 0.5rem;
+
+    /* semantic */
+    --success: 160 84% 39%;
+    --warning: 38 92% 50%;
+    --info: 199 89% 48%;
+  }
+}

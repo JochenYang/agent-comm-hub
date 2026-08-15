@@ -1,0 +1,33 @@
+# node
+node_modules
+dist
+
+# Rust
+src-tauri/target
+src-tauri/Cargo.lock
+src-tauri/gen
+
+# IDE
+.idea
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# env
+.env
+.env.local
+
+# logs
+*.log
+logs
+
+# coverage
+coverage
+*.lcov
+
+# tauri
+src-tauri/icons/*.bak
