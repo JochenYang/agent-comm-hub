@@ -1,0 +1,111 @@
+name: ci-app
+
+# M4 T-4.1: GH Actions 三平台矩阵 (ubuntu / windows / macos)。
+# 每个 platform 跑 typecheck + cargo test + tauri build;
+# 把 NSIS / dmg / AppImage+deb 上传为 artifact。
+#
+# 触发:
+#   - push 到 main 且触动 app/**
+#   - PR
+#   - workflow_dispatch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/ci-app.yml'
+  pull_request:
+    paths:
+      - 'app/**'
+      - '.github/workflows/ci-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: tauri-build
+            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.AppImage'
+          - os: ubuntu-latest
+            target: deb-build
+            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.deb'
+          - os: windows-latest
+            target: tauri-build
+            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.nsis.zip'
+          - os: macos-latest
+            target: tauri-build
+            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.dmg'
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'app/src-tauri -> target'
+
+      - name: Linux system deps (webkit2gtk)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Cargo test (lib only — no GUI)
+        run: cd src-tauri && cargo test --lib
+
+      - name: Build
+        run: pnpm tauri:build
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.target }}-installer
+          path: |
+            ${{ matrix.artifact_pattern }}
+          if-no-files-found: warn
+          retention-days: 14

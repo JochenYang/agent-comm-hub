@@ -1,0 +1,145 @@
+name: release-app
+
+# M4 T-4.3: tag 触发 —— 构建三平台安装包 + 起草 release notes + 发 GitHub Release。
+#
+# 用法:
+#   1. bump 版本 (app/package.json + app/src-tauri/Cargo.toml + app/src-tauri/tauri.conf.json)
+#   2. 在 CHANGELOG.md 顶部添加新版本块
+#   3. git tag v1.x.y && git push origin v1.x.y
+#   4. 此 workflow 自动跑 —— 三平台 build → release 页
+
+on:
+  push:
+    tags:
+      - 'v1.*'
+      - 'app-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag-info:
+    name: extract info
+    runs-on: ubuntu-latest
+    outputs:
+      prev_tag: ${{ steps.prev.outputs.PREV_TAG }}
+      cur_tag: ${{ steps.tag.outputs.CUR_TAG }}
+      version: ${{ steps.tag.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: prev
+        run: |
+          PREV=$(git tag --sort=-creatordate | grep -E '^v1\.' | head -n 2 | tail -n 1 || echo "")
+          if [ -z "$PREV" ]; then
+            PREV=$(git rev-list --max-parents=0 HEAD | head -n 1)
+          fi
+          echo "PREV_TAG=$PREV" >> $GITHUB_OUTPUT
+      - id: tag
+        run: |
+          REF=${GITHUB_REF_NAME}
+          echo "CUR_TAG=$REF" >> $GITHUB_OUTPUT
+          VER=${REF#v}
+          VER=${VER#app-v}
+          echo "VERSION=$VER" >> $GITHUB_OUTPUT
+
+  notes:
+    name: draft release notes
+    needs: tag-info
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate notes
+        id: notes
+        run: |
+          if [ "${{ needs.tag-info.outputs.prev_tag }}" = "$(git rev-list --max-parents=0 HEAD | head -n 1)" ]; then
+            node app/scripts/release-notes-app.mjs dummy ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md << 'EOF'
+          else
+            node app/scripts/release-notes-app.mjs ${{ needs.tag-info.outputs.prev_tag }} ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md
+          fi
+      - name: Upload notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: /tmp/notes.md
+
+  build:
+    name: build-${{ matrix.target }}
+    needs: tag-info
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: appimage
+            artifact: 'app/src-tauri/target/release/bundle/**/*.AppImage'
+          - os: ubuntu-latest
+            target: deb
+            artifact: 'app/src-tauri/target/release/bundle/**/*.deb'
+          - os: windows-latest
+            target: nsis
+            artifact: 'app/src-tauri/target/release/bundle/**/*.nsis.zip'
+          - os: macos-latest
+            target: dmg
+            artifact: 'app/src-tauri/target/release/bundle/**/*.dmg'
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: app/pnpm-lock.yaml }
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with: { workspaces: 'app/src-tauri -> target' }
+
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm tauri:build
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ matrix.target }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: warn
+
+  publish-release:
+    name: github release
+    needs: [build, notes]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - uses: actions/download-artifact@v4
+        with: { name: release-notes, path: artifacts }
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag-info.outputs.cur_tag }}
+          name: agent-comm-hub-app ${{ needs.tag-info.outputs.version }}
+          body_path: artifacts/release-notes.md
+          draft: true
+          files: |
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+            artifacts/**/*.nsis.zip
+            artifacts/**/*.dmg
+          fail_on_unmatched_files: false
