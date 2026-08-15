@@ -4,7 +4,7 @@ dist
 
 # Rust
 src-tauri/target
-src-tauri/Cargo.lock
+# Cargo.lock 必须提交（应用项目可复现构建；CI 用 --locked）
 src-tauri/gen
 
 # IDE
@@ -31,3 +31,8 @@ coverage
 
 # tauri
 src-tauri/icons/*.bak
+
+# tsc -b build artifacts (tsconfig.node.json composite emits alongside source)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

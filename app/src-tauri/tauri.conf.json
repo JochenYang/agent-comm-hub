@@ -34,7 +34,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "deb", "appimage", "app", "dmg"],
+    "targets": ["nsis", "msi", "deb", "appimage", "app", "dmg"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "category": "DeveloperTool",
     "shortDescription": "Desktop GUI for agent-comm-hub",

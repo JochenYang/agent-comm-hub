@@ -3,15 +3,16 @@ name: release-app
 # M4 T-4.3: tag 触发 —— 构建三平台安装包 + 起草 release notes + 发 GitHub Release。
 #
 # 用法:
-#   1. bump 版本 (app/package.json + app/src-tauri/Cargo.toml + app/src-tauri/tauri.conf.json)
-#   2. 在 CHANGELOG.md 顶部添加新版本块
-#   3. git tag v1.x.y && git push origin v1.x.y
-#   4. 此 workflow 自动跑 —— 三平台 build → release 页
+#   1. bump 版本 (app/package.json + app/src-tauri/Cargo.toml + app/src-tauri/tauri.conf.json 一致)
+#   2. 在 app/CHANGELOG.md 顶部添加新版本块
+#   3. git tag app-v1.x.y && git push origin app-v1.x.y
+#   4. 此 workflow 自动跑 —— 三平台 build → draft release
+#
+# 注意: 只匹配 app-v* tag —— 主仓 hub 的发布 tag（v0.x / v1.x）不能触发本流程。
 
 on:
   push:
     tags:
-      - 'v1.*'
       - 'app-v*'
   workflow_dispatch:
 
@@ -32,7 +33,7 @@ jobs:
           fetch-depth: 0
       - id: prev
         run: |
-          PREV=$(git tag --sort=-creatordate | grep -E '^v1\.' | head -n 2 | tail -n 1 || echo "")
+          PREV=$(git tag --sort=-creatordate | grep -E '^app-v' | head -n 2 | tail -n 1 || echo "")
           if [ -z "$PREV" ]; then
             PREV=$(git rev-list --max-parents=0 HEAD | head -n 1)
           fi
@@ -41,9 +42,7 @@ jobs:
         run: |
           REF=${GITHUB_REF_NAME}
           echo "CUR_TAG=$REF" >> $GITHUB_OUTPUT
-          VER=${REF#v}
-          VER=${VER#app-v}
-          echo "VERSION=$VER" >> $GITHUB_OUTPUT
+          echo "VERSION=${REF#app-v}" >> $GITHUB_OUTPUT
 
   notes:
     name: draft release notes
@@ -57,11 +56,13 @@ jobs:
       - name: Generate notes
         id: notes
         run: |
-          if [ "${{ needs.tag-info.outputs.prev_tag }}" = "$(git rev-list --max-parents=0 HEAD | head -n 1)" ]; then
-            node app/scripts/release-notes-app.mjs dummy ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md << 'EOF'
+          ROOT=$(git rev-list --max-parents=0 HEAD | head -n 1)
+          if [ "${{ needs.tag-info.outputs.prev_tag }}" = "$ROOT" ]; then
+            node app/scripts/release-notes-app.mjs dummy ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md
           else
             node app/scripts/release-notes-app.mjs ${{ needs.tag-info.outputs.prev_tag }} ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md
           fi
+          wc -l /tmp/notes.md
       - name: Upload notes artifact
         uses: actions/upload-artifact@v4
         with:
@@ -69,24 +70,24 @@ jobs:
           path: /tmp/notes.md
 
   build:
-    name: build-${{ matrix.target }}
+    name: build-${{ matrix.os }}
     needs: tag-info
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            target: appimage
-            artifact: 'app/src-tauri/target/release/bundle/**/*.AppImage'
-          - os: ubuntu-latest
-            target: deb
-            artifact: 'app/src-tauri/target/release/bundle/**/*.deb'
+            artifacts: |
+              app/src-tauri/target/release/bundle/**/*.AppImage
+              app/src-tauri/target/release/bundle/**/*.deb
           - os: windows-latest
-            target: nsis
-            artifact: 'app/src-tauri/target/release/bundle/**/*.nsis.zip'
+            artifacts: |
+              app/src-tauri/target/release/bundle/**/*.msi
+              app/src-tauri/target/release/bundle/**/*.exe
+              app/src-tauri/target/release/bundle/**/*.zip
           - os: macos-latest
-            target: dmg
-            artifact: 'app/src-tauri/target/release/bundle/**/*.dmg'
+            artifacts: |
+              app/src-tauri/target/release/bundle/**/*.dmg
 
     runs-on: ${{ matrix.os }}
     defaults:
@@ -112,13 +113,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: cd src-tauri && cargo test --lib --locked
       - run: pnpm tauri:build
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-${{ matrix.target }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.os }}-installer
+          path: ${{ matrix.artifacts }}
           if-no-files-found: warn
 
   publish-release:
@@ -140,6 +142,8 @@ jobs:
           files: |
             artifacts/**/*.AppImage
             artifacts/**/*.deb
-            artifacts/**/*.nsis.zip
+            artifacts/**/*.msi
+            artifacts/**/*.exe
+            artifacts/**/*.zip
             artifacts/**/*.dmg
           fail_on_unmatched_files: false

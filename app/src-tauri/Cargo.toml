@@ -1,6 +1,6 @@
 [package]
 name = "agent-comm-hub-app"
-version = "0.1.0"
+version = "1.0.0"
 description = "Desktop GUI for agent-comm-hub"
 authors = ["agent-comm-hub contributors"]
 edition = "2021"

@@ -1,8 +1,9 @@
 name: ci-app
 
 # M4 T-4.1: GH Actions 三平台矩阵 (ubuntu / windows / macos)。
-# 每个 platform 跑 typecheck + cargo test + tauri build;
-# 把 NSIS / dmg / AppImage+deb 上传为 artifact。
+# 每个平台跑 typecheck + cargo test + tauri build；
+# 一次 tauri:build 产出该平台所有配置的 targets（tauri.conf bundle.targets），
+# 把安装包上传为 artifact。
 #
 # 触发:
 #   - push 到 main 且触动 app/**
@@ -32,17 +33,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: tauri-build
-            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.AppImage'
-          - os: ubuntu-latest
-            target: deb-build
-            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.deb'
+            artifacts: |
+              app/src-tauri/target/release/bundle/**/*.AppImage
+              app/src-tauri/target/release/bundle/**/*.deb
           - os: windows-latest
-            target: tauri-build
-            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.nsis.zip'
+            artifacts: |
+              app/src-tauri/target/release/bundle/**/*.msi
+              app/src-tauri/target/release/bundle/**/*.exe
+              app/src-tauri/target/release/bundle/**/*.zip
           - os: macos-latest
-            target: tauri-build
-            artifact_pattern: 'app/src-tauri/target/release/bundle/**/*.dmg'
+            artifacts: |
+              app/src-tauri/target/release/bundle/**/*.dmg
 
     runs-on: ${{ matrix.os }}
     defaults:
@@ -92,20 +93,27 @@ jobs:
       - name: Install JS deps
         run: pnpm install --frozen-lockfile
 
+      - name: Version consistency (package.json = Cargo.toml = tauri.conf.json)
+        run: |
+          JS=$(node -p "require('./package.json').version")
+          RS=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*= *"\(.*\)"/\1/')
+          TA=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "package.json=$JS Cargo.toml=$RS tauri.conf=$TA"
+          [ "$JS" = "$RS" ] && [ "$JS" = "$TA" ] || { echo "version mismatch!"; exit 1; }
+
       - name: Type-check
         run: pnpm typecheck
 
       - name: Cargo test (lib only — no GUI)
-        run: cd src-tauri && cargo test --lib
+        run: cd src-tauri && cargo test --lib --locked
 
-      - name: Build
+      - name: Build (tauri bundle, all configured targets)
         run: pnpm tauri:build
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-${{ matrix.target }}-installer
-          path: |
-            ${{ matrix.artifact_pattern }}
+          name: ${{ matrix.os }}-installer
+          path: ${{ matrix.artifacts }}
           if-no-files-found: warn
           retention-days: 14
