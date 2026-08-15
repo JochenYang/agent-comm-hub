@@ -96,12 +96,18 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Version consistency (package.json = Cargo.toml = tauri.conf.json)
+        # 纯 node 实现（Windows runner 默认 pwsh，无 grep/sed）
         run: |
-          JS=$(node -p "require('./package.json').version")
-          RS=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*= *"\(.*\)"/\1/')
-          TA=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          echo "package.json=$JS Cargo.toml=$RS tauri.conf=$TA"
-          [ "$JS" = "$RS" ] && [ "$JS" = "$TA" ] || { echo "version mismatch!"; exit 1; }
+          node -e "
+            const fs = require('fs');
+            const js = JSON.parse(fs.readFileSync('package.json','utf8')).version;
+            const cargo = fs.readFileSync('src-tauri/Cargo.toml','utf8');
+            const m = cargo.match(/^version\s*=\s*\"([^\"]+)\"/m);
+            const rs = m ? m[1] : null;
+            const ta = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8')).version;
+            console.log('package.json=' + js, 'Cargo.toml=' + rs, 'tauri.conf=' + ta);
+            if (!rs || js !== rs || js !== ta) { console.error('version mismatch!'); process.exit(1); }
+          "
 
       - name: Type-check
         run: pnpm typecheck

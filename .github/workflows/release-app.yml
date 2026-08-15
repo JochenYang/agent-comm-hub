@@ -56,11 +56,13 @@ jobs:
       - name: Generate notes
         id: notes
         run: |
+          # 传 version（1.0.0）而不是 tag 名（app-v1.0.0）：脚本按 CHANGELOG 的
+          # "[1.0.0]" 段匹配，带 app-v 前缀会 "section not found"（历史踩坑）。
           ROOT=$(git rev-list --max-parents=0 HEAD | head -n 1)
           if [ "${{ needs.tag-info.outputs.prev_tag }}" = "$ROOT" ]; then
-            node app/scripts/release-notes-app.mjs dummy ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md
+            node app/scripts/release-notes-app.mjs dummy ${{ needs.tag-info.outputs.version }} > /tmp/notes.md
           else
-            node app/scripts/release-notes-app.mjs ${{ needs.tag-info.outputs.prev_tag }} ${{ needs.tag-info.outputs.cur_tag }} > /tmp/notes.md
+            node app/scripts/release-notes-app.mjs ${{ needs.tag-info.outputs.prev_tag }} ${{ needs.tag-info.outputs.version }} > /tmp/notes.md
           fi
           wc -l /tmp/notes.md
       - name: Upload notes artifact
