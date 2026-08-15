@@ -73,10 +73,10 @@ pub fn run() {
             let icon_logo = Image::new_owned(rgba, w, h);
 
             // 构建 tray menu：Open / Restart / Quit
-            let open = MenuItem::with_id(app, "open", "打开主窗口", true, None::<&str>)?;
-            let restart = MenuItem::with_id(app, "restart", "重启 hub", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open main window", true, None::<&str>)?;
+            let restart = MenuItem::with_id(app, "restart", "Restart hub", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &restart, &sep, &quit])?;
 
             // 初始图标 = 品牌 logo
@@ -121,15 +121,9 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // T-1.12：关闭主窗口 → 隐藏到托盘，进程不退出。
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    let _ = window.hide();
-                    api.prevent_close();
-                }
-            }
-        })
+        // 关闭行为由前端接管（onCloseRequested → 弹三选一 modal）：
+        // 最小化到托盘 = window.hide()，退出 = quit_app 命令，取消 = 保持。
+        // Rust 侧不再自动 hide（避免与前端 modal 双重拦截冲突）。
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 "open" => {
@@ -158,8 +152,14 @@ pub fn run() {
             commands::hub_status,
             commands::hub_get_logs,
             commands::app_ready,
+            commands::quit_app,
             commands::service_install,
             commands::service_uninstall,
+            commands::hub_cli_version,
+            commands::hub_cli_check_update,
+            commands::hub_cli_update,
+            commands::hub_cli_install,
+            commands::hub_cli_setup,
             commands::bridge_peers,
             commands::bridge_status,
             commands::bridge_wait,

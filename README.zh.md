@@ -277,14 +277,29 @@ pnpm pack             # 构建 + npm pack（发布产物）
 
 配套桌面端是另一个独立 npm 包 **`agent-comm-hub-app`**,在 `app/` 目录,Tauri 2 + React。它只走 hub 的 MCP / HTTP API,不引入主仓源码,也不会动 `dependencies: {}` 这个零依赖约束 —— 通过 `app/pnpm-workspace.yaml` 做工作区隔离。
 
+| 简体中文 | English |
+|---|---|
+| ![agent-comm-hub-app (CN)](assets/ach-cn.png) | ![agent-comm-hub-app (EN)](assets/ach-en.png) |
+
 ```bash
 cd app
 pnpm install
 pnpm tauri:dev        # 开发模式 (HMR)
-pnpm tauri:build      # 三平台安装包 (NSIS / dmg / AppImage / deb)
+pnpm tauri:build      # 三平台安装包 (NSIS / MSI / dmg / AppImage / deb)
 ```
 
-主要能力:启动自动拉起 hub (4-tier PATH 兜底),开 SSE 长连接保持 `agent-hub-cli` 永远显示为已连接,`/` 命令面板 (`/peers /broadcast /history`),Markdown 渲染 + rehype-sanitize,多会话方 cc,拖拽附件,虚拟滚动,系统托盘,i18n (简中默认 + 英文)。
+主要能力:
+
+- **一站式 Hub 生命周期**:启动自动拉起 hub (4-tier PATH 兜底)、启停/重启、实时日志面板 (stderr 过滤 + 放大查看),外部 hub 复用模式带健康探测
+- **实时消息**:`bridge_wait` 长轮询保持界面实时;发送即乐观显示;`/history` 合并 hub 内存与 SQLite 存档 (重启不丢)
+- **会话视角** (PRD US-2):点击任意 peer 查看它的完整会话;per-peer 未读徽章
+- **消息详情**:原始 JSON、task prompt/context/deliverable、ack 状态机时间线
+- **斜杠命令**:`/peers /broadcast /history /clear /help` —— 面板选择或直接输入
+- **Markdown 渲染** + rehype-sanitize、多会话方 cc、拖拽附件 (≤5 MB)、虚拟滚动
+- **主题系统**:深色 / 浅色 / 跟随系统,品牌蓝主题,持久化
+- **无边框窗口**:自绘标题栏 (拖拽区、双击最大化),关闭弹窗三选一 (最小化到托盘 / 退出 / 取消)
+- **设置页 Hub 工具**:安装 / 版本 / 检查更新 / 更新 hub CLI,一键 `setup` 检测本地 agent 并安装 SKILL + MCP 配置,开机自启服务
+- **系统托盘** (品牌 logo + 状态 tooltip);i18n (简中默认 + 英文)
 
 详见 `app/README.zh.md`。
 

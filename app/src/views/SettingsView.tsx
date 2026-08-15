@@ -49,6 +49,14 @@ export function SettingsView(): React.JSX.Element {
   const [serviceBusy, setServiceBusy] = useState<boolean>(false)
   const [serviceOutput, setServiceOutput] = useState<string | null>(null)
   const [serviceError, setServiceError] = useState<string | null>(null)
+  // hub CLI 工具（版本 / 检查更新 / 更新 / 安装 / setup 配置 agents）
+  const [hubToolBusy, setHubToolBusy] = useState<boolean>(false)
+  const [cliVersion, setCliVersion] = useState<string | null>(null)
+  /** CLI 是否可用（--version 成功）；false = 未安装，显示安装入口。 */
+  const [cliInstalled, setCliInstalled] = useState<boolean>(true)
+  const [updateInfo, setUpdateInfo] = useState<{ latest: string; outdated: boolean } | null>(null)
+  const [hubToolError, setHubToolError] = useState<string | null>(null)
+  const [hubToolOutput, setHubToolOutput] = useState<string | null>(null)
 
   useEffect(() => {
     void (async () => {
@@ -75,6 +83,8 @@ export function SettingsView(): React.JSX.Element {
         setLoading(false)
       }
     })()
+    // 进入设置页时自动读取本地 hub CLI 版本
+    void loadCliVersion()
   }, [])
 
   const update = <K extends keyof HubConfigValues>(key: K, val: HubConfigValues[K]): void => {
@@ -112,6 +122,89 @@ export function SettingsView(): React.JSX.Element {
       setServiceError(serializeError(e))
     } finally {
       setServiceBusy(false)
+    }
+  }
+
+  /** 读取本地 hub CLI 版本（启动时自动 + 手动刷新）。失败 = 未安装。 */
+  const loadCliVersion = async (): Promise<void> => {
+    setHubToolBusy(true)
+    setHubToolError(null)
+    try {
+      const res = await tauri.invoke.hubCliVersion()
+      setCliVersion(res.version)
+      setCliInstalled(true)
+    } catch (e) {
+      setCliVersion(null)
+      setCliInstalled(false)
+      setHubToolError(serializeError(e))
+    } finally {
+      setHubToolBusy(false)
+    }
+  }
+
+  /** 安装 hub CLI：npm install -g agent-comm-hub。 */
+  const installHubCli = async (): Promise<void> => {
+    setHubToolBusy(true)
+    setHubToolError(null)
+    setHubToolOutput(null)
+    try {
+      const res = await tauri.invoke.hubCliInstall()
+      setHubToolOutput(res.output === '' ? 'install: ok' : res.output)
+      // 安装成功后重新检测版本
+      await loadCliVersion()
+    } catch (e) {
+      setHubToolError(serializeError(e))
+    } finally {
+      setHubToolBusy(false)
+    }
+  }
+
+  /** 配置本地 agents：agent-comm-hub setup（检测 + 安装 SKILL + 写 MCP 配置）。 */
+  const runSetup = async (): Promise<void> => {
+    setHubToolBusy(true)
+    setHubToolError(null)
+    setHubToolOutput(null)
+    try {
+      const res = await tauri.invoke.hubCliSetup()
+      setHubToolOutput(res.output === '' ? 'setup: ok' : res.output)
+    } catch (e) {
+      setHubToolError(serializeError(e))
+    } finally {
+      setHubToolBusy(false)
+    }
+  }
+
+  /** 检查更新：npm view agent-comm-hub version vs 本地 CLI 版本。 */
+  const checkUpdate = async (): Promise<void> => {
+    setHubToolBusy(true)
+    setHubToolError(null)
+    setUpdateInfo(null)
+    try {
+      const res = await tauri.invoke.hubCliCheckUpdate()
+      if (res.current !== '') setCliVersion(res.current)
+      setUpdateInfo({ latest: res.latest, outdated: res.outdated })
+    } catch (e) {
+      setUpdateInfo(null)
+      setHubToolError(serializeError(e))
+    } finally {
+      setHubToolBusy(false)
+    }
+  }
+
+  /** 更新 hub：agent-comm-hub update（npm 重装全局包，输出展示）。 */
+  const runUpdate = async (): Promise<void> => {
+    setHubToolBusy(true)
+    setHubToolError(null)
+    setHubToolOutput(null)
+    try {
+      const res = await tauri.invoke.hubCliUpdate()
+      setHubToolOutput(res.output === '' ? 'update: ok' : res.output)
+      // 更新后刷新版本显示
+      void loadCliVersion()
+    } catch (e) {
+      setHubToolError(serializeError(e))
+    } finally {
+      setHubToolBusy(false)
     }
   }
 
@@ -226,6 +319,106 @@ export function SettingsView(): React.JSX.Element {
             {serviceOutput}
           </pre>
         )}
+      </div>
+
+      {/* Hub 工具：安装 / 版本 / 检查更新 / 更新 / 配置 agents（agent-comm-hub CLI 管理） */}
+      <div className="border-t border-border px-4 py-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-foreground">{t('settings.hub_tools')}</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {t('settings.hub_tools_desc')}（
+              <code className="rounded bg-background px-1 py-px font-mono text-[10px]">
+                agent-comm-hub --version / update / setup
+              </code>
+              ）
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            {!cliInstalled ? (
+              <Button
+                variant="default"
+                size="sm"
+                disabled={hubToolBusy}
+                onClick={() => void installHubCli()}
+              >
+                {hubToolBusy ? t('common.loading') : t('settings.hub_install')}
+              </Button>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={hubToolBusy}
+                  onClick={() => void loadCliVersion()}
+                >
+                  {t('settings.hub_refresh_version')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={hubToolBusy}
+                  onClick={() => void checkUpdate()}
+                >
+                  {t('settings.hub_check_update')}
+                </Button>
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={hubToolBusy}
+                  onClick={() => void runUpdate()}
+                >
+                  {hubToolBusy ? t('common.loading') : t('settings.hub_update')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={hubToolBusy}
+                  onClick={() => void runSetup()}
+                >
+                  {t('settings.hub_setup_agents')}
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+        {!cliInstalled && (
+          <p className="mt-2 font-mono text-[11px] text-warning">
+            {t('settings.hub_not_installed')}
+          </p>
+        )}
+        {cliVersion !== null && (
+          <p className="mt-2 font-mono text-[11px] text-foreground/80">
+            {t('settings.hub_current_version')}: {cliVersion}
+          </p>
+        )}
+        {updateInfo !== null && hubToolError === null && (
+          <p
+            className={`mt-1 font-mono text-[11px] ${
+              updateInfo.outdated ? 'text-warning' : 'text-success'
+            }`}
+          >
+            {t('settings.hub_latest_version')}: {updateInfo.latest}
+            {updateInfo.outdated
+              ? ` · ${t('settings.hub_outdated_hint')}`
+              : ` · ${t('settings.hub_up_to_date')}`}
+          </p>
+        )}
+        {hubToolError !== null && (
+          <p className="mt-2 break-all font-mono text-[11px] text-destructive">{hubToolError}</p>
+        )}
+        {hubToolOutput !== null && hubToolError === null && (
+          <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background p-2 font-mono text-[11px] text-foreground/80">
+            {hubToolOutput}
+          </pre>
+        )}
+      </div>
+
+      {/* 底部：应用版本 */}
+      <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
+          agent-comm-hub-app v{__APP_VERSION__}
+        </span>
       </div>
     </div>
   )

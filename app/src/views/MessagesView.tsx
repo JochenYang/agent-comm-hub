@@ -12,6 +12,7 @@ import { useState, useRef, useEffect, useMemo, type FormEvent, type DragEvent } 
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { usePeersStore } from '@/stores/peersStore'
 import { useMessagesStore } from '@/stores/messagesStore'
+import { useHubStore } from '@/stores/hubStore'
 import type { PresentedMessage } from '@/lib/tauri'
 import { Markdown } from '@/lib/markdown'
 import { CommandPalette, tryExecuteServerSide, COMMAND_HELP_LINES, type CommandResult } from '@/components/CommandPalette'
@@ -80,6 +81,9 @@ export function MessagesView(): React.JSX.Element {
     restoreLocal
   } = useMessagesStore()
   const { t } = useTranslation()
+  // 错误标签只在 hub 运行中显示（停止时轮询失败是正常态，不弹红色错误）
+  const hubState = useHubStore((s) => s.status?.state)
+  const showError = error !== null && (hubState === 'running' || hubState === 'starting')
 
   const [recipient, setRecipient] = useState<string>('')
   const [ccRecipients, setCcRecipients] = useState<string[]>([])
@@ -293,10 +297,10 @@ export function MessagesView(): React.JSX.Element {
         {loading && (
           <span className="font-mono text-[11px] text-muted-foreground">{t('common.syncing')}</span>
         )}
-        {error !== null && (
+        {showError && (
           <span
             className="font-mono text-[11px] text-destructive"
-            title={error}
+            title={error ?? ''}
           >
             error
           </span>

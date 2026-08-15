@@ -112,7 +112,19 @@
       "peer_idle_timeout_ms": "default 600000 (10 min); 0 disables",
       "herdr_bin": "optional; default herdr (PATH)",
       "herdr_timeout_ms": "default 30000"
-    }
+    },
+    "hub_tools": "Hub tools",
+    "hub_tools_desc": "manage hub CLI (agent-comm-hub) install, version and updates; configure local agents",
+    "hub_install": "install hub",
+    "hub_not_installed": "hub CLI not installed — click \"install hub\" to run npm install -g agent-comm-hub",
+    "hub_setup_agents": "setup agents (skill + MCP)",
+    "hub_refresh_version": "refresh version",
+    "hub_check_update": "check update",
+    "hub_update": "update hub",
+    "hub_current_version": "current version",
+    "hub_latest_version": "latest version",
+    "hub_outdated_hint": "a newer version is available",
+    "hub_up_to_date": "up to date"
   },
   "logs": {
     "title": "Hub stdout/stderr",
@@ -164,7 +176,17 @@
     "wait_idle": "wait idle",
     "wait_done": "wait done",
     "read_lines": "read recent N lines",
-    "last_output": "recent output"
+    "last_output": "recent output",
+    "checking": "checking herdr availability…",
+    "unavailable": "herdr not installed or unavailable",
+    "install_hint": "install the herdr CLI first and ensure it is on PATH.",
+    "degraded_hint": "other features (hub / messages) still work without herdr.",
+    "read_error": "error: ",
+    "refresh_note": "list refresh 3s · output throttle 200ms",
+    "empty_list": "no {{channel}}",
+    "select_hint": "← select a {{channel}}",
+    "keys_label": "keys: ",
+    "no_output": "no output yet"
   },
   "commands": {
     "palette_title": "command palette",
@@ -187,7 +209,12 @@
     "minimize": "minimize",
     "maximize": "maximize",
     "restore": "restore",
-    "close": "close"
+    "close": "close",
+    "close_confirm_title": "Close agent-comm-hub?",
+    "close_confirm_desc": "Choose what happens on close: minimize to tray and keep running, or quit completely.",
+    "minimize_to_tray": "Minimize to tray (recommended)",
+    "quit_app": "Quit app",
+    "cancel": "Cancel"
   },
   "errors": {
     "init_failed": "init failed",

@@ -327,7 +327,7 @@ impl HubProcess {
         {
             let (state, _) = *self.state.read().await;
             if matches!(state, HubState::Starting | HubState::Running) {
-                return Err(format!("hub 已经在 {state:?} 状态"));
+                return Err(format!("hub is already in {state:?} state"));
             }
         }
         {
@@ -429,8 +429,8 @@ impl HubProcess {
         let mut child: Child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                self.set_failed(format!("spawn hub 失败: {e}")).await;
-                return Err(format!("spawn hub 失败: {e}"));
+                self.set_failed(format!("failed to spawn hub: {e}")).await;
+                return Err(format!("failed to spawn hub: {e}"));
             }
         };
         let pid = child.id();
@@ -481,8 +481,8 @@ impl HubProcess {
             let _ = child.kill().await;
             let _ = child.wait().await;
             *self.pid.write().await = None;
-            self.set_failed(format!("hub 启动超时：{url} 无响应")).await;
-            return Err(format!("hub 启动超时：{url} 无响应"));
+            self.set_failed(format!("hub start timed out: {url} not responding")).await;
+            return Err(format!("hub start timed out: {url} not responding"));
         }
 
         *self.started_at.write().await = Some(now_ms());
@@ -530,11 +530,11 @@ impl HubProcess {
                 // 给前端可读的错误而不是误导性的"hub 未在运行"。
                 if matches!(self.state.read().await.0, HubState::Running) {
                     return Err(
-                        "hub 由外部进程管理（非本应用启动），无法从这里停止；请直接停止外部 hub 进程"
+                        "hub is managed by an external process (not spawned by this app); stop the external hub process directly"
                             .into(),
                     );
                 }
-                return Err("hub 未在运行".into());
+                return Err("hub is not running".into());
             }
         };
         {

@@ -36,6 +36,8 @@ export default function App(): React.JSX.Element {
   // 无边框窗口：最大化状态图标切换（监听窗口 resize）
   const win = getCurrentWindow()
   const [maximized, setMaximized] = useState(false)
+  // 关闭确认 modal：最小化到托盘 / 退出程序 / 取消
+  const [showCloseModal, setShowCloseModal] = useState(false)
 
   useEffect(() => {
     void win.isMaximized().then(setMaximized)
@@ -45,6 +47,22 @@ export default function App(): React.JSX.Element {
     }).then((fn) => {
       unlisten = fn
     })
+    return () => {
+      unlisten?.()
+    }
+  }, [win])
+
+  // 关闭请求拦截：无论点自绘 ✕ 还是 Alt+F4，都弹三选一 modal（不直接关窗口）。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void win
+      .onCloseRequested((event) => {
+        event.preventDefault()
+        setShowCloseModal(true)
+      })
+      .then((fn) => {
+        unlisten = fn
+      })
     return () => {
       unlisten?.()
     }
@@ -284,6 +302,53 @@ export default function App(): React.JSX.Element {
           <SettingsView />
         )}
       </main>
+
+      {/* 关闭确认 modal：最小化到托盘 / 退出程序 / 取消 */}
+      {showCloseModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={() => setShowCloseModal(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-semibold text-foreground">
+              {t('window.close_confirm_title')}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {t('window.close_confirm_desc')}
+            </p>
+            <div className="mt-4 flex flex-col gap-2">
+              <Button
+                size="sm"
+                variant="default"
+                onClick={() => {
+                  setShowCloseModal(false)
+                  void win.hide()
+                }}
+              >
+                {t('window.minimize_to_tray')}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setShowCloseModal(false)
+                  void win.hide().finally(() => void tauri.invoke.quitApp())
+                }}
+              >
+                {t('window.quit_app')}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setShowCloseModal(false)}>
+                {t('window.cancel')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

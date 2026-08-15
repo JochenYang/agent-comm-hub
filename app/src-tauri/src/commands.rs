@@ -110,7 +110,7 @@ async fn require_mcp(state: &AppState) -> CmdResult<Arc<McpClient>> {
             }
         }
     }
-    Err(CommandError::from("MCP 未初始化 — hub 可能未在运行".to_string()))
+    Err(CommandError::from("MCP not initialized — hub may not be running".to_string()))
 }
 
 /// tools_call + 解包 + 连接失效自愈。
@@ -191,6 +191,14 @@ pub async fn app_ready(app: AppHandle, state: State<'_, AppState>) -> CmdResult<
             Ok(status)
         }
     }
+}
+
+/// `quit_app`：彻底退出程序（含托盘）。关闭按钮 modal 的"退出程序"选项调用；
+/// 与托盘菜单"退出"（app.exit(0)）同一语义。
+#[tauri::command]
+pub async fn quit_app(app: AppHandle) -> CmdResult<()> {
+    app.exit(0);
+    Ok(())
 }
 
 /// 在 hub Running 后建一个 McpClient、initialize、显式注册 agent-hub-cli peer，
@@ -533,18 +541,151 @@ async fn run_service_cmd(action: &str) -> CmdResult<Value> {
     let out = cmd
         .output()
         .await
-        .map_err(|e| CommandError::from(format!("service {action} 调用失败: {e}")))?;
+        .map_err(|e| CommandError::from(format!("failed to invoke service {action}: {e}")))?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
         let detail = if !stderr.is_empty() { stderr } else { stdout };
         return Err(CommandError::from(format!(
-            "service {action} 失败 (exit {}): {detail}",
+            "service {action} failed (exit {}): {detail}",
             out.status.code().unwrap_or(-1)
         )));
     }
     let output = if !stdout.is_empty() { stdout } else { stderr };
     Ok(json!({ "ok": true, "action": action, "output": output }))
+}
+
+// -------- Hub 工具（版本 / 检查更新 / 更新，设置面板扩展） --------
+
+/// `hub_cli_version`：`agent-comm-hub --version` —— 本地安装的 hub CLI 版本。
+#[tauri::command]
+pub async fn hub_cli_version() -> CmdResult<Value> {
+    let mut cmd = hub_cli_command(&["--version"]);
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| CommandError::from(format!("failed to invoke hub CLI version: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return Err(CommandError::from(format!(
+            "hub CLI unavailable (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            if !stderr.is_empty() { stderr } else { stdout }
+        )));
+    }
+    Ok(json!({ "ok": true, "version": stdout }))
+}
+
+/// `hub_cli_check_update`：`npm view agent-comm-hub version` 对比本地 CLI 版本。
+/// 返回 { current, latest, outdated }。
+#[tauri::command]
+pub async fn hub_cli_check_update() -> CmdResult<Value> {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let out = tokio::process::Command::new(npm)
+        .args(["view", "agent-comm-hub", "version"])
+        .output()
+        .await
+        .map_err(|e| CommandError::from(format!("npm view failed: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let msg = if stderr.is_empty() {
+            "network or npm issue".to_string()
+        } else {
+            stderr
+        };
+        return Err(CommandError::from(format!(
+            "check update failed (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            msg
+        )));
+    }
+    let latest = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut current = String::new();
+    let mut cmd = hub_cli_command(&["--version"]);
+    if let Ok(out) = cmd.output().await {
+        if out.status.success() {
+            current = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+    }
+    let outdated = !current.is_empty() && !latest.is_empty() && current != latest;
+    Ok(json!({
+        "ok": true,
+        "current": current,
+        "latest": latest,
+        "outdated": outdated,
+    }))
+}
+
+/// `hub_cli_update`：`agent-comm-hub update`（内部 npm 重装全局包，耗时）。
+/// 180s 超时；输出回前端展示。
+#[tauri::command]
+pub async fn hub_cli_update() -> CmdResult<Value> {
+    let mut cmd = hub_cli_command(&["update"]);
+    let out = tokio::time::timeout(Duration::from_secs(180), cmd.output())
+        .await
+        .map_err(|_| CommandError::from("hub update timed out (180s)".to_string()))?
+        .map_err(|e| CommandError::from(format!("failed to invoke hub update: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return Err(CommandError::from(format!(
+            "hub update failed (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            if !stderr.is_empty() { stderr } else { stdout }
+        )));
+    }
+    let output = if !stdout.is_empty() { stdout } else { stderr };
+    Ok(json!({ "ok": true, "output": output }))
+}
+
+/// `hub_cli_install`：`npm install -g agent-comm-hub`（首次安装；180s 超时）。
+#[tauri::command]
+pub async fn hub_cli_install() -> CmdResult<Value> {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let out = tokio::time::timeout(
+        Duration::from_secs(180),
+        tokio::process::Command::new(npm)
+            .args(["install", "-g", "agent-comm-hub"])
+            .output(),
+    )
+    .await
+    .map_err(|_| CommandError::from("hub install timed out (180s)".to_string()))?
+    .map_err(|e| CommandError::from(format!("failed to invoke npm install: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return Err(CommandError::from(format!(
+            "hub install failed (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            if !stderr.is_empty() { stderr } else { stdout }
+        )));
+    }
+    let output = if !stdout.is_empty() { stdout } else { stderr };
+    Ok(json!({ "ok": true, "output": output }))
+}
+
+/// `hub_cli_setup`：`agent-comm-hub setup` —— 检测本地 agent（MiniMax Code /
+/// Claude Code / opencode / Codex / DSH 等），安装对应的 SKILL.md 并写入
+/// MCP 配置（只动 `agent-hub` 键、备份先行、幂等）。120s 超时。
+#[tauri::command]
+pub async fn hub_cli_setup() -> CmdResult<Value> {
+    let mut cmd = hub_cli_command(&["setup"]);
+    let out = tokio::time::timeout(Duration::from_secs(120), cmd.output())
+        .await
+        .map_err(|_| CommandError::from("setup timed out (120s)".to_string()))?
+        .map_err(|e| CommandError::from(format!("failed to invoke setup: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return Err(CommandError::from(format!(
+            "setup failed (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            if !stderr.is_empty() { stderr } else { stdout }
+        )));
+    }
+    let output = if !stdout.is_empty() { stdout } else { stderr };
+    Ok(json!({ "ok": true, "output": output }))
 }
 
 // -------- 配置（T-2.5） --------
@@ -582,7 +723,7 @@ pub async fn config_set(
 ) -> CmdResult<()> {
     let obj = values
         .as_object()
-        .ok_or_else(|| CommandError::from("values 必须是 object".to_string()))?;
+        .ok_or_else(|| CommandError::from("values must be an object".to_string()))?;
     let now = now_ms();
     for (k, v) in obj {
         let val = match v {
@@ -593,7 +734,7 @@ pub async fn config_set(
             _ => v.to_string(),
         };
         if let Err(e) = state.store.set_config(k, &val, now) {
-            return Err(CommandError::from(format!("set_config({k}) 失败: {e}")));
+            return Err(CommandError::from(format!("set_config({k}) failed: {e}")));
         }
     }
     Ok(())

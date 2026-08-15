@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { tauri, type HerdrAgent, type HerdrPane, type HerdrRead } from '@/lib/tauri'
 import { serializeError } from '@/lib/serializeError'
+import { useTranslation } from '@/i18n'
 
 type Channel = 'agent' | 'pane'
 const THROTTLE_MS = 200
@@ -12,6 +13,7 @@ const THROTTLE_MS = 200
  * - 右栏：选中目标 + 操作按钮（prompt / read / send-keys）+ 输出区域（节流 200ms 刷新）
  */
 export function TerminalView(): React.JSX.Element {
+  const { t } = useTranslation()
   const [available, setAvailable] = useState<boolean | null>(null)
   const [channel, setChannel] = useState<Channel>('agent')
   const [agents, setAgents] = useState<HerdrAgent[]>([])
@@ -136,21 +138,24 @@ export function TerminalView(): React.JSX.Element {
   if (available === null) {
     return (
       <div className="rounded-md border bg-card p-4 text-xs text-muted-foreground">
-        探测 herdr 可用性…
+        {t('terminal.checking')}
       </div>
     )
   }
   if (!available) {
     return (
       <div className="rounded-md border border-warning/40 bg-warning/10 p-4">
-        <h3 className="text-sm font-semibold text-warning">herdr 未安装或不可用</h3>
+        <h3 className="text-sm font-semibold text-warning">{t('terminal.unavailable')}</h3>
         <p className="mt-2 text-xs text-muted-foreground">
-          请先安装 <code className="rounded bg-background px-1">herdr</code> CLI 并确保在 PATH。
+          {t('terminal.install_hint')}
           <br />
-          herdr 缺失时其他功能（hub / 消息）仍然可用。
+          {t('terminal.degraded_hint')}
         </p>
         {readError !== null && (
-          <p className="mt-1 text-xs text-destructive">错误：{readError}</p>
+          <p className="mt-1 text-xs text-destructive">
+            {t('terminal.read_error')}
+            {readError}
+          </p>
         )}
       </div>
     )
@@ -193,15 +198,15 @@ export function TerminalView(): React.JSX.Element {
         >
           Panes ({panes.length})
         </button>
-        <span className="ml-auto text-xs text-muted-foreground">
-          列表 3s 刷新 · 输出 200ms 节流
-        </span>
+        <span className="ml-auto text-xs text-muted-foreground">{t('terminal.refresh_note')}</span>
       </div>
 
       <div className="grid min-h-0 flex-1 grid-cols-12 gap-3">
         <div className="col-span-4 min-h-0 overflow-auto rounded-md border bg-card">
           {list.length === 0 ? (
-            <div className="p-4 text-xs text-muted-foreground">暂无 {channel}</div>
+            <div className="p-4 text-xs text-muted-foreground">
+              {t('terminal.empty_list', { channel: t(channel === 'agent' ? 'terminal.agent_tab' : 'terminal.pane_tab') })}
+            </div>
           ) : (
             <ul className="divide-y">
               {list.map((item) => (
@@ -253,7 +258,7 @@ export function TerminalView(): React.JSX.Element {
         <div className="col-span-8 flex min-h-0 flex-col gap-2">
           {selected === null ? (
             <div className="flex flex-1 items-center justify-center rounded-md border bg-card text-xs text-muted-foreground">
-              ← 选择一个 {channel}
+              {t('terminal.select_hint', { channel: t(channel === 'agent' ? 'terminal.agent_tab' : 'terminal.pane_tab') })}
             </div>
           ) : (
             <>
@@ -285,6 +290,7 @@ function PromptBar({
   onSend: (text: string) => Promise<void>
   disabled: boolean
 }): React.JSX.Element {
+  const { t } = useTranslation()
   const [text, setText] = useState<string>('')
   return (
     <div className="flex items-center gap-2">
@@ -302,7 +308,7 @@ function PromptBar({
             }
           }
         }}
-        placeholder="prompt 或 send_text…(Enter 发送)"
+        placeholder={t('terminal.prompt_placeholder')}
         disabled={disabled}
         className="flex-1 rounded-md border bg-background px-3 py-1 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
       />
@@ -318,16 +324,17 @@ function PromptBar({
         disabled={disabled || text.trim() === ''}
         className="rounded-md bg-primary px-4 py-1 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
       >
-        发送
+        {t('common.send')}
       </button>
     </div>
   )
 }
 
 function KeysBar({ onSendKeys }: { onSendKeys: (keys: string[]) => Promise<void> }): React.JSX.Element {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-wrap items-center gap-1">
-      <span className="mr-1 text-xs text-muted-foreground">按键：</span>
+      <span className="mr-1 text-xs text-muted-foreground">{t('terminal.keys_label')}</span>
       {(['Enter', 'Escape', 'Tab', 'ctrl-c', 'ctrl-d', 'up', 'down', 'left', 'right']).map((k) => (
         <button
           key={k}
@@ -349,12 +356,13 @@ function ReadOutput({
   output: HerdrRead | null
   error: string | null
 }): React.JSX.Element {
+  const { t } = useTranslation()
   return (
     <div className="min-h-0 flex-1 overflow-auto rounded-md border bg-card p-3 font-mono text-xs">
       {error !== null ? (
         <div className="text-destructive">{error}</div>
       ) : output === null ? (
-        <div className="text-muted-foreground">暂无输出</div>
+        <div className="text-muted-foreground">{t('terminal.no_output')}</div>
       ) : (
         <>
           <div className="mb-2 text-muted-foreground">

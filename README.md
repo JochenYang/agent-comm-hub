@@ -401,14 +401,29 @@ pnpm pack             # build + npm pack (publishing artifact)
 
 A companion desktop GUI is shipped as a separate npm package: **`agent-comm-hub-app`**. It is a standalone Tauri 2 + React app, lives in `app/`, and depends on the MCP HTTP API rather than on this package's source. It does NOT relax the `dependencies: {}` constraint of the main package — workspace isolation is enforced via `app/pnpm-workspace.yaml`.
 
+| English | 简体中文 |
+|---|---|
+| ![agent-comm-hub-app (EN)](assets/ach-en.png) | ![agent-comm-hub-app (CN)](assets/ach-cn.png) |
+
 ```bash
 cd app
 pnpm install
 pnpm tauri:dev        # dev with hot reload
-pnpm tauri:build      # produces NSIS / dmg / AppImage / deb installers
+pnpm tauri:build      # produces NSIS / MSI / dmg / AppImage / deb installers
 ```
 
-Highlights: auto-spawn hub on launch (4-tier PATH fallback), live SSE keepalive so the agent-hub-cli peer always shows `connected: true`, slash-command palette (`/peers /broadcast /history`), Markdown rendering with rehype-sanitize, multi-peer cc, drag-drop attachments, virtual scrolling, system tray, i18n (zh-CN default, en-US).
+Highlights:
+
+- **Hub lifecycle in one window**: auto-spawn on launch (4-tier PATH fallback), start / stop / restart, live log panel with stderr filter + expandable viewer, and an external-hub reuse mode with health probing
+- **Real-time messaging**: `bridge_wait` long-poll keeps the UI live; optimistic send shows your messages instantly; `/history` merges hub memory with the SQLite archive (survives hub restarts)
+- **Peer conversations** (PRD US-2): click any peer to view its full conversation, not just yours; unread badges per peer
+- **Message details**: raw JSON view, task prompt/context/deliverable, ack state-machine timeline
+- **Slash commands**: `/peers /broadcast /history /clear /help` — from the palette or typed directly
+- **Markdown rendering** with rehype-sanitize, multi-peer cc, drag-drop attachments (≤5 MB), virtual scrolling
+- **Theme system**: dark / light / system-follow, brand-blue palette, persisted
+- **Frameless window**: custom titlebar (drag region, double-click maximize), close dialog with minimize-to-tray / quit / cancel
+- **Hub tools in Settings**: install / version / check update / update the hub CLI, one-click `setup` to detect local agents and install the SKILL + MCP config, auto-start service install
+- **System tray** with brand logo and status tooltip; i18n (zh-CN default, en-US)
 
 See `app/README.md` for the full feature list and architecture.
 

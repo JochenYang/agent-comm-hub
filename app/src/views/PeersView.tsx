@@ -1,5 +1,6 @@
 import { usePeersStore } from '@/stores/peersStore'
 import { useMessagesStore } from '@/stores/messagesStore'
+import { useHubStore } from '@/stores/hubStore'
 import { useTranslation } from '@/i18n'
 
 interface Props {
@@ -12,6 +13,10 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
   const { t } = useTranslation()
   const { peers, loading, error, refresh } = usePeersStore()
   const { unreadMap, activePeer, setActivePeer } = useMessagesStore()
+  // 错误条只在 hub 运行中才显示：hub 停止时轮询失败（"MCP 未初始化"）是正常态，
+  // 不应作为红色错误一直挂着（用户反馈启动后一直弹）。
+  const hubState = useHubStore((s) => s.status?.state)
+  const showError = error !== null && (hubState === 'running' || hubState === 'starting')
 
   return (
     <div className="flex h-full flex-col rounded-md border border-border bg-card">
@@ -32,7 +37,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
           {loading ? '…' : '↻'}
         </button>
       </div>
-      {error !== null && (
+      {showError && (
         <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-1 font-mono text-[11px] text-destructive">
           {error}
         </div>

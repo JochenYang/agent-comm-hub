@@ -112,7 +112,19 @@
       "peer_idle_timeout_ms": "默认 600000（10 min）；0 禁用",
       "herdr_bin": "可选；默认 herdr（PATH）",
       "herdr_timeout_ms": "默认 30000"
-    }
+    },
+    "hub_tools": "Hub 工具",
+    "hub_tools_desc": "管理 hub CLI（agent-comm-hub）的安装、版本与更新；配置本地 agent",
+    "hub_install": "安装 hub",
+    "hub_not_installed": "hub CLI 未安装 — 点击「安装 hub」执行 npm install -g agent-comm-hub",
+    "hub_setup_agents": "配置 agent（skill + MCP）",
+    "hub_refresh_version": "刷新版本",
+    "hub_check_update": "检查更新",
+    "hub_update": "更新 hub",
+    "hub_current_version": "当前版本",
+    "hub_latest_version": "最新版本",
+    "hub_outdated_hint": "有新版本可用",
+    "hub_up_to_date": "已是最新"
   },
   "logs": {
     "title": "Hub stdout/stderr",
@@ -164,7 +176,17 @@
     "wait_idle": "等待 idle",
     "wait_done": "等待 done",
     "read_lines": "读取最近 N 行",
-    "last_output": "最近输出"
+    "last_output": "最近输出",
+    "checking": "正在检测 herdr 可用性…",
+    "unavailable": "herdr 未安装或不可用",
+    "install_hint": "请先安装 herdr CLI 并确保在 PATH。",
+    "degraded_hint": "herdr 缺失时其他功能（hub / 消息）仍然可用。",
+    "read_error": "错误：",
+    "refresh_note": "列表 3s 刷新 · 输出 200ms 节流",
+    "empty_list": "暂无 {{channel}}",
+    "select_hint": "← 选择一个 {{channel}}",
+    "keys_label": "按键：",
+    "no_output": "暂无输出"
   },
   "commands": {
     "palette_title": "命令面板",
@@ -187,7 +209,12 @@
     "minimize": "最小化",
     "maximize": "最大化",
     "restore": "还原",
-    "close": "关闭"
+    "close": "关闭",
+    "close_confirm_title": "关闭 agent-comm-hub？",
+    "close_confirm_desc": "选择关闭后的行为：最小化到托盘保持运行，或彻底退出程序。",
+    "minimize_to_tray": "最小化到托盘（推荐）",
+    "quit_app": "退出程序",
+    "cancel": "取消"
   },
   "errors": {
     "init_failed": "初始化失败",
