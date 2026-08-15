@@ -53,17 +53,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 顺序必须 pnpm/action-setup 在前：setup-node 的 cache: pnpm 会调用
+      # pnpm 计算 lockfile 缓存 key，后装 pnpm 会报 "Unable to locate executable file: pnpm"。
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: app/pnpm-lock.yaml
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
