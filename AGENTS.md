@@ -225,3 +225,26 @@ pnpm pack             # build + npm pack (publishing artifact)
 - Doc files (README.md / README.zh.md / ARCHITECTURE.md) mention stale check
   counts and version numbers occasionally — when you change the suite or bump
   the version, update them to match reality.
+
+---
+
+## Companion desktop GUI (`app/`)
+
+`agent-comm-hub-app` lives in `app/` and is **a separate workspace**, not a layer
+of this repo. Rule of thumb when editing either side:
+
+- The companion app **must not** relax `dependencies: {}` in this package, **must
+  not** import from `src/` directly (TS or Rust), and **must not** rewrite
+  `~/.claude.json`. Workspace isolation is enforced via
+  `app/pnpm-workspace.yaml` (`packages: []`) — keep that file as-is.
+- Communication goes through hub's CLI / HTTP API only: `agent-comm-hub status`,
+  `bridge_*` tools over MCP streamable-http / SSE, and `herdr` for terminal
+  control. The desktop GUI has its own `app/src-tauri/src/{hub_process.rs,
+  mcp_client.rs, herdr_client.rs, sqlite_store.rs, commands.rs}` mirroring the
+  protocol — they are independent implementations, not forks.
+- When changing the hub CLI's flag format (e.g. `--flag=value` vs `--flag value`),
+  update **both** the desktop GUI's `HubConfig::to_argv()` in
+  `app/src-tauri/src/hub_process.rs` and any external `bridge_*` payload shape.
+  See SPEC.md §4 and the inline protocol note in `hub_process.rs`.
+- Bumping the package version here (e.g. `0.4.0 → 0.5.0`) does **not** require
+  bumping the desktop app version — they have independent CHANGELOG entries.

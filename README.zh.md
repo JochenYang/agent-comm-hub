@@ -273,6 +273,21 @@ pnpm run build        # esbuild → lib/{cli,index,setup}.js（零依赖）
 pnpm pack             # 构建 + npm pack（发布产物）
 ```
 
+## 桌面端 GUI
+
+配套桌面端是另一个独立 npm 包 **`agent-comm-hub-app`**,在 `app/` 目录,Tauri 2 + React。它只走 hub 的 MCP / HTTP API,不引入主仓源码,也不会动 `dependencies: {}` 这个零依赖约束 —— 通过 `app/pnpm-workspace.yaml` 做工作区隔离。
+
+```bash
+cd app
+pnpm install
+pnpm tauri:dev        # 开发模式 (HMR)
+pnpm tauri:build      # 三平台安装包 (NSIS / dmg / AppImage / deb)
+```
+
+主要能力:启动自动拉起 hub (4-tier PATH 兜底),开 SSE 长连接保持 `agent-hub-cli` 永远显示为已连接,`/` 命令面板 (`/peers /broadcast /history`),Markdown 渲染 + rehype-sanitize,多会话方 cc,拖拽附件,虚拟滚动,系统托盘,i18n (简中默认 + 英文)。
+
+详见 `app/README.zh.md`。
+
 ## 故障排查
 
 | 症状 | 原因 / 解决 |

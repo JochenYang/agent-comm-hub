@@ -397,6 +397,21 @@ pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
 
+## Desktop GUI
+
+A companion desktop GUI is shipped as a separate npm package: **`agent-comm-hub-app`**. It is a standalone Tauri 2 + React app, lives in `app/`, and depends on the MCP HTTP API rather than on this package's source. It does NOT relax the `dependencies: {}` constraint of the main package — workspace isolation is enforced via `app/pnpm-workspace.yaml`.
+
+```bash
+cd app
+pnpm install
+pnpm tauri:dev        # dev with hot reload
+pnpm tauri:build      # produces NSIS / dmg / AppImage / deb installers
+```
+
+Highlights: auto-spawn hub on launch (4-tier PATH fallback), live SSE keepalive so the agent-hub-cli peer always shows `connected: true`, slash-command palette (`/peers /broadcast /history`), Markdown rendering with rehype-sanitize, multi-peer cc, drag-drop attachments, virtual scrolling, system tray, i18n (zh-CN default, en-US).
+
+See `app/README.md` for the full feature list and architecture.
+
 Tests cover registration, duplicate rejection, chat routing, sender-filtered waits, task+ack routing back to the sender, broadcast, status/peers/history, unregister/re-register, and error paths.
 
 ## Troubleshooting
