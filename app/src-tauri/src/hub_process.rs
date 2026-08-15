@@ -238,9 +238,19 @@ pub(crate) fn hub_cli_command(extra_args: &[&str]) -> tokio::process::Command {
     } else if program.file_name().and_then(|n| n.to_str())
         == Some(if cfg!(windows) { "npx.cmd" } else { "npx" })
     {
+        // npx -y：跳过 "Ok to proceed?" 交互确认 —— 安装版环境 stdin 是 null，
+        // 交互会永久卡住导致 hub 起不来（用户实测 MCP not initialized）。
+        cmd.arg("-y");
         cmd.arg("agent-comm-hub");
     }
     cmd.args(extra_args);
+    // 安装版用户实测：spawn .cmd / node / npx 都会弹控制台窗口（设置页闪终端、
+    // hub 常驻空白终端）。CREATE_NO_WINDOW 完全抑制；start() 另外叠加
+    // CREATE_NEW_PROCESS_GROUP（0x0200）用于 taskkill 杀进程树。
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd
 }
 
@@ -378,6 +388,10 @@ impl HubProcess {
                         line: "external hub went away — attempting to spawn our own".into(),
                         ts: now_ms(),
                     });
+                    // 先拉回 Stopped 再自动重启：start() 会拒绝 Running/Starting 状态
+                    // （用户实测 "auto-restart failed: hub is already in Running state"）。
+                    *started_ref.write().await = None;
+                    *state_ref.write().await = (HubState::Stopped, None);
                     if !auto_restarted.swap(true, std::sync::atomic::Ordering::SeqCst) {
                         // start() 的 future 不满足 tokio::spawn 的 Send 约束，改用
                         // std 线程 + Runtime::block_on（block_on 不要求 Send）。
@@ -398,8 +412,6 @@ impl HubProcess {
                             break; // 自己的 hub 起来了（child-wait 管生命周期）
                         }
                     }
-                    *started_ref.write().await = None;
-                    *state_ref.write().await = (HubState::Stopped, None);
                     log_ring.write().await.push(LogLine {
                         stream: "stdout",
                         line: "state reset to stopped".into(),
@@ -420,11 +432,12 @@ impl HubProcess {
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
-        // Windows：CREATE_NEW_PROCESS_GROUP，便于 stop 时通过 taskkill /T 杀整树。
+        // Windows：CREATE_NEW_PROCESS_GROUP（0x0200，便于 stop 时 taskkill /T 杀整树）
+        // | CREATE_NO_WINDOW（0x08000000，hub_cli_command 已设，这里保持叠加不清掉）。
         // tokio::process::Command 自带 creation_flags（无需 std::os::windows::process::CommandExt）。
         #[cfg(windows)]
         {
-            cmd.creation_flags(0x0000_0200);
+            cmd.creation_flags(0x0000_0200 | 0x0800_0000);
         }
         let mut child: Child = match cmd.spawn() {
             Ok(c) => c,

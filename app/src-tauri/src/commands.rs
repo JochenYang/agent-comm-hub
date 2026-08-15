@@ -222,24 +222,24 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
         &cfg.path,
         ClientInfo::new("agent-hub-cli", env!("CARGO_PKG_VERSION")),
     ));
-    // 端口就绪 ≠ hub 完全 ready：initialize 可能撞上启动竞态（尤其外部 hub 复用 /
-    // 端口刚释放的场景），重试 5 次 × 500ms 后再放弃（失败只 log，UI 仍可用）。
+    // 端口就绪 ≠ hub 完全 ready：initialize 可能撞上启动竞态（尤其 npx 冷下载 /
+    // 端口刚释放的场景），重试 15 次 × 1s（15s 窗口）后再放弃（失败只 log，UI 仍可用）。
     let mut last_err: Option<McpError> = None;
-    for attempt in 1..=5 {
+    for attempt in 1..=15 {
         match client.initialize().await {
             Ok(_) => {
                 last_err = None;
                 break;
             }
             Err(e) => {
-                log::warn!("MCP initialize 第 {attempt}/5 次失败，500ms 后重试: {e}");
+                log::warn!("MCP initialize 第 {attempt}/15 次失败，1s 后重试: {e}");
                 last_err = Some(e);
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
     if let Some(e) = last_err {
-        log::warn!("MCP initialize 重试 5 次均失败: {e}; agent-hub-cli 将不可用");
+        log::warn!("MCP initialize 重试 15 次均失败: {e}; agent-hub-cli 将不可用");
         return;
     }
     // 显式 bridge_register "agent-hub-cli"（auto-register 时 hub 已用 clientInfo.name
