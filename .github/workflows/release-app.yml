@@ -141,7 +141,8 @@ jobs:
           tag_name: ${{ needs.tag-info.outputs.cur_tag }}
           name: agent-comm-hub-app ${{ needs.tag-info.outputs.version }}
           body_path: artifacts/release-notes.md
-          draft: true
+          # 自动发布为 latest（此前 draft: true 需要人工 Publish；产品决策改为直接发布）
+          draft: false
           files: |
             artifacts/**/*.AppImage
             artifacts/**/*.deb
