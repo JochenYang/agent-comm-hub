@@ -47,15 +47,22 @@ interface MessagesState {
   /** 内部桥接：模块级 wait 循环 / SSE 监听追加消息用（去重 + 会话过滤）。 */
   pushMessageSafe: (msg: PresentedMessage) => void
   /** 从 SQLite 拉取本地存档历史并合并（启动恢复 / `/history` 命令共用）。 */
-  restoreLocal: (limit?: number) => Promise<void>
+  restoreLocal: (limit?: number, peer?: string) => Promise<void>
 }
 
 const POLL_INTERVAL_MS = 3_000
 const HISTORY_LIMIT = 100
+/** 本端在 hub 里的 peer id（与 Rust 侧注册身份一致）。 */
+const SELF_PEER_ID = 'agent-hub-cli'
 
-/** 是否属于当前视图：无会话过滤（自己的流）或涉及 activePeer。 */
+/** 是否属于当前视图。拉取已是全量 ring 尾部（peer="all"，见 refresh），过滤
+ * 全部在客户端做：无会话 = 只看与自己相关 + 广播（镜像 hub 的 history 过滤
+ * 语义）；有会话 = 该 peer 的收发 + 广播。 */
 function belongsToView(activePeer: string | null, msg: { from: string; to: string }): boolean {
-  return activePeer === null || msg.from === activePeer || msg.to === activePeer
+  if (activePeer === null) {
+    return msg.from === SELF_PEER_ID || msg.to === SELF_PEER_ID || msg.to === 'all'
+  }
+  return msg.from === activePeer || msg.to === activePeer || msg.to === 'all'
 }
 
 export const useMessagesStore = create<MessagesState>()((set, get) => {
@@ -96,9 +103,9 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
     lastReadTs: {},
     pushMessageSafe: (msg) => pushMessage(msg),
 
-    restoreLocal: async (limit) => {
+    restoreLocal: async (limit, peer) => {
       try {
-        const res = await tauri.invoke.historyLocal(undefined, limit ?? HISTORY_LIMIT)
+        const res = await tauri.invoke.historyLocal(peer, limit ?? HISTORY_LIMIT)
         const records = Array.isArray(res?.messages) ? res.messages : []
         if (records.length === 0) return
         const restored = records.map(recordToMessage)
@@ -115,21 +122,20 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
     },
 
     refresh: async () => {
-      const activePeer = get().activePeer
       set({ loading: true, error: null })
       try {
-        // activePeer 非空拉该 peer 的完整会话（hub history：from/to 任一命中或
-        // to=broadcast）；否则拉自己的消息流。
-        const result = await tauri.invoke.bridgeHistory(activePeer ?? undefined, HISTORY_LIMIT)
+        // 拉 peer="all"（未过滤 ring 尾部）而不是只拉当前会话：一次轮询同时
+        // 服务两个目的 —— 视图（下方按会话过滤）+ SQLite 归档（Rust 侧把返回
+        // 的每条消息旁路落盘，peer-to-peer 流量因此可恢复）。此前只拉自己的
+        // 流，其他 agent 互聊的消息永远不会进 SQLite。ring 上限 1000、每次拉
+        // 200 条，正常对话密度下足以覆盖轮询间隔内的增量。
+        const result = await tauri.invoke.bridgeHistory('all', 200)
         const base = Array.isArray(result?.messages) ? result.messages : []
         // 合并而非替换：乐观追加的本地消息不在 history 里，全量替换会冲掉刚发的。
         set((s) => {
-          const extra = s.messages.filter(
-            (m) =>
-              !base.some((b) => b.id === m.id) &&
-              belongsToView(s.activePeer, m)
-          )
-          return { messages: [...extra, ...base] }
+          const inView = (m: PresentedMessage): boolean => belongsToView(s.activePeer, m)
+          const extra = s.messages.filter((m) => !base.some((b) => b.id === m.id) && inView(m))
+          return { messages: [...extra, ...base.filter(inView)] }
         })
       } catch (e) {
         set({ error: serializeError(e) })

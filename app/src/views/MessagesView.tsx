@@ -205,8 +205,10 @@ export function MessagesView(): React.JSX.Element {
       // 拉取完整历史：hub 内存（refresh）+ SQLite 存档（restoreLocal）合并。
       // hub 重启后内存历史已清空，只 refresh 拉不到存档 —— 这正是
       // `/history` 命令的职责（用户预期"拉数据库之前的历史"）。
+      // 存档查询跟随当前会话（restoreLocal 不带 peer 只查自己身份，
+      // 会话视图里的互聊历史会查不到）。
       await refresh()
-      await restoreLocal(result.limit)
+      await restoreLocal(result.limit, activePeer ?? undefined)
       setFeedback(t('messages.history_ok'))
     } else if (result.kind === 'list_peers') {
       // 结果可见化：不再只写 console（用户此前反馈"命令无效"）
