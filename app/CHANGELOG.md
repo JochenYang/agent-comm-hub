@@ -5,6 +5,14 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-08-22
+
+### Fixed
+
+- **Message cards overlapping** — the virtualizer's size cache was keyed by array index while DOM nodes are reused by message id, so any index shift (`/history` prepend, conversation switch) applied stale heights and rendered cards stacked with gaps, never self-healing. The cache is now keyed by message id.
+- **Title bar not draggable** — the drag region attribute only covered the brand div itself; clicks on child elements were swallowed and most of the frameless title bar was dead. The whole header is now a deep drag region: buttons stay clickable and double-click maximize still works.
+- **`pnpm dev` failed under pnpm 11** — `app/pnpm-workspace.yaml` still carried the scaffold placeholder `esbuild: set this to true or false`, so esbuild's build script was never approved. Replaced with an explicit approval and added a `packageManager` pin.
+
 ## [1.0.0] — 2026-08-15
 
 ### Highlights
