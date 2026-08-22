@@ -135,11 +135,17 @@ jobs:
         with: { path: artifacts }
       - uses: actions/download-artifact@v4
         with: { name: release-notes, path: artifacts }
+      # 标题直接从 tag 推导（保留 v 前缀），不再跨 job 传 outputs —— 1.0.1 的
+      # 发布标题曾丢掉版本号（人工补救过）；这里收敛为单一来源，发布什么格式
+      # 由这一行决定。
+      - name: Derive release title from tag
+        id: relname
+        run: echo "name=agent-comm-hub-app v${GITHUB_REF_NAME#app-v}" >> "$GITHUB_OUTPUT"
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.tag-info.outputs.cur_tag }}
-          name: agent-comm-hub-app ${{ needs.tag-info.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.relname.outputs.name }}
           body_path: artifacts/release-notes.md
           # 自动发布为 latest（此前 draft: true 需要人工 Publish；产品决策改为直接发布）
           draft: false
