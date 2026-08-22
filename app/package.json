@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Desktop GUI for agent-comm-hub — Tauri 2 + React + Zinc+Cyan devtool theme",
   "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
   "keywords": ["agent-comm-hub", "mcp", "tauri", "desktop", "gui"],
   "author": "Jochen",
   "scripts": {
