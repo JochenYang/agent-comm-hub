@@ -11,7 +11,7 @@
  * CVD-safe: success=emerald + error=red；不依赖颜色单一区分。
  * 无 chromostereopsis（红/蓝不同屏）。 */
 
-/* Geist Sans + Geist Mono via Google Fonts CDN（M2 dev 期；v1.1 换 self-host）。
+/* Geist Sans + Geist Mono via Google Fonts CDN（开发期方案；发布前应换 self-host）。
  *
  * 注意: PostCSS 强制要求 @import 必须排在 @tailwind base / components / utilities
  * 之前,否则整个 CSS 编译失败 — 把这行放在文件最顶部,确保先于其他规则。 */

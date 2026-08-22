@@ -1,4 +1,4 @@
-// M3 T-3.2 命令面板：以 `/` 前缀在输入框触发，或全局 Ctrl+K 唤起。
+// 命令面板：以 `/` 前缀在输入框触发，或全局 Ctrl+K 唤起。
 // 提供 /peers /broadcast /history /help /clear 命令。
 // 设计风格：mono / 紧凑 / devtool；锁死 6px radius。
 

@@ -7,7 +7,7 @@ type Channel = 'agent' | 'pane'
 const THROTTLE_MS = 200
 
 /**
- * herdr 终端视图（T-2.9 / T-2.10）
+ * herdr 终端视图
  * - 顶部：herdr 可用性检测 + agent/pane tab
  * - 左栏：列表（每 3s refresh）
  * - 右栏：选中目标 + 操作按钮（prompt / read / send-keys）+ 输出区域（节流 200ms 刷新）

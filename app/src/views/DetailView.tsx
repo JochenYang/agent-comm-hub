@@ -31,7 +31,7 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
     return messages.find((m) => m.id === selectedId) ?? null
   }, [messages, selectedId])
 
-  // ack 状态机时间线（PLAN T-2.3）：该 task 的 ref 链上所有 ack（双方发的），按时间推进。
+  // ack 状态机时间线：该 task 的 ref 链上所有 ack（双方发的），按时间推进。
   const ackTimeline = useMemo<PresentedMessage[]>(() => {
     if (selected === null || selected.kind !== 'task') return []
     return messages

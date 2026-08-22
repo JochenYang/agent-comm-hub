@@ -6,7 +6,7 @@ import App from './App'
 import './styles/tailwind.css'
 import { initI18n } from './i18n'
 
-// M3 T-3.6: 必须在首次 render 前初始化 i18next,否则 useTranslation ready=false 会出 fallback warning。
+// 必须在首次 render 前初始化 i18next,否则 useTranslation ready=false 会出 fallback warning。
 initI18n()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

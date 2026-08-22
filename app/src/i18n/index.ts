@@ -1,4 +1,4 @@
-// M3 T-3.6 i18n: 中文 (zh-CN) 默认, 英文 (en-US) 备选;
+// i18n: 中文 (zh-CN) 默认, 英文 (en-US) 备选;
 // 通过 localStorage 'lang' 持久化用户的语言选择 (默认 zh-CN);
 // 后端错误信息一律给 en (跟 stderr 一致), 不走前端 i18n。
 //
