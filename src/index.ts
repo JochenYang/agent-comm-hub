@@ -25,7 +25,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.4.0'
+export const SERVER_VERSION = '0.5.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -70,7 +70,10 @@ export const DEFAULT_CONFIG: HubConfig = {
   port: DEFAULT_PORT,
   path: DEFAULT_PATH,
   maxQueue: 200,
-  historyLimit: 100,
+  // 100 was too small to survive a long multi-agent session: the ring is the
+  // only archive source until the desktop app persists it to SQLite, and a
+  // night of agent-to-agent chatter evicts everything within minutes.
+  historyLimit: 1000,
   waitTimeoutMs: 60_000,
   defaultWaitMs: 30_000,
   connectedWindowMs: 30_000,

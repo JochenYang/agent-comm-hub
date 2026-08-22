@@ -166,6 +166,13 @@ try {
   check('bridge_peers shows connected peers', peers.peers.length === 3 && peers.peers.every(p => p.connected === true), JSON.stringify(peers))
   const history = await claude.call('bridge_history', { limit: 10 })
   check('history non-empty and newest first', history.messages.length >= 4 && history.messages[0].ts >= history.messages[history.messages.length - 1].ts, JSON.stringify(history))
+  // peer="all" returns the unfiltered ring tail: claude must see the private
+  // opencode→mavis note that its own conversation view excludes (the archiver
+  // path — desktop app persists peer-to-peer traffic it is not a party of).
+  const historyAll = await claude.call('bridge_history', { peer: 'all', limit: 20 })
+  const othersPrivate = historyAll.messages.find(m => m.from === 'opencode' && m.to === 'mavis' && m.content === 'opencode note')
+  check('peer=all returns other peers private traffic', othersPrivate !== undefined && historyAll.messages[0].ts >= historyAll.messages[historyAll.messages.length - 1].ts, JSON.stringify(historyAll))
+  check('own history hides other peers private traffic', history.messages.every(m => !(m.from === 'opencode' && m.to === 'mavis')), JSON.stringify(history))
 
   console.log('== errors / unregister ==')
   const badTarget = await mavis.callRaw('bridge_chat', { to: 'nobody', message: 'x' })

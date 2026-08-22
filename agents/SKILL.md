@@ -34,7 +34,9 @@ Optional: call `bridge_register(peerId)` to claim a readable id
   30 s; loop it to hold a real-time conversation).
 - `bridge_poll(from?)` — non-blocking drain of every queued message.
 - `bridge_status()` / `bridge_peers()` — hub health and who is online.
-- `bridge_history(peer?, limit?)` — recent messages (newest first).
+- `bridge_history(peer?, limit?)` — recent messages (newest first). `peer`
+  defaults to you; pass another peer's id to read their conversation, or
+  `"all"` for the unfiltered tail across every peer.
 
 ## When to use
 

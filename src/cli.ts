@@ -72,7 +72,7 @@ Hub options:
   --port <n>               Listen port (default 18764)
   --path <p>               MCP endpoint path (default /mcp)
   --max-queue <n>          Queued messages per peer before dropping oldest (default 200)
-  --history-limit <n>      Retained history messages (default 100)
+  --history-limit <n>      Retained history messages (default 1000)
   --wait-timeout-ms <n>    Long-poll ceiling for bridge_wait (default 60000)
   --default-wait-ms <n>    bridge_wait default budget (default 30000)
   --connected-window-ms <n>  Peer counts as active within this window (default 30000)

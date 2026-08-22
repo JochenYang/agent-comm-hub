@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 (2026-08-22)
+
+- **`bridge_history` accepts `peer: "all"`**: returns the unfiltered tail of
+  the history ring across every peer, so an archiver (the desktop app) can
+  persist peer-to-peer traffic it is not a party of — previously messages
+  between two other agents never showed up in a third party's history query,
+  and were gone once the ring wrapped or the hub restarted.
+- **`--history-limit` default raised 100 → 1000**: 100 shared entries evicted
+  within minutes during a long multi-agent session; the in-memory ring is the
+  only archive source until the desktop app persists it to SQLite. The limit
+  clamp on one `bridge_history` call rises to match (was 100).
+- **Desktop companion 1.0.1**: message-card overlap fix, whole-title-bar
+  dragging, pnpm 11 setup repair; its 3 s poll now pulls `peer: "all"` and
+  mirrors everything into SQLite, and `/history` follows the active
+  conversation.
+- Test suite grows to 140 checks (39 smoke + 32 setup + 11 ops +
+  35 herdr control + 23 discovery).
+
 ## 0.4.0 (2026-08-14)
 
 - **Agent discovery + declarative registry**: `agent-comm-hub setup` no

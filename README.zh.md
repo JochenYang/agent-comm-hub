@@ -220,7 +220,7 @@ agent-comm-hub service install|uninstall [options]   一键自启
 --port <n>                端口（默认 18764）
 --path <p>                MCP 路径（默认 /mcp）
 --max-queue <n>           每 peer 队列上限，溢出丢最旧（默认 200）
---history-limit <n>       保留的历史条数（默认 100）
+--history-limit <n>       保留的历史条数（默认 1000）
 --wait-timeout-ms <n>     bridge_wait 长轮询上限（默认 60000）
 --default-wait-ms <n>     bridge_wait 默认预算（默认 30000）
 --connected-window-ms <n> 活跃窗口（默认 30000）

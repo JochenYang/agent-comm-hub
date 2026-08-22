@@ -155,6 +155,13 @@ export class AgentHub {
     return filtered.slice(-Math.max(0, limit)).reverse()
   }
 
+  /** Most recent messages across every peer, unfiltered (newest first).
+   * Backs `bridge_history { peer: "all" }` — lets an archiver (the desktop
+   * app) capture peer-to-peer traffic it is not a party of. */
+  historyAll(limit: number): BridgeMessage[] {
+    return this.historyRing.slice(-Math.max(0, limit)).reverse()
+  }
+
   /**
    * Live summary for the status tool. `livePeers` (sessions with a live SSE
    * stream) count as connected even without recent tool activity.

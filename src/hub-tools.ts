@@ -279,9 +279,15 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_history',
-      description: 'Recent messages involving you (newest first); pass `peer` to inspect another peer\'s conversation. Use to refresh context after a reconnect.',
-      inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; default: yourself.'), limit: int('How many messages to return (default 20).') }),
-      handler: wrap(true, async (args, peer) => ({ messages: hub.history(args.peer === undefined ? peer : String(args.peer), Math.min(args.limit === undefined ? 20 : Number(args.limit), 100)).map(present) })),
+      description: 'Recent messages involving you (newest first); pass `peer` to inspect another peer\'s conversation, or `peer: "all"` for the unfiltered tail across every peer. Use to refresh context after a reconnect.',
+      inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; "all" = every peer; default: yourself.'), limit: int('How many messages to return (default 20).') }),
+      handler: wrap(true, async (args, peer) => {
+        const limit = Math.min(args.limit === undefined ? 20 : Number(args.limit), 1000)
+        const messages = args.peer === 'all'
+          ? hub.historyAll(limit)
+          : hub.history(args.peer === undefined ? peer : String(args.peer), limit)
+        return { messages: messages.map(present) }
+      }),
     },
     // ---- herdr control tools ------------------------------------------
     // These type into real agent terminals via the herdr runtime. They are

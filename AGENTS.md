@@ -102,7 +102,7 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs → 138 checks (37+32+11+35+23)
+                      #   + test/discover.mjs → 140 checks (39+32+11+35+23)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -113,15 +113,16 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 37/37 + 32/32 +
-  11/11 + 35/35 + 19/19 on Node 24 / Windows).
+  merging, the full `pnpm test` must stay green (verified: 39/39 + 32/32 +
+  11/11 + 35/35 + 23/23 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (37 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (39 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
-  sender, broadcast (no echo to sender), status/peers/history, unregister /
+  sender, broadcast (no echo to sender), status/peers/history incl. the
+  `peer: "all"` unfiltered archiver view, unregister /
   re-register, auto-registration (first tool call, eager at connect,
   same-name sharing, unregister suppresses), SSE liveness, idle GC.
 - `test/setup.mjs` (32 checks): `runSetup` against a fake home dir — only the
@@ -139,10 +140,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   rejected), `~`/wildcard expansion, PATH probing (win32 PATHEXT vs POSIX
   semantics), config-path discovery, npm-global discovery incl. scoped dirs,
   os filtering, source priority.
-- The `.mjs` files in `test/` are **esbuild outputs** of the `.ts` entries
-  (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`,
+- Only the `test/*-entry.mjs` files are **esbuild outputs** of the `.ts`
+  entries (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`,
   `discover-entry.ts`) and are gitignored — edit the `.ts` files, not the
-  `.mjs` ones. `fake-herdr.mjs` is a hand-written fixture and IS committed.
+  `.mjs` ones. The suite files themselves (`smoke.mjs`, `setup.mjs`,
+  `ops.mjs`, `herdr.mjs`, `discover.mjs`) and `fake-herdr.mjs` are
+  hand-written and committed.
 - Every check uses `check(name, ok, detail)` with a behavior-description name;
   smoke tests also assert every tool result is **lossless JSON**
   (`assertLosslessJson`: no `undefined`, no non-finite numbers) — that is the
