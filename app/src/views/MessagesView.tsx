@@ -1,10 +1,8 @@
-// M3 综合改动：
-// - T-3.1 Markdown 渲染（chat kind 走 <Markdown>）
-// - T-3.3 多 peer cc（chip 多选 + 主 recipient；批量发送时 fan-out）
-// - T-3.4 拖拽文件附件（5MB 上限；.txt 读为文本拼到消息前；非文本拒）
-// - T-3.5 虚拟滚动（@tanstack/react-virtual 接入，measureElement 动态测量）
-// - T-3.2 命令面板（在输入框以 / 触发 → 弹 CommandPalette）
-// - T-3.7 键盘快捷键：Ctrl+Enter 发送、/ 唤起面板、Esc 关面板
+// 会话视图：消息流 + 发送。chat 消息走 <Markdown> 渲染；支持多 peer 同时发送
+// （to 主收件人 + cc chips，批量 fan-out）；拖拽 .txt 文件作为附件拼进正文
+// （5MB 上限，非文本拒绝）；消息列表用 @tanstack/react-virtual 虚拟滚动 +
+// measureElement 动态测量；输入框支持命令面板（/ 触发）与快捷键
+// （Ctrl+Enter 发送、/ 唤起面板、Esc 关面板）。
 //
 // 设计风格：mono / 紧凑 / devtool；锁死 6px radius；新加元素不引入第二色板。
 
@@ -124,7 +122,11 @@ export function MessagesView(): React.JSX.Element {
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 60,
     overscan: 12,
-    measureElement: (el) => el.getBoundingClientRect().height
+    measureElement: (el) => el.getBoundingClientRect().height,
+    // 尺寸缓存按消息 id（而非默认的数组索引）做键：/history 合并存档、切换会话
+    // 等会让同一索引先后对应不同消息，而 DOM 按 m.id 复用、ref 不会重新触发
+    // 测量 —— 按索引缓存会把旧尺寸套在位移后的内容上，卡片重叠且不自愈。
+    getItemKey: (index) => sorted[index]?.id ?? `idx-${index}`
   })
 
   useEffect(() => {
