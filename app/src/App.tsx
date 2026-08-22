@@ -72,7 +72,7 @@ export default function App(): React.JSX.Element {
     void tauri.invoke.appReady().catch(() => undefined)
   }, [])
 
-  // M3 T-3.7 全局快捷键：
+  // 全局快捷键：
   //   Ctrl/Cmd+K          → 命令面板（仅 main tab 触发）
   //   Ctrl/Cmd+,          → 跳到 settings tab
   //   Ctrl/Cmd+Alt+M/T/S  → 跳到 main / terminal / settings
@@ -121,12 +121,15 @@ export default function App(): React.JSX.Element {
   return (
     <div className="flex h-screen w-screen flex-col bg-background text-foreground">
       {/* Top bar — 自定义标题栏（无系统边框）：左拖拽区(品牌+状态) → 控制按钮 → tabs → 主题/窗口控制 */}
-      <header className="flex shrink-0 select-none items-stretch border-b border-border bg-background/80 backdrop-blur">
-        {/* drag region：品牌 + 状态徽章（data-tauri-drag-region 支持双击最大化） */}
-        <div
-          data-tauri-drag-region
-          className={`flex items-center gap-3 py-2 ${isMac ? 'pl-[78px]' : 'pl-4'}`}
-        >
+      {/* 无边框窗口标题栏：drag-region 用 "deep" 值 —— 子树内任意位置按下即可拖拽，
+          Tauri 核心自动屏蔽 button/a/input 等交互元素（裸属性只认元素本身，子元素
+          会吞掉 mousedown，导致整条标题栏几乎拖不动）。双击非交互区 = 切换最大化。 */}
+      <header
+        data-tauri-drag-region="deep"
+        className="flex shrink-0 select-none items-stretch border-b border-border bg-background/80 backdrop-blur"
+      >
+        {/* 品牌 + 状态徽章（可拖拽；由 header 的 drag region 统一处理） */}
+        <div className={`flex items-center gap-3 py-2 ${isMac ? 'pl-[78px]' : 'pl-4'}`}>
           <img
             src="/logo.png"
             alt="agent-comm-hub"
