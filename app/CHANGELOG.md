@@ -5,6 +5,17 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-08-22
+
+### Fixed
+
+- **`/history` missed other agents' conversations** — the 3 s poll now pulls
+  `bridge_history` with `peer: "all"` and mirrors everything into SQLite, so
+  messages between other agents (e.g. kimi-code ↔ zcode) survive hub restarts
+  and history-ring eviction; `/history` restores the active conversation from
+  the archive instead of only the app's own identity. Full archiving requires
+  `agent-comm-hub` ≥ 0.5.0 on the spawned hub.
+
 ## [1.0.1] — 2026-08-22
 
 ### Fixed

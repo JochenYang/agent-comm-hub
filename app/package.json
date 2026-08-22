@@ -1,7 +1,7 @@
 {
   "name": "agent-comm-hub-app",
   "private": false,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Desktop GUI for agent-comm-hub — Tauri 2 + React + Zinc+Cyan devtool theme",
   "license": "MIT",
