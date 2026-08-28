@@ -37,6 +37,17 @@ export function sanitizePeerId(name: string): string {
   return cleaned === '' ? 'agent' : cleaned
 }
 
+/** Validate a display alias: trimmed, 1–64 chars, no control characters.
+ * Unlike peer ids, aliases may contain spaces / CJK — they are only shown,
+ * never routed or used as a Map key. */
+export function sanitizeAlias(alias: string): string {
+  const cleaned = alias.trim()
+  if (cleaned === '') throw new Error('alias must not be empty')
+  if (cleaned.length > 64) throw new Error(`alias too long: ${cleaned.length} chars (max 64)`)
+  if (/[\u0000-\u001f\u007f]/.test(cleaned)) throw new Error('alias must not contain control characters')
+  return cleaned
+}
+
 /**
  * Auto-register a session using its client-reported name (or the `agent`
  * fallback). Same-name connections ATTACH to the same peer (one stable
@@ -49,13 +60,19 @@ export function autoRegisterPeer(
   registry: SessionRegistry,
   sessionId: string | undefined,
   clientName: string | undefined,
+  clientVersion?: string,
 ): string | undefined {
   if (sessionId === undefined) return undefined
   const bound = registry.peerFor(sessionId)
   if (bound !== undefined) return bound
   if (registry.isSuppressed(sessionId)) return undefined
   const peerId = sanitizePeerId(clientName ?? 'agent')
-  if (!hub.has(peerId)) hub.register(peerId)
+  if (!hub.has(peerId)) {
+    hub.register(peerId, {
+      ...(clientName !== undefined ? { name: clientName } : {}),
+      ...(clientVersion !== undefined ? { version: clientVersion } : {}),
+    })
+  }
   registry.bindPeer(sessionId, peerId)
   hub.touch(peerId)
   return peerId
@@ -71,6 +88,27 @@ export function livePeersFor(registry: SessionRegistry): Set<string> {
   return live
 }
 
+/** Roster snapshot: live state per peer merged with its profile metadata.
+ * Shared by the bridge_peers tool and the `peers_changed` SSE event so both
+ * always expose the same shape. */
+export function rosterFor(hub: AgentHub, registry: SessionRegistry): Array<Record<string, unknown>> {
+  const status = hub.status(livePeersFor(registry))
+  return status.peers.map(peer => {
+    const profile = hub.profileOf(peer.id)
+    const alias = profile?.alias
+    const clientName = profile?.clientName
+    const clientVersion = profile?.clientVersion
+    return {
+      id: peer.id,
+      ...(alias !== undefined ? { alias } : {}),
+      ...(clientName !== undefined ? { clientName } : {}),
+      ...(clientVersion !== undefined ? { clientVersion } : {}),
+      connected: peer.connected,
+      lastSeenMs: peer.lastSeenMs,
+    }
+  })
+}
+
 /** Options accepted by {@link hubTools}. */
 export interface HubToolsOptions {
   defaultWaitMs?: number
@@ -82,6 +120,10 @@ export interface HubToolsOptions {
    * (default) mirrors the hub's loopback-only trust model; pass a set of
    * peer ids to restrict who may type into agent terminals. */
   herdrControlPeers?: ReadonlySet<string> | 'all'
+  /** Peers allowed to manage the roster: rename other peers (bridge_rename),
+   * kick peers (bridge_unregister with `peer`). `'all'` keeps the loopback
+   * trust model; the default is the desktop/CLI archiver identity. */
+  managerPeers?: ReadonlySet<string> | 'all'
 }
 
 /** Build the bridge tool set bound to one hub instance. */
@@ -145,6 +187,16 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     return herdr
   }
 
+  /** Manager gate for roster administration (rename others / kick). Like the
+   * loopback trust model itself this is an convention, not authentication:
+   * anyone on the machine may claim a manager id. */
+  const requireManager = (peer: string, action: string): void => {
+    const managers = options.managerPeers ?? 'all'
+    if (managers !== 'all' && !managers.has(peer)) {
+      throw new Error(`peer '${peer}' is not a hub manager — ${action} requires manager rights`)
+    }
+  }
+
   /** Normalize an `until` array argument into herdr statuses (invalid
    * entries are dropped; absent/empty means herdr's default settle set). */
   const asStatuses = (value: unknown): (typeof AGENT_STATUSES)[number][] | undefined => {
@@ -162,17 +214,24 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
   return [
     {
       name: 'bridge_register',
-      description: 'Claim or rename your identity on the hub. Sessions auto-share a peer id derived from the client name; call this to switch to a readable unique peerId such as "mavis" or "opencode:myproject". Rejects when the id is claimed by another connection. Returns the current peer list.',
-      inputSchema: schema({ peerId: str('Unique peer id: letters/digits/._:- , 1-64 chars.') }, ['peerId']),
+      description: 'Claim or rename your identity on the hub. Sessions auto-share a peer id derived from the client name; call this to switch to a readable unique peerId such as "mavis" or "opencode:myproject". Optionally set your display alias (shown to other agents and the desktop roster; message routing keeps using the immutable peerId). Rejects when the id is claimed by another connection. Returns the current peer list.',
+      inputSchema: schema({
+        peerId: str('Unique peer id: letters/digits/._:- , 1-64 chars.'),
+        alias: optStr('Optional display name (1-64 chars, spaces/CJK allowed). Routing still uses peerId.'),
+      }, ['peerId']),
       handler: async (args, sessionId) => {
         const peerId = String(args.peerId)
         if (!/^[A-Za-z0-9._:-]{1,64}$/.test(peerId)) {
           throw new Error(`invalid peerId: ${peerId} (expected [A-Za-z0-9._:-]{1,64})`)
         }
+        const alias = args.alias === undefined ? undefined : sanitizeAlias(String(args.alias))
         if (hub.has(peerId) && registry.peerFor(sessionId) !== peerId) {
           throw new Error(`peer already registered by another connection: ${peerId}`)
         }
         const current = registry.peerFor(sessionId)
+        // Carry the old display alias across a self-rename so a session that
+        // was renamed by a manager (or set its own alias) keeps it.
+        const carriedAlias = current !== undefined && current !== peerId ? hub.profileOf(current)?.alias : undefined
         if (current !== undefined && current !== peerId) {
           // Rename: detach first, then drop the old peer when no other
           // session is still attached to it (same-name sessions share it).
@@ -183,22 +242,58 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         if (!hub.has(peerId)) hub.register(peerId)
         registry.clearSuppress(sessionId)
         hub.touch(peerId)
-        return { ok: true, peerId, peers: hub.peers() }
+        if (alias !== undefined) hub.setAlias(peerId, alias)
+        else if (carriedAlias !== undefined && hub.profileOf(peerId)?.alias === undefined) hub.setAlias(peerId, carriedAlias)
+        const finalAlias = hub.profileOf(peerId)?.alias
+        return { ok: true, peerId, ...(finalAlias !== undefined ? { alias: finalAlias } : {}), peers: hub.peers() }
       },
     },
     {
       name: 'bridge_unregister',
-      description: 'Leave the hub: detaches your session (and drops the peer when no other session shares it); auto-registration stays off until an explicit bridge_register. Idempotent.',
-      inputSchema: schema({}),
-      handler: async (_args, sessionId) => {
-        const peer = registry.peerFor(sessionId)
-        if (peer !== undefined) {
-          registry.unbindPeer(sessionId)
-          if (registry.attachedCount(peer) === 0) hub.unregister(peer)
+      description: 'Leave the hub: detaches your session (and drops the peer when no other session shares it); auto-registration stays off until an explicit bridge_register. With `peer`, a hub MANAGER can kick another peer: its queue is dropped and every session attached to it is detached and kept from auto-re-registering. Idempotent.',
+      inputSchema: schema({
+        peer: optStr('Kick this peer instead of yourself. Requires manager rights (hub managerPeers).'),
+      }),
+      handler: async (args, sessionId) => {
+        if (args.peer === undefined) {
+          const peer = registry.peerFor(sessionId)
+          if (peer !== undefined) {
+            registry.unbindPeer(sessionId)
+            if (registry.attachedCount(peer) === 0) hub.unregister(peer)
+          }
+          registry.suppressAuto(sessionId)
+          return { ok: true, peerId: peer ?? null }
         }
-        registry.suppressAuto(sessionId)
-        return { ok: true, peerId: peer ?? null }
+        // Manager kick: drop the target peer, detach ALL its sessions and
+        // suppress their auto-registration, so the kick survives the target's
+        // next tool call (it must explicitly bridge_register to come back).
+        const caller = registry.peerFor(sessionId)
+        if (caller === undefined) throw new Error('not registered — call bridge_register(peerId) first')
+        const target = String(args.peer)
+        requireManager(caller, `kicking '${target}'`)
+        if (!hub.has(target)) {
+          return { ok: true, peerId: null, kicked: false }
+        }
+        hub.unregister(target)
+        const detached = registry.unbindPeerId(target, { suppress: true })
+        return { ok: true, peerId: target, kicked: true, detachedSessions: detached.length }
       },
+    },
+    {
+      name: 'bridge_rename',
+      description: 'Set a display alias on a peer. The alias is cosmetic — it shows up in bridge_peers / bridge_status and the desktop roster, while message routing, mailboxes, and history keep using the immutable peer id, so renaming is safe at any time. Omitting `peer` renames yourself; renaming ANOTHER peer requires manager rights (hub managerPeers).',
+      inputSchema: schema({
+        alias: str('New display name (1-64 chars, spaces/CJK allowed; empty string clears back to no alias).'),
+        peer: optStr('Whose alias to set; default yourself. Renaming another peer requires manager rights.'),
+      }, ['alias']),
+      handler: wrap(true, async (args, peer) => {
+        const target = args.peer === undefined ? peer : String(args.peer)
+        if (target !== peer) requireManager(peer, `renaming '${target}'`)
+        const alias = String(args.alias).trim()
+        hub.setAlias(target, alias === '' ? undefined : sanitizeAlias(alias))
+        const applied = hub.profileOf(target)?.alias
+        return { ok: true, peerId: target, ...(applied !== undefined ? { alias: applied } : {}) }
+      }),
     },
     {
       name: 'bridge_chat',
@@ -270,12 +365,9 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_peers',
-      description: 'List registered peers and whether each is connected (recent activity or a live SSE channel).',
+      description: 'List registered peers with their display identity and connection state: id (immutable routing name), optional alias (display name), client name/version reported at connect, whether connected (recent activity or a live SSE channel), and lastSeenMs.',
       inputSchema: schema({}),
-      handler: wrap(true, async () => {
-        const status = hub.status(livePeersFor(registry))
-        return { peers: hub.peers().map(id => ({ id, connected: status.peers.find(peer => peer.id === id)?.connected ?? false })) }
-      }),
+      handler: wrap(true, async () => ({ peers: rosterFor(hub, registry) })),
     },
     {
       name: 'bridge_history',

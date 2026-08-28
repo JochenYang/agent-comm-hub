@@ -285,6 +285,119 @@ try {
     hubGc.close()
   }
 
+  console.log('== profiles, aliases, and manager ops ==')
+  // Fresh hub: DEFAULT_CONFIG managers default to the desktop identity
+  // ('agent-hub-cli'), so the mgr client below is the manager out of the box.
+  const hubMgmt = startHub({ port: 19001, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000 }, { info: () => {}, warn: () => {} })
+  try {
+    const base = 'http://127.0.0.1:19001/mcp'
+    const mgr = makeClient('agent-hub-cli', base)
+    const alice = makeClient('alice', base)
+    const bob = makeClient('bob', base)
+    await Promise.all([mgr.init(), alice.init(), bob.init()])
+
+    const roster0 = await mgr.call('bridge_peers')
+    const aliceEntry = roster0.peers.find(p => p.id === 'alice')
+    check('roster carries client name/version reported at connect', aliceEntry?.clientName === 'alice' && aliceEntry?.clientVersion === '1', JSON.stringify(aliceEntry))
+
+    const regAlias = await alice.call('bridge_register', { peerId: 'alice', alias: 'Alice A' })
+    check('register sets own display alias', regAlias.ok === true && regAlias.alias === 'Alice A', JSON.stringify(regAlias))
+    const roster1 = await bob.call('bridge_peers')
+    check('alias is visible to other peers', roster1.peers.find(p => p.id === 'alice')?.alias === 'Alice A', JSON.stringify(roster1))
+
+    const renamed = await mgr.call('bridge_rename', { peer: 'alice', alias: 'Alice Renamed' })
+    check('manager renames another peer', renamed.ok === true && renamed.alias === 'Alice Renamed', JSON.stringify(renamed))
+    const roster2 = await bob.call('bridge_peers')
+    check('manager rename is roster-wide visible', roster2.peers.find(p => p.id === 'alice')?.alias === 'Alice Renamed', JSON.stringify(roster2))
+
+    await mgr.call('bridge_chat', { to: 'alice', message: 'still routed by id' })
+    const got = await alice.call('bridge_wait', { timeoutMs: 2000 })
+    check('alias rename keeps routing on the immutable id', got.type === 'message' && got.message.from === 'agent-hub-cli' && got.message.content === 'still routed by id', JSON.stringify(got))
+
+    const denied = await bob.callRaw('bridge_rename', { peer: 'alice', alias: 'Nope' })
+    check('non-manager rename of another peer rejected', denied.error !== undefined && /manager/.test(denied.error), JSON.stringify(denied))
+    const cleared = await mgr.call('bridge_rename', { alias: '   ' })
+    check('whitespace-only alias clears the display alias', cleared.ok === true && cleared.alias === undefined, JSON.stringify(cleared))
+    const ctrlAlias = await mgr.callRaw('bridge_rename', { alias: 'bad\u0000name' })
+    check('alias with control characters rejected', ctrlAlias.error !== undefined, JSON.stringify(ctrlAlias))
+    const ghostAlias = await mgr.callRaw('bridge_rename', { peer: 'ghost', alias: 'Ghost' })
+    check('alias of unknown peer rejected', ghostAlias.error !== undefined, JSON.stringify(ghostAlias))
+
+    await alice.call('bridge_unregister')
+    const alice2 = makeClient('alice', base)
+    await alice2.init()
+    const roster3 = await bob.call('bridge_peers')
+    check('alias survives unregister and reconnect', roster3.peers.find(p => p.id === 'alice')?.alias === 'Alice Renamed', JSON.stringify(roster3))
+    const reidentified = await alice2.call('bridge_register', { peerId: 'carol' })
+    check('self id-rename carries the display alias', reidentified.ok === true && reidentified.alias === 'Alice Renamed', JSON.stringify(reidentified))
+    await alice2.call('bridge_register', { peerId: 'alice' })
+
+    const kicked = await mgr.call('bridge_unregister', { peer: 'bob' })
+    check('manager kicks a peer', kicked.ok === true && kicked.kicked === true, JSON.stringify(kicked))
+    const bobBlocked = await bob.callRaw('bridge_peers')
+    check('kicked session cannot auto-re-register', bobBlocked.error !== undefined, JSON.stringify(bobBlocked))
+    const roster4 = await mgr.call('bridge_peers')
+    check('kicked peer leaves the roster', !roster4.peers.some(p => p.id === 'bob'), JSON.stringify(roster4))
+    const bobBack = await bob.call('bridge_register', { peerId: 'bob' })
+    check('kicked peer can explicitly re-register', bobBack.ok === true, JSON.stringify(bobBack))
+
+    const kickUnknown = await mgr.call('bridge_unregister', { peer: 'nobody-here' })
+    check('kick of unknown peer is a no-op ok', kickUnknown.ok === true && kickUnknown.kicked === false, JSON.stringify(kickUnknown))
+    const kickDenied = await bob.callRaw('bridge_unregister', { peer: 'alice' })
+    check('non-manager kick rejected', kickDenied.error !== undefined && /manager/.test(kickDenied.error), JSON.stringify(kickDenied))
+  } finally {
+    hubMgmt.close()
+  }
+
+  console.log('== SSE event push (roster + queued-mail hints) ==')
+  const hubEvt = startHub({ port: 19002, connectedWindowMs: 60_000, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 10 }, { info: () => {}, warn: () => {} })
+  try {
+    const base = 'http://127.0.0.1:19002/mcp'
+    const watcher = makeClient('watcher', base)
+    await watcher.init()
+    const evtRes = await fetch(base, { headers: { Accept: 'text/event-stream', 'Mcp-Session-Id': watcher.sessionId() } })
+    const reader = evtRes.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    const readUntil = async (pattern, timeoutMs = 3000) => {
+      const deadline = Date.now() + timeoutMs
+      while (!buffer.includes(pattern) && Date.now() < deadline) {
+        const chunk = await reader.read()
+        if (chunk.done) return false
+        buffer += decoder.decode(chunk.value, { stream: true })
+      }
+      return buffer.includes(pattern)
+    }
+    await reader.read() // consume the ": connected" comment
+
+    const joiner = makeClient('joiner', base)
+    await joiner.init()
+    const sawJoin = await readUntil('"event":"peers_changed"')
+    check('SSE pushes peers_changed when a peer joins', sawJoin && buffer.includes('"joiner"'), buffer.slice(-400))
+
+    await joiner.call('bridge_rename', { alias: 'Joiner Prime' })
+    const sawAlias = await readUntil('Joiner Prime')
+    check('SSE pushes roster update on alias edit', sawAlias, buffer.slice(-400))
+
+    await joiner.call('bridge_chat', { to: 'watcher', message: 'ping via sse' })
+    const sawMsg = await readUntil('"event":"message"')
+    check('SSE pushes queued-mail hint to the recipient', sawMsg && buffer.includes('ping via sse'), buffer.slice(-400))
+    await watcher.call('bridge_poll')
+
+    // A private message to a THIRD peer must not reach watcher's stream.
+    const watcher2 = makeClient('watcher2', base)
+    await watcher2.init()
+    await readUntil('watcher2') // consume the roster event for watcher2's join
+    buffer = ''
+    await joiner.call('bridge_chat', { to: 'watcher2', message: 'private ping' })
+    await new Promise(resolve => setTimeout(resolve, 500))
+    check('mail hint is recipient-scoped', !buffer.includes('private ping'), buffer.slice(-400))
+    await watcher2.call('bridge_poll')
+    await reader.cancel()
+  } finally {
+    hubEvt.close()
+  }
+
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1
 } finally {

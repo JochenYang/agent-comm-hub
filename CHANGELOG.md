@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0 (2026-08-28)
+
+- **Peer profiles + display aliases**: the hub now keeps identity metadata per
+  peer — the client name/version reported at connect, and an optional display
+  alias (spaces/CJK allowed). The alias is purely cosmetic: routing, mailboxes,
+  history, and acks keep using the immutable peer id, so renaming a peer never
+  moves state or drops messages. Aliases survive unregister/reconnect, and are
+  carried across a self id-rename. `bridge_peers` / `bridge_status` now return
+  `alias` / `clientName` / `clientVersion` alongside the connection state.
+- **Manager role + `bridge_rename`**: a new `managerPeers` setting (default
+  `agent-hub-cli` — the desktop GUI identity) names who may manage the roster.
+  The new `bridge_rename` tool sets a peer's display alias; renaming yourself
+  is open to everyone, renaming another peer requires manager rights. This is
+  a convention on top of the loopback trust model, not authentication.
+- **Manager kick via `bridge_unregister { peer }`**: a manager can remove
+  another peer — its queue is dropped and every session attached to it is
+  detached and kept from auto-re-registering until it explicitly calls
+  `bridge_register` (or reconnects with a fresh session).
+- **SSE event push**: peer joins/leaves and alias edits now push a
+  `notifications/message` event (`data.event: "peers_changed"`) with the full
+  roster to every open SSE stream; a message queued for a peer pushes a
+  `data.event: "message"` hint to that peer's streams only. Consumers (the
+  desktop GUI) can drop periodic polling; delivery itself is still via
+  `bridge_wait` / `bridge_poll`.
+- New CLI flag `--manager-peers <ids|all>` (default `agent-hub-cli`).
+- Test suite grows to 162 checks (61 smoke + 32 setup + 11 ops +
+  35 herdr control + 23 discovery).
+
 ## 0.5.0 (2026-08-22)
 
 - **`bridge_history` accepts `peer: "all"`**: returns the unfiltered tail of

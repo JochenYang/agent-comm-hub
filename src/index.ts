@@ -12,20 +12,21 @@
 import { createServer, type Server } from 'node:http'
 import { HerdrCtl } from './herdr-ctl.js'
 import { AgentHub, type HubOptions } from './hub.js'
-import { autoRegisterPeer, hubTools, livePeersFor } from './hub-tools.js'
+import { autoRegisterPeer, hubTools, livePeersFor, present, rosterFor } from './hub-tools.js'
 import { McpStreamableHttpServer, SessionRegistry } from './mcp-server.js'
+import type { BridgeMessage } from './protocol.js'
 
 export { HerdrCtl, type HerdrAgent, type HerdrPane, type HerdrRead, type HerdrSettled, AGENT_STATUSES } from './herdr-ctl.js'
-export { AgentHub, type HubOptions, type PeerState, type HubStatus } from './hub.js'
+export { AgentHub, type HubOptions, type PeerProfile, type PeerState, type HubStatus } from './hub.js'
 export { McpStreamableHttpServer, SessionRegistry, type McpTool } from './mcp-server.js'
-export { hubTools, present, autoRegisterPeer, sanitizePeerId, type PresentedMessage } from './hub-tools.js'
+export { hubTools, present, autoRegisterPeer, sanitizePeerId, sanitizeAlias, type PresentedMessage } from './hub-tools.js'
 export * from './protocol.js'
 
 /** Default server name reported to MCP clients. */
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.5.0'
+export const SERVER_VERSION = '0.6.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -63,6 +64,11 @@ export interface HubConfig {
   herdrSendRequest?: (method: string, params: Record<string, unknown>) => Promise<unknown>
   /** Peers allowed to use bridge_agent_* tools; 'all' (default) or a list. */
   herdrControlPeers?: 'all' | string[]
+  /** Peers allowed to manage the roster (bridge_rename of others, manager
+   * kick via bridge_unregister). `'all'` keeps the loopback trust model;
+   * the default is the desktop/CLI archiver identity so the companion GUI
+   * is the manager out of the box. */
+  managerPeers?: 'all' | string[]
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -78,6 +84,10 @@ export const DEFAULT_CONFIG: HubConfig = {
   defaultWaitMs: 30_000,
   connectedWindowMs: 30_000,
   peerIdleTimeoutMs: 600_000,
+  // The companion desktop app (and `agent-comm-hub status` probe) registers
+  // as `agent-hub-cli`; it is the natural roster manager. Agents themselves
+  // are NOT managers — they keep chatting, a GUI manages.
+  managerPeers: ['agent-hub-cli'],
 }
 
 export interface HubLogger {
@@ -99,6 +109,26 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
   // Drop undefined keys so CLI defaults never clobber DEFAULT_CONFIG values.
   const overrides = Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined))
   const resolved: HubConfig = { ...DEFAULT_CONFIG, ...overrides }
+  // Assigned right after the hub is constructed; the event callbacks below
+  // only fire once requests flow, never before the assignment runs.
+  let mcp: McpStreamableHttpServer
+  /** Push the full roster to every open SSE stream (roster info is public). */
+  const pushRoster = (): void => {
+    mcp.notifyAll('notifications/message', {
+      level: 'info',
+      logger: 'bridge',
+      data: { event: 'peers_changed', peers: rosterFor(hub, registry) },
+    })
+  }
+  /** Give a queued message's recipient sessions a push hint so UIs can skip
+   * polling; delivery itself stays via bridge_wait / bridge_poll. */
+  const pushQueued = (message: BridgeMessage, target: string): void => {
+    mcp.notify(registry.sessionsForPeer(target), 'notifications/message', {
+      level: 'info',
+      logger: 'bridge',
+      data: { event: 'message', message: present(message) },
+    })
+  }
   const hub = new AgentHub({
     maxQueue: resolved.maxQueue,
     historyLimit: resolved.historyLimit,
@@ -108,6 +138,22 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     onPeerGc: peerId => registry.unbindPeerId(peerId),
     // The idle GC must never evict a peer whose session has a live SSE channel.
     isPeerLive: peerId => livePeersFor(registry).has(peerId),
+    // SSE event push: roster changes and queued-mail hints. Best-effort — a
+    // notification failure must never break routing, so swallow and log.
+    onPeersChanged: () => {
+      try {
+        pushRoster()
+      } catch (error) {
+        log.warn(`peers_changed notification failed: ${(error as Error).message}`)
+      }
+    },
+    onQueued: (message, target) => {
+      try {
+        pushQueued(message, target)
+      } catch (error) {
+        log.warn(`message notification failed: ${(error as Error).message}`)
+      }
+    },
   })
   const registry = new SessionRegistry()
   const herdr = new HerdrCtl({
@@ -117,20 +163,21 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     socketPath: resolved.herdrSocketPath,
     sendRequest: resolved.herdrSendRequest,
   })
-  const mcp = new McpStreamableHttpServer(
+  mcp = new McpStreamableHttpServer(
     hubTools(hub, registry, {
       defaultWaitMs: resolved.defaultWaitMs,
       waitTimeoutMs: resolved.waitTimeoutMs,
       herdr,
       herdrControlPeers: resolved.herdrControlPeers === 'all' || resolved.herdrControlPeers === undefined ? 'all' : new Set(resolved.herdrControlPeers),
+      managerPeers: resolved.managerPeers === 'all' ? 'all' : new Set(resolved.managerPeers ?? DEFAULT_CONFIG.managerPeers),
     }),
     { name: SERVER_NAME, version: SERVER_VERSION },
     registry,
     message => log.warn(message),
-    (sessionId, clientName) => {
+    (sessionId, clientName, clientVersion) => {
       // Eager auto-registration at MCP handshake: connecting = joining.
       try {
-        const peer = autoRegisterPeer(hub, registry, sessionId, clientName)
+        const peer = autoRegisterPeer(hub, registry, sessionId, clientName, clientVersion)
         if (peer !== undefined) log.info(`peer joined: ${peer}`)
       } catch (error) {
         log.warn(`auto-register failed: ${(error as Error).message}`)

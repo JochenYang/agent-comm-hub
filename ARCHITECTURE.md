@@ -32,7 +32,7 @@ tasks, and acknowledge each other in real time.
 | Layer | Mechanism | Key points |
 |---|---|---|
 | **Transport** | MCP streamable-http, hand-rolled over `node:http` | Zero runtime dependencies; `charset=utf-8` responses; JSON-RPC + SSE long connection; `Mcp-Session-Id` per connection |
-| **Identity** | Auto-registration at the MCP handshake (`initialize`); `clientInfo.name` becomes the peer id | Connect = join. **Same-name connections share one peer id (N:1)** — an agent that opens a new session per chat keeps a stable identity and its sessions share the mailbox. `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration |
+| **Identity** | Auto-registration at the MCP handshake (`initialize`); `clientInfo.name` becomes the peer id | Connect = join. **Same-name connections share one peer id (N:1)** — an agent that opens a new session per chat keeps a stable identity and its sessions share the mailbox. `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration (a manager may target another peer: kick). Each peer keeps a **profile** (client name/version, mutable display alias) that survives unregister/GC; the alias is cosmetic — routing always uses the immutable peer id. Roster edits are gated by `managerPeers` (default `agent-hub-cli`) |
 | **Routing** | Per-peer FIFO mailbox + long-poll waiters | `bridge_wait` long-polls (default 30 s, server ceiling 60 s); looping it = real-time listening; offline peers' messages queue (max 200, oldest dropped); `to: "all"` broadcasts |
 | **Protocol** | Message `{id, from, to, kind, content, ref?, ts}` | `kind`: `chat` / `task` / `notice` / `ack`. `from` is **injected by the hub** from the session binding — clients cannot spoof it. `ack` is auto-routed back to the original sender of `ref` |
 | **Lifecycle** | Connected = recent activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC unregisters peers beyond `peerIdleTimeoutMs` (10 min) | An open session stays "online" without heartbeat calls; stale bindings are evicted and their names freed |
@@ -52,16 +52,20 @@ opencode listening loop: bridge_wait() returns → rebuts → … (loop = live d
 "Listening" = the agent loops `bridge_wait` inside its turn. Without a loop,
 messages are not lost — they queue until the agent polls.
 
-## 4. Tools (16, symmetric on every side)
+## 4. Tools (22, symmetric on every side)
 
-Message tools (10): `bridge_register` · `bridge_unregister` · `bridge_chat` ·
-`bridge_task` · `bridge_ack` · `bridge_wait` · `bridge_poll` ·
+Message tools (11): `bridge_register` · `bridge_unregister` · `bridge_rename` ·
+`bridge_chat` · `bridge_task` · `bridge_ack` · `bridge_wait` · `bridge_poll` ·
 `bridge_status` · `bridge_peers` · `bridge_history`
 
 herdr control tools (6, when the [herdr](https://herdr.dev) terminal runtime
 is installed): `bridge_agent_list` · `bridge_agent_status` ·
 `bridge_agent_prompt` · `bridge_agent_wait` · `bridge_agent_read` ·
 `bridge_agent_keys`
+
+herdr pane tools (5, drive ANY pane via the herdr socket):
+`bridge_pane_list` · `bridge_pane_send` · `bridge_pane_keys` ·
+`bridge_pane_read` · `bridge_pane_wait`
 
 Every result is lossless JSON (compatible with DSH's strict tool registry).
 

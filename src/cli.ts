@@ -19,7 +19,7 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
   const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
-  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin'])
+  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
@@ -80,6 +80,9 @@ Hub options:
   --herdr-bin <path>         herdr CLI binary for bridge_agent_* control tools
                              (default herdr, resolved via PATH)
   --herdr-timeout-ms <n>     Default cap for one herdr call in ms (default 30000)
+  --manager-peers <ids>      Comma-separated peer ids allowed to manage the
+                             roster (rename others / kick), or "all".
+                             (default agent-hub-cli — the desktop GUI identity)
 
 Setup options:
   --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
@@ -206,6 +209,11 @@ try {
     peerIdleTimeoutMs: args['--peer-idle-timeout-ms'] as number | undefined,
     herdrBin: args['--herdr-bin'] as string | undefined,
     herdrTimeoutMs: args['--herdr-timeout-ms'] as number | undefined,
+    managerPeers: args['--manager-peers'] === undefined
+      ? undefined
+      : args['--manager-peers'] === 'all'
+        ? 'all'
+        : String(args['--manager-peers']).split(',').map(id => id.trim()).filter(id => id !== ''),
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

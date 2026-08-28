@@ -30,9 +30,12 @@ export interface HubOptions {
   connectedWindowMs?: number
   /** Auto-unregister peers idle for this long (ms); 0 disables the GC. */
   peerIdleTimeoutMs?: number
-  /** Called when a message lands in a queue with no matching waiter. */
-  onQueued?: (message: BridgeMessage) => void
-  /** Called when a peer is registered or unregistered. */
+  /** Called when a message lands in a queue with no matching waiter. `target`
+   * is the peer the message was just queued for (with broadcast, the callback
+   * fires once per recipient, `message.to` staying 'all'). */
+  onQueued?: (message: BridgeMessage, target: string) => void
+  /** Called when the visible roster changes: a peer joins/leaves, or a
+   * profile field (alias) is edited — anything another peer could observe. */
   onPeersChanged?: (peers: string[]) => void
   /** Called when the idle GC evicts a peer. */
   onPeerGc?: (peerId: string) => void
@@ -43,11 +46,33 @@ export interface HubOptions {
 /** One peer's live state. */
 export interface PeerState {
   id: string
+  /** Display name from the peer profile, when one is set. */
+  alias?: string
   connected: boolean
   lastSeenMs: number
   queued: number
   waiting: number
 }
+
+/** Identity metadata of a peer, decoupled from routing. The peer id stays the
+ * immutable routing key (mailboxes, waiters, history, acks); the alias is the
+ * mutable display name — editing it never moves state, so it is safe for a
+ * manager to rename peers at any time. Profiles survive unregister/re-register
+ * (and idle GC) so a reconnecting agent keeps its alias. */
+export interface PeerProfile {
+  id: string
+  /** Display name; absent means "show the raw peer id". */
+  alias?: string
+  /** MCP client identity captured at connect (initialize clientInfo). */
+  clientName?: string
+  clientVersion?: string
+  /** Epoch ms when this id was first seen by the hub. */
+  registeredAt: number
+}
+
+/** Cap for the profile map: profiles outlive registration, so an unbounded
+ * map would leak on hubs that see many distinct one-shot client names. */
+const MAX_PROFILES = 512
 
 /** Live hub summary returned by the status tool. */
 export interface HubStatus {
@@ -63,6 +88,8 @@ export class AgentHub {
   private readonly waiters = new Map<string, Waiter[]>()
   private readonly historyRing: BridgeMessage[] = []
   private readonly lastSeen = new Map<string, number>()
+  /** Identity metadata keyed by peer id; outlives registration (see {@link PeerProfile}). */
+  private readonly profiles = new Map<string, PeerProfile>()
   private readonly gcTimer: NodeJS.Timeout | undefined
 
   constructor(private readonly options: HubOptions) {
@@ -97,14 +124,26 @@ export class AgentHub {
     return [...this.lastSeen.keys()]
   }
 
-  /** Register a peer; throws if the id is already taken. */
-  register(peerId: string): void {
+  /** Register a peer; throws if the id is already taken. Client metadata
+   * (when provided) refreshes the profile — with same-name sessions sharing a
+   * peer, the freshest connect wins, which self-heals stale metadata. */
+  register(peerId: string, client?: { name?: string; version?: string }): void {
     if (this.lastSeen.has(peerId)) throw new Error(`peer already registered: ${peerId}`)
     this.lastSeen.set(peerId, Date.now())
+    const existing = this.profiles.get(peerId)
+    this.profiles.set(peerId, {
+      ...existing,
+      id: peerId,
+      registeredAt: existing?.registeredAt ?? Date.now(),
+      ...(client?.name !== undefined ? { clientName: client.name } : existing?.clientName !== undefined ? { clientName: existing.clientName } : {}),
+      ...(client?.version !== undefined ? { clientVersion: client.version } : existing?.clientVersion !== undefined ? { clientVersion: existing.clientVersion } : {}),
+    })
+    this.evictOverflowProfiles()
     this.options.onPeersChanged?.(this.peers())
   }
 
-  /** Remove a peer and its queued messages; pending waiters resolve as timeouts. */
+  /** Remove a peer and its queued messages; pending waiters resolve as
+   * timeouts. The profile is kept so a reconnecting peer keeps its alias. */
   unregister(peerId: string): void {
     this.queues.delete(peerId)
     for (const waiter of this.waiters.get(peerId) ?? []) {
@@ -114,6 +153,38 @@ export class AgentHub {
     this.waiters.delete(peerId)
     this.lastSeen.delete(peerId)
     this.options.onPeersChanged?.(this.peers())
+  }
+
+  /** Identity metadata for `peerId`, if the hub ever saw it. */
+  profileOf(peerId: string): PeerProfile | undefined {
+    return this.profiles.get(peerId)
+  }
+
+  /** Set (or clear with `undefined`) the display alias of a registered peer.
+   * Routing state is untouched — this only changes how the peer is shown. */
+  setAlias(peerId: string, alias: string | undefined): void {
+    if (!this.lastSeen.has(peerId)) throw new Error(`unknown peer: ${peerId}`)
+    const profile = this.profiles.get(peerId)
+    if (profile !== undefined) {
+      this.profiles.set(peerId, alias === undefined ? omit(profile, 'alias') : { ...profile, alias })
+    }
+    // An alias edit changes the visible roster, so roster observers re-fire.
+    this.options.onPeersChanged?.(this.peers())
+  }
+
+  /** Keep the profile map bounded: drop the oldest profiles of peers that are
+   * NOT currently registered (live peers are never evicted). */
+  private evictOverflowProfiles(): void {
+    if (this.profiles.size <= MAX_PROFILES) return
+    const evictable = [...this.profiles.values()]
+      .filter(profile => !this.lastSeen.has(profile.id))
+      .sort((a, b) => a.registeredAt - b.registeredAt)
+    let overflow = this.profiles.size - MAX_PROFILES
+    for (const profile of evictable) {
+      if (overflow <= 0) break
+      this.profiles.delete(profile.id)
+      overflow--
+    }
   }
 
   /** Mark activity for `peer` (called on every tool call from that peer). */
@@ -170,13 +241,17 @@ export class AgentHub {
     const now = Date.now()
     return {
       server: 'agent-comm-hub',
-      peers: this.peers().map(peer => ({
-        id: peer,
-        connected: this.isActive(peer) || livePeers?.has(peer) === true,
-        lastSeenMs: this.lastSeen.get(peer) ?? 0,
-        queued: (this.queues.get(peer) ?? []).length,
-        waiting: (this.waiters.get(peer) ?? []).length,
-      })),
+      peers: this.peers().map(peer => {
+        const alias = this.profiles.get(peer)?.alias
+        return {
+          id: peer,
+          ...(alias !== undefined ? { alias } : {}),
+          connected: this.isActive(peer) || livePeers?.has(peer) === true,
+          lastSeenMs: this.lastSeen.get(peer) ?? 0,
+          queued: (this.queues.get(peer) ?? []).length,
+          waiting: (this.waiters.get(peer) ?? []).length,
+        }
+      }),
       historyLimit: this.options.historyLimit,
       maxQueue: this.options.maxQueue,
     }
@@ -274,7 +349,7 @@ export class AgentHub {
     if (queue.length >= this.options.maxQueue) queue.shift()
     queue.push(message)
     this.queues.set(target, queue)
-    this.options.onQueued?.(message)
+    this.options.onQueued?.(message, target)
   }
 
   /** Append a delivered message to the history ring. */
@@ -294,4 +369,10 @@ function drainFrom(queue: BridgeMessage[], from: string): BridgeMessage[] {
   }
   queue.splice(0, queue.length, ...kept)
   return drained
+}
+
+/** Shallow copy without one key (keeps results lossless: no `undefined` values). */
+function omit<T extends object, K extends keyof T>(value: T, key: K): Omit<T, K> {
+  const { [key]: _dropped, ...rest } = value
+  return rest
 }

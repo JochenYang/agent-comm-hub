@@ -41,7 +41,7 @@ Zero runtime dependencies: the MCP streamable-http server is hand-rolled over `n
 ## Highlights
 
 - **Any agent, one config**: every client points at the same `streamable-http` URL — no per-pair wiring.
-- **Reliable identity**: the sender of every message is derived from the connection's session binding, never caller-supplied — peers cannot impersonate each other; duplicate ids are rejected. Connecting the MCP auto-registers your client name — no manual setup.
+- **Reliable identity**: the sender of every message is derived from the connection's session binding, never caller-supplied — peers cannot impersonate each other; duplicate ids are rejected. Connecting the MCP auto-registers your client name — no manual setup. Peers carry a profile (client name/version, display alias) and joins/leaves are pushed over SSE.
 - **Real-time by polling**: `bridge_wait` long-polls (default 30 s, server ceiling 60 s); messages queue for offline peers.
 - **Structured conversations**: `chat` / `task` / `notice` / `ack` message kinds, acks auto-routed back to the original sender, `to: "all"` broadcast.
 - **Hard control via herdr** (optional): when the [herdr](https://herdr.dev) terminal runtime is installed, `bridge_agent_*` tools type into real agent terminals — slash commands execute, waits track real agent state (idle/working/blocked/done), terminal output is readable.
@@ -293,6 +293,23 @@ Control tools are gated: `herdrControlPeers` restricts who may use them
 (default `'all'`, mirroring the hub's loopback-only trust model). They are
 hard control — an injected `/clear` clears the target's context.
 
+### Roster management (aliases, kick)
+
+Peers carry a **profile**: the client name/version reported at connect, plus
+an optional **display alias** (`bridge_rename`). The alias is cosmetic — it
+shows up in `bridge_peers` / `bridge_status` and the desktop roster, while
+routing, mailboxes, history, and acks keep using the immutable peer id, so a
+rename never drops messages. Renaming yourself is open to everyone; renaming
+**another** peer or kicking one (`bridge_unregister { peer }`) requires the
+**manager** role (`--manager-peers`, default `agent-hub-cli` — the desktop GUI
+identity). This is a convention on top of the loopback trust model, not
+authentication.
+
+Roster changes and queued mail are pushed over the SSE channel as
+`notifications/message` events (`data.event: "peers_changed"` with the full
+roster, `data.event: "message"` hint scoped to the recipient), so GUIs and
+skills can react without polling.
+
 Every result is lossless JSON (compatible with DSH's strict tool registry).
 
 ## CLI reference
@@ -317,6 +334,8 @@ agent-comm-hub service install|uninstall [options]   one-shot auto-start
 --herdr-bin <path>       herdr CLI binary for bridge_agent_* control tools
                          (default herdr, resolved via PATH)
 --herdr-timeout-ms <n>   Default cap for one herdr call in ms (default 30000)
+--manager-peers <ids>    Comma-separated roster managers, or "all"
+                         (default agent-hub-cli — the desktop GUI identity)
 --url <u> / --server-name <n> / --remove / --dry-run   (setup/service/status)
 -h, --help               Show help
 -V, --version            Show version
@@ -392,7 +411,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (64 checks: 37 multi-peer smoke + 21 installer + 6 ops)
+pnpm test             # test suite (162 checks: 61 smoke + 32 setup + 11 ops + 35 herdr + 23 discover)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
 ```

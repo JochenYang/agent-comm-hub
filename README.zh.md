@@ -41,7 +41,7 @@
 ## 亮点
 
 - **任意 agent,一份配置**：所有客户端指向同一个 `streamable-http` URL，无需两两接线
-- **可靠身份**：消息的 `from` 由 hub 从会话绑定注入，客户端无法伪造；重名被拒；MCP 握手即自动注册（客户端名 = peer id），无需手动步骤
+- **可靠身份**：消息的 `from` 由 hub 从会话绑定注入，客户端无法伪造；重名被拒；MCP 握手即自动注册（客户端名 = peer id），无需手动步骤。每个 peer 带档案（客户端名/版本、显示别名），上下线与改名通过 SSE 实时推送
 - **轮询即实时**：`bridge_wait` 长轮询（默认 30s，服务端上限 60s）；离线 agent 的消息排队等它
 - **结构化会话**：`chat` / `task` / `notice` / `ack` 四类消息；回执自动路由回原发送者；`to: "all"` 广播
 - **herdr 硬控制**（可选）：装了 [herdr](https://herdr.dev) 终端运行时后，`bridge_agent_*` 工具能直接往对方终端打字——斜杠命令真实执行、等待基于真实 agent 状态（idle/working/blocked/done）、可读终端输出
@@ -204,6 +204,12 @@ agent-comm-hub service uninstall
 
 控制工具带权限门控：`herdrControlPeers` 限定谁能用（默认 `'all'`，与 hub 仅本机的信任模型一致）。这是**硬控制**——注入的 `/clear` 会清掉对方上下文。
 
+### 花名册管理（别名、踢人）
+
+每个 peer 带一份**档案**：连接时上报的客户端名/版本，外加可选的**显示别名**（`bridge_rename`）。别名纯展示——只出现在 `bridge_peers` / `bridge_status` 和桌面端花名册里；路由、信箱、历史、ack 始终使用不可变的 peer id，因此改名不会丢消息、不迁移状态。给自己改别名人人可以；改**别人**的别名或踢人（`bridge_unregister { peer }`）需要**管理端**身份（`--manager-peers`，默认 `agent-hub-cli`，即桌面 GUI 的身份）。这是叠加在本机信任模型上的约定，不是鉴权。
+
+花名册变化与排队消息会通过 SSE 通道以 `notifications/message` 事件推送（`data.event: "peers_changed"` 携带完整花名册，`data.event: "message"` 仅推送给收件人），GUI 与 skill 无需轮询即可感知。
+
 所有返回都是 lossless JSON（兼容 DSH 的严格工具注册表）。
 
 ## CLI 参考
@@ -268,7 +274,7 @@ const hub = startHub({ port: 18764 }, console) // 返回 { hub, registry, server
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit（strict）
-pnpm test             # 测试套件（64 项：37 多端冒烟 + 21 安装器 + 6 运维）
+pnpm test             # 测试套件（162 项：61 冒烟 + 32 安装器 + 11 运维 + 35 herdr + 23 发现）
 pnpm run build        # esbuild → lib/{cli,index,setup}.js（零依赖）
 pnpm pack             # 构建 + npm pack（发布产物）
 ```

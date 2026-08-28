@@ -53,7 +53,7 @@ src/
 ├── protocol.ts     # message kinds, BridgeMessage, task/ack payloads, peer id pattern
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, idle GC (transport-agnostic)
 ├── mcp-server.ts   # SessionRegistry (sessions + peer bindings) + McpStreamableHttpServer
-├── hub-tools.ts    # the 21 bridge tools, auto-registration, peerId sanitizing, result presentation
+├── hub-tools.ts    # the 22 bridge tools, auto-registration, peerId/alias sanitizing, profiles, result presentation
 ├── index.ts        # startHub() programmatic API, DEFAULT_CONFIG, exports
 ├── cli.ts          # agent-comm-hub CLI (hub start / setup / discover / status / service / update)
 ├── setup.ts        # `setup`: registry-driven incremental sync of MCP entry +
@@ -84,16 +84,22 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 - `index.ts` exports everything public: `startHub`, `AgentHub`,
   `McpStreamableHttpServer`, `SessionRegistry`, `hubTools`, `HerdrCtl`, the
   bridge tool wiring, and `* from './protocol.js'`.
-- The 21 tools (symmetric on every side): the 10 message tools
-  (`bridge_register`, `bridge_unregister`, `bridge_chat`, `bridge_task`,
-  `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`, `bridge_peers`,
-  `bridge_history`), 6 herdr agent tools (`bridge_agent_list`,
+- The 22 tools (symmetric on every side): the 11 message tools
+  (`bridge_register`, `bridge_unregister`, `bridge_rename`, `bridge_chat`,
+  `bridge_task`, `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`,
+  `bridge_peers`, `bridge_history`), 6 herdr agent tools (`bridge_agent_list`,
   `bridge_agent_status`, `bridge_agent_prompt`, `bridge_agent_wait`,
   `bridge_agent_read`, `bridge_agent_keys`) and 5 herdr pane tools
   (`bridge_pane_list`, `bridge_pane_send`, `bridge_pane_keys`,
   `bridge_pane_read`, `bridge_pane_wait`). Control tools are gated by
   `herdrControlPeers` (default `'all'`) and error out when herdr is not
-  enabled — the message tools keep working regardless.
+  enabled — the message tools keep working regardless. Roster management
+  (bridge_rename of others, manager kick) is gated by `managerPeers`
+  (default `['agent-hub-cli']`, the desktop GUI identity); the peer id stays
+  the immutable routing key while the alias is a mutable display name held in
+  `AgentHub.profiles` (survives unregister/GC). Hub pushes SSE notifications:
+  `peers_changed` (full roster) to all streams, `message` (queued-mail hint)
+  to the recipient's streams only.
 
 ## Build and test commands
 
@@ -102,7 +108,7 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs → 140 checks (39+32+11+35+23)
+                      #   + test/discover.mjs → 162 checks (61+32+11+35+23)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -113,18 +119,21 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 39/39 + 32/32 +
+  merging, the full `pnpm test` must stay green (verified: 61/61 + 32/32 +
   11/11 + 35/35 + 23/23 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (39 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (61 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, broadcast (no echo to sender), status/peers/history incl. the
   `peer: "all"` unfiltered archiver view, unregister /
   re-register, auto-registration (first tool call, eager at connect,
-  same-name sharing, unregister suppresses), SSE liveness, idle GC.
+  same-name sharing, unregister suppresses), SSE liveness, idle GC,
+  profiles/aliases/manager ops (roster metadata, manager rename + kick,
+  non-manager denial, alias persistence/routing), SSE event push
+  (peers_changed on join/alias edit, recipient-scoped mail hint).
 - `test/setup.mjs` (32 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
   idempotency, `remove` uninstall, DSH patch block insert/url-change/remove.

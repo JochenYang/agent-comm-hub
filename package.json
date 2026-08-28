@@ -1,6 +1,6 @@
 {
   "name": "agent-comm-hub",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Generic multi-peer MCP hub: any MCP-capable agent (MiniMax Code, Claude Code, opencode, Codex, Gemini CLI, DSH, ...) connects to one local streamable-http endpoint and they chat, delegate tasks, and acknowledge in real time",
   "keywords": [
     "mcp",

@@ -83,16 +83,25 @@ export class SessionRegistry {
 
   /** Client-reported name per session (from the initialize clientInfo). */
   readonly clientNames = new Map<string, string>()
+  /** Client-reported version per session (undefined when not reported). */
+  readonly clientVersions = new Map<string, string>()
 
-  /** Remember the client name reported by a session (on initialize). */
-  noteClient(sessionId: string, name: string): void {
+  /** Remember the client name/version reported by a session (on initialize). */
+  noteClient(sessionId: string, name: string, version?: string): void {
     this.clientNames.set(sessionId, name)
+    if (version !== undefined) this.clientVersions.set(sessionId, version)
   }
 
   /** Client-reported name for a session, if any. */
   clientName(sessionId: string | undefined): string | undefined {
     if (sessionId === undefined) return undefined
     return this.clientNames.get(sessionId)
+  }
+
+  /** Client-reported version for a session, if any. */
+  clientVersion(sessionId: string | undefined): string | undefined {
+    if (sessionId === undefined) return undefined
+    return this.clientVersions.get(sessionId)
   }
 
   /** Sessions whose owner explicitly unregistered; auto-registration is
@@ -132,11 +141,29 @@ export class SessionRegistry {
     return this.liveStreams
   }
 
-  /** Drop every binding that points at `peerId` (used by the idle GC). */
-  unbindPeerId(peerId: string): void {
+  /** Drop every binding that points at `peerId` (used by the idle GC). With
+   * `suppress`, the detached sessions also stop auto-re-registering — the
+   * manager-kick path, so a kicked agent stays out until it explicitly
+   * `bridge_register`s or reconnects with a fresh session. */
+  unbindPeerId(peerId: string, options?: { suppress?: boolean }): string[] {
+    const detached: string[] = []
     for (const [sessionId, bound] of this.peerBindings) {
-      if (bound === peerId) this.peerBindings.delete(sessionId)
+      if (bound === peerId) {
+        this.peerBindings.delete(sessionId)
+        detached.push(sessionId)
+        if (options?.suppress === true) this.suppressedAuto.add(sessionId)
+      }
     }
+    return detached
+  }
+
+  /** Session ids currently attached to `peerId` (any binding direction). */
+  sessionsForPeer(peerId: string): string[] {
+    const sessions: string[] = []
+    for (const [sessionId, bound] of this.peerBindings) {
+      if (bound === peerId) sessions.push(sessionId)
+    }
+    return sessions
   }
 
   /** How many sessions are currently attached to `peerId`. */
@@ -159,7 +186,7 @@ export class McpStreamableHttpServer {
     private readonly registry: SessionRegistry,
     private readonly log: (message: string) => void = () => {},
     /** Called right after a session initializes (eager auto-registration hook). */
-    private readonly onInitialize: (sessionId: string, clientName: string | undefined) => void = () => {},
+    private readonly onInitialize: (sessionId: string, clientName: string | undefined, clientVersion: string | undefined) => void = () => {},
   ) {}
 
   /** Attach request handling for `path` (e.g. `/mcp`) to an http server. */
@@ -190,6 +217,29 @@ export class McpStreamableHttpServer {
   close(): void {
     for (const stream of this.sseStreams.values()) stream.end()
     this.sseStreams.clear()
+  }
+
+  /** Push a JSON-RPC notification to every open SSE stream (roster events are
+   * public — any peer could poll bridge_peers for the same information).
+   * Write failures drop the dead stream silently; SSE is best-effort and
+   * long-poll (bridge_wait) remains the reliable delivery path. */
+  notifyAll(method: string, params: Record<string, unknown>): void {
+    this.notify([...this.sseStreams.keys()], method, params)
+  }
+
+  /** Push a JSON-RPC notification to the SSE streams of specific sessions. */
+  notify(sessionIds: Iterable<string>, method: string, params: Record<string, unknown>): void {
+    const frame = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method, params })}\n\n`
+    for (const sessionId of sessionIds) {
+      const stream = this.sseStreams.get(sessionId)
+      if (stream === undefined) continue
+      try {
+        stream.write(frame)
+      } catch {
+        this.sseStreams.delete(sessionId)
+        this.registry.markSseClosed(sessionId)
+      }
+    }
   }
 
   private handleGet(req: IncomingMessage, res: ServerResponse): void {
@@ -261,13 +311,14 @@ export class McpStreamableHttpServer {
     switch (method) {
       case 'initialize': {
         const newSessionId = this.registry.ensureSession(sessionId)
-        const clientInfo = (message.params as { clientInfo?: { name?: unknown } })?.clientInfo
+        const clientInfo = (message.params as { clientInfo?: { name?: unknown; version?: unknown } })?.clientInfo
         const clientName = typeof clientInfo?.name === 'string' && clientInfo.name !== '' ? clientInfo.name : undefined
+        const clientVersion = typeof clientInfo?.version === 'string' && clientInfo.version !== '' ? clientInfo.version : undefined
         if (clientName !== undefined) {
-          this.registry.noteClient(newSessionId, clientName)
+          this.registry.noteClient(newSessionId, clientName, clientVersion)
         }
         // Eager auto-registration: connecting the MCP is enough to join.
-        this.onInitialize(newSessionId, clientName)
+        this.onInitialize(newSessionId, clientName, clientVersion)
         const requested = (message.params as { protocolVersion?: unknown })?.protocolVersion
         const protocolVersion = typeof requested === 'string' && (SUPPORTED_VERSIONS as readonly string[]).includes(requested)
           ? requested
