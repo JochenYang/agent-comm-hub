@@ -21,6 +21,51 @@ use crate::sqlite_store::{MessageRecord, PeerRecord, Store, UnreadRecord};
 /// 临界区是常数级集合操作，用 std Mutex 即可，不需要 async 锁。
 pub(crate) type KickedPeers = Arc<std::sync::Mutex<HashSet<String>>>;
 
+/// 把 SQLite config 表里保存的 hub 设置套到一个 HubConfig 上（缺省键/无法
+/// 解析的值保留 base 值）。这是设置面板真正生效的唯一通路 —— 此前 config_set
+/// 只写库、重启用的还是内存默认值，保存过的设置从不生效（用户实测）。
+pub(crate) fn apply_saved_config(cfg: &mut HubConfig, store: &Store) {
+    let saved = |key: &str| store.get_config(key).ok().flatten().map(|r| r.value);
+    if let Some(v) = saved("host") {
+        if !v.is_empty() {
+            cfg.host = v;
+        }
+    }
+    if let Some(v) = saved("port") {
+        if let Ok(n) = v.parse::<u16>() {
+            cfg.port = n;
+        }
+    }
+    if let Some(v) = saved("path") {
+        if !v.is_empty() {
+            cfg.path = v;
+        }
+    }
+    // 数值键统一 u32（port 是 u16，单独解析）；非法值保留默认。
+    for (key, slot) in [
+        ("max_queue", &mut cfg.max_queue),
+        ("history_limit", &mut cfg.history_limit),
+        ("wait_timeout_ms", &mut cfg.wait_timeout_ms),
+        ("default_wait_ms", &mut cfg.default_wait_ms),
+        ("connected_window_ms", &mut cfg.connected_window_ms),
+        ("peer_idle_timeout_ms", &mut cfg.peer_idle_timeout_ms),
+    ] {
+        if let Some(v) = saved(key) {
+            if let Ok(n) = v.parse::<u32>() {
+                *slot = n;
+            }
+        }
+    }
+    if let Some(v) = saved("herdr_bin") {
+        cfg.herdr_bin = if v.is_empty() { None } else { Some(v) };
+    }
+    if let Some(v) = saved("herdr_timeout_ms") {
+        if let Ok(n) = v.parse::<u32>() {
+            cfg.herdr_timeout_ms = Some(n);
+        }
+    }
+}
+
 /// 本端（桌面 GUI）在 hub 里的 peer id —— hub 默认管理端（managerPeers）。
 /// clientInfo.name 即此 id（hub 按名字 auto-register，同名连接 N:1 attach）。
 /// 前端 src/lib/self.ts 的 SELF_PEER_ID 与这里保持一致。
@@ -911,12 +956,17 @@ pub async fn config_set(
     Ok(())
 }
 
-/// 重启 hub；读取 SQLite 中的 config 重建 HubConfig，应用新配置。
-/// 注意：M2.5 重启只覆盖已持久化的 key（其他保留当前 HubConfig 内存值）。
+/// 重启 hub；重启前从 SQLite config 表重建 HubConfig（键同 config_get），
+/// 让设置面板保存的值真正生效（缺省键保留默认值）。bin 保持运行时解析。
+/// 注意：外部 hub（非本 app spawn）仍无法由本 app 重启 —— 该场景下用户需
+/// 自行停掉外部进程；应用下次启动时会按保存值探测/拉起。
 #[tauri::command]
 pub async fn hub_restart_with_saved_config(
     state: State<'_, AppState>,
 ) -> CmdResult<HubStatus> {
+    let mut cfg = HubConfig::default();
+    apply_saved_config(&mut cfg, &state.store);
+    state.hub.set_config(cfg);
     wrap(state.hub.restart().await)?;
     *state.mcp.write().await = None;
     let status = state.hub.status().await;
@@ -961,13 +1011,13 @@ fn herdr_error_to_command_error(e: crate::herdr_client::HerdrError) -> CommandEr
 
 #[tauri::command]
 pub async fn herdr_is_available(state: State<'_, AppState>) -> CmdResult<bool> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     Ok(h.is_available().await)
 }
 
 #[tauri::command]
 pub async fn herdr_agent_list(state: State<'_, AppState>) -> CmdResult<Vec<HerdrAgent>> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.agent_list().await.map_err(herdr_error_to_command_error)
 }
 
@@ -976,7 +1026,7 @@ pub async fn herdr_agent_status(
     state: State<'_, AppState>,
     target: String,
 ) -> CmdResult<HerdrAgent> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.agent_status(&target).await.map_err(herdr_error_to_command_error)
 }
 
@@ -989,7 +1039,7 @@ pub async fn herdr_agent_prompt(
     until: Option<String>,
     timeout_ms: Option<u32>,
 ) -> CmdResult<Option<HerdrSettled>> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.agent_prompt(&target, &text, wait, until.as_deref(), timeout_ms)
         .await
         .map_err(herdr_error_to_command_error)
@@ -1002,7 +1052,7 @@ pub async fn herdr_agent_wait(
     until: Option<String>,
     timeout_ms: Option<u32>,
 ) -> CmdResult<Option<HerdrSettled>> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.agent_wait(&target, until.as_deref(), timeout_ms)
         .await
         .map_err(herdr_error_to_command_error)
@@ -1014,7 +1064,7 @@ pub async fn herdr_agent_read(
     target: String,
     lines: Option<u32>,
 ) -> CmdResult<HerdrRead> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.agent_read(&target, lines).await.map_err(herdr_error_to_command_error)
 }
 
@@ -1024,13 +1074,13 @@ pub async fn herdr_agent_keys(
     target: String,
     keys: Vec<String>,
 ) -> CmdResult<()> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.agent_keys(&target, &keys).await.map_err(herdr_error_to_command_error)
 }
 
 #[tauri::command]
 pub async fn herdr_pane_list(state: State<'_, AppState>) -> CmdResult<Vec<HerdrPane>> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.pane_list().await.map_err(herdr_error_to_command_error)
 }
 
@@ -1040,7 +1090,7 @@ pub async fn herdr_pane_send_text(
     target: String,
     text: String,
 ) -> CmdResult<()> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.pane_send_text(&target, &text)
         .await
         .map_err(herdr_error_to_command_error)
@@ -1052,7 +1102,7 @@ pub async fn herdr_pane_send_keys(
     target: String,
     keys: Vec<String>,
 ) -> CmdResult<()> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.pane_send_keys(&target, &keys)
         .await
         .map_err(herdr_error_to_command_error)
@@ -1064,7 +1114,7 @@ pub async fn herdr_pane_read(
     target: String,
     lines: Option<u32>,
 ) -> CmdResult<HerdrRead> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.pane_read(&target, lines).await.map_err(herdr_error_to_command_error)
 }
 
@@ -1076,7 +1126,7 @@ pub async fn herdr_pane_wait_for_output(
     match_value: String,
     timeout_ms: Option<u32>,
 ) -> CmdResult<Option<HerdrRead>> {
-    let h = make_herdr(state.hub.config()).await;
+    let h = make_herdr(&state.hub.config()).await;
     h.pane_wait_for_output(&target, &match_type, &match_value, timeout_ms)
         .await
         .map_err(herdr_error_to_command_error)
@@ -1085,6 +1135,36 @@ pub async fn herdr_pane_wait_for_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 保存的 hub 设置必须真正被应用：SQLite config 行覆盖默认值，非法/缺失
+    /// 键保留默认。回归背景：config_set 只写库，重启用的还是内存默认值，
+    /// 设置面板改动永远不生效（用户实测）。
+    #[test]
+    fn apply_saved_config_overrides_defaults_and_tolerates_garbage() {
+        let store = Store::open_in_memory().expect("store");
+        let now = 1_000;
+        store.set_config("port", "18801", now).unwrap();
+        store.set_config("history_limit", "2000", now).unwrap();
+        store.set_config("herdr_bin", "C:/tools/herdr.exe", now).unwrap();
+        store.set_config("herdr_timeout_ms", "not-a-number", now).unwrap();
+        store.set_config("path", "", now).unwrap(); // 空值保留默认
+
+        let mut cfg = HubConfig::default();
+        apply_saved_config(&mut cfg, &store);
+        assert_eq!(cfg.port, 18801);
+        assert_eq!(cfg.history_limit, 2000);
+        assert_eq!(cfg.herdr_bin.as_deref(), Some("C:/tools/herdr.exe"));
+        assert_eq!(cfg.herdr_timeout_ms, None); // 非法值保留默认（None → 30000 语义）
+        assert_eq!(cfg.path, "/mcp");
+        assert_eq!(cfg.max_queue, 200);
+
+        // 空库 = 全默认
+        let empty = Store::open_in_memory().expect("store");
+        let mut cfg2 = HubConfig::default();
+        apply_saved_config(&mut cfg2, &empty);
+        assert_eq!(cfg2.port, 18764);
+        assert_eq!(cfg2.max_queue, 200);
+    }
 
     /// 回归测试：hub 的 tools/call 成功信封必须解包成 bridge tool 的真实返回。
     /// 此前原样透传导致前端 `result.peers` / `result.messages` 为 undefined，

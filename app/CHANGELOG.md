@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] — 2026-08-28
 
+### Fixed
+
+- **Saved hub settings now actually apply**: `config_set` wrote the SQLite
+  config table but nothing ever read it back — the hub always relaunched with
+  built-in defaults, so changing the port (or any other setting) silently did
+  nothing. Settings are loaded at app start and applied before "save and
+  restart"; invalid or missing keys fall back to defaults.
+- Local roster rows that are absent from the live hub snapshot now display as
+  offline (stale rows from a previous hub/port kept showing "online" forever).
+- Peer row actions (rename / remove / forget) are reachable via keyboard and
+  accessibility trees — they were `display:none` until hover, invisible to
+  Tab and screen readers.
+- DSH duplicate MCP-config healing (see the hub 0.6.0 `setup` fix): re-running
+  the "配置 agent" flow collapses duplicates instead of appending.
+
 ### Added
 
 - **True rename (re-key) in the roster panel** — the inline rename editor gains

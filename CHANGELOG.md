@@ -38,6 +38,12 @@
   roster.json`, `off` to disable) persists peer profiles — aliases and
   client info survive hub restarts.
 - `agent-comm-hub status` shows a peer's alias next to its id.
+- **`setup` self-heals duplicate DSH entries**: hub entries in a DSH profile
+  patch are now identified by the plugin name instead of the marker comment;
+  running `setup` collapses any existing duplicates (a markerless entry used
+  to be treated as "not configured" and re-inserted, so DSH loaded the MCP
+  client twice and crash-restarted on profile load). `setup --remove` strips
+  markerless entries too.
 - New CLI flag `--manager-peers <ids|all>` (default `agent-hub-cli`).
 - Test suite grows to 181 checks (80 smoke + 32 setup + 11 ops +
   35 herdr control + 23 discovery).

@@ -257,7 +257,9 @@ pub(crate) fn hub_cli_command(extra_args: &[&str]) -> tokio::process::Command {
 /// Hub 进程控制器。M1 提供 start / stop / restart / status / snapshot_logs。
 /// M2 在此基础上接入 sqlite_store 持久化；M3 加 herdr_bin 字段暴露设置面板。
 pub struct HubProcess {
-    config: HubConfig,
+    /// 启动配置。用同步 RwLock 而非直接持有值：设置面板保存后可以在重启前
+    /// 原子替换（见 set_config），让"保存并重启"真正按新配置拉起 hub。
+    config: std::sync::RwLock<HubConfig>,
     log_ring: Arc<RwLock<HubLogRing>>,
     state: Arc<RwLock<(HubState, Option<String>)>>, // (state, last_error)
     pid: Arc<RwLock<Option<u32>>>,
@@ -274,7 +276,7 @@ pub struct HubProcess {
 impl HubProcess {
     pub fn new(config: HubConfig) -> Arc<Self> {
         Arc::new(Self {
-            config,
+            config: std::sync::RwLock::new(config),
             log_ring: Arc::new(RwLock::new(HubLogRing::new(500))),
             state: Arc::new(RwLock::new((HubState::Stopped, None))),
             pid: Arc::new(RwLock::new(None)),
@@ -304,8 +306,13 @@ impl HubProcess {
     }
 
     #[allow(dead_code)] // M2 T-2.5 配置面板读取
-    pub fn config(&self) -> &HubConfig {
-        &self.config
+    pub fn config(&self) -> HubConfig {
+        self.config.read().expect("config lock").clone()
+    }
+
+    /// 替换启动配置（"保存并重启"前调用）；对运行中的子进程无影响。
+    pub fn set_config(&self, config: HubConfig) {
+        *self.config.write().expect("config lock") = config;
     }
 
     pub async fn status(&self) -> HubStatus {
@@ -313,16 +320,14 @@ impl HubProcess {
             let g = self.state.read().await;
             (g.0, g.1.clone())
         };
+        let cfg = self.config.read().expect("config lock").clone();
         HubStatus {
             state,
             pid: *self.pid.read().await,
-            url: format!(
-                "http://{}:{}{}",
-                self.config.host, self.config.port, self.config.path
-            ),
-            host: self.config.host.clone(),
-            port: self.config.port,
-            path: self.config.path.clone(),
+            url: format!("http://{}:{}{}", cfg.host, cfg.port, cfg.path),
+            host: cfg.host.clone(),
+            port: cfg.port,
+            path: cfg.path.clone(),
             started_at: *self.started_at.read().await,
             last_error,
         }
@@ -349,13 +354,14 @@ impl HubProcess {
         // 端口已被占用：外部 hub（或另一个 app 实例）已在跑 —— 不 spawn 重复进程，
         // 直接复用（SPEC 关键数据流："检查端口是否已在响应，是则跳过 spawn"）。
         // 只探测一次（300ms 预算），避免把"上次启动未完成"误判为已占用。
-        if wait_for_port_ready(&self.config.host, self.config.port, Duration::from_millis(300)).await
+        let cfg = self.config.read().expect("config lock").clone();
+        if wait_for_port_ready(&cfg.host, cfg.port, Duration::from_millis(300)).await
         {
             self.log_ring.write().await.push(LogLine {
                 stream: "stdout",
                 line: format!(
                     "external hub already listening on {}:{} — reusing it (not spawning a duplicate)",
-                    self.config.host, self.config.port
+                    cfg.host, cfg.port
                 ),
                 ts: now_ms(),
             });
@@ -369,8 +375,8 @@ impl HubProcess {
             // 外部 hub 存活探测：每 5s TCP connect 一次，失败说明外部 hub 已退出
             // （可能被用户手动杀掉 / 持有方关闭）。此时先自动重启一次（spawn 自己
             // 的 hub，用户无感恢复），失败才置 Stopped；auto_restarted 原子位防循环。
-            let host = self.config.host.clone();
-            let port = self.config.port;
+            let host = cfg.host.clone();
+            let port = cfg.port;
             let state_ref = self.state.clone();
             let started_ref = self.started_at.clone();
             let log_ring = self.log_ring.clone();
@@ -426,7 +432,9 @@ impl HubProcess {
             return Ok(());
         }
 
-        let argv = self.config.to_argv();
+        // spawn 用快照：config 可能在 start 期间被 set_config 替换（重启前应用
+        // 保存的设置），本这次启动保持一次读取的一致性。
+        let argv = self.config.read().expect("config lock").to_argv();
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let mut cmd = hub_cli_command(&arg_refs);
         cmd.stdout(Stdio::piped())
@@ -478,16 +486,8 @@ impl HubProcess {
         }
 
         // 端口就绪探测（10s 预算，每 100ms 一次）
-        let url = format!(
-            "http://{}:{}{}",
-            self.config.host, self.config.port, self.config.path
-        );
-        let ready = wait_for_port_ready(
-            &self.config.host,
-            self.config.port,
-            Duration::from_secs(10),
-        )
-        .await;
+        let url = format!("http://{}:{}{}", cfg.host, cfg.port, cfg.path);
+        let ready = wait_for_port_ready(&cfg.host, cfg.port, Duration::from_secs(10)).await;
 
         if !ready {
             // 探测失败：杀掉 spawn 出来的子进程

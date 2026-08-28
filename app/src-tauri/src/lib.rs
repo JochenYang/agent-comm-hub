@@ -62,7 +62,11 @@ pub fn run() {
         }
     };
 
-    let app_state = AppState::new(HubConfig::default(), store);
+    // 启动即应用上次保存的 hub 设置（SQLite config 表）—— 此前启动只取
+    // HubConfig::default()，保存过的端口等配置重启后从不生效。
+    let mut hub_config = HubConfig::default();
+    commands::apply_saved_config(&mut hub_config, &store);
+    let app_state = AppState::new(hub_config, store);
 
     tauri::Builder::default()
         .manage(app_state)
