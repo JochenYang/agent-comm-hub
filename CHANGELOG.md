@@ -39,7 +39,7 @@
   client info survive hub restarts.
 - `agent-comm-hub status` shows a peer's alias next to its id.
 - New CLI flag `--manager-peers <ids|all>` (default `agent-hub-cli`).
-- Test suite grows to 180 checks (79 smoke + 32 setup + 11 ops +
+- Test suite grows to 181 checks (80 smoke + 32 setup + 11 ops +
   35 herdr control + 23 discovery).
 
 ## 0.5.0 (2026-08-22)

@@ -220,6 +220,11 @@ export class AgentHub {
     const waiters = this.waiters.get(oldId)
     const seen = this.lastSeen.get(oldId) ?? Date.now()
     const profile = this.profiles.get(oldId)
+    // The new id may carry a stale persisted profile (roster file restored a
+    // peer that later renamed itself away and back). The LIVE peer's fields
+    // win; fields it lacks (typically the alias) are adopted from the stale
+    // one, and first-seen time keeps the earlier of the two.
+    const stale = this.profiles.get(newId)
     this.queues.delete(oldId)
     this.waiters.delete(oldId)
     this.lastSeen.delete(oldId)
@@ -228,8 +233,15 @@ export class AgentHub {
     if (waiters !== undefined) this.waiters.set(newId, waiters)
     this.lastSeen.set(newId, seen)
     if (profile !== undefined) {
-      profile.id = newId
-      this.profiles.set(newId, profile)
+      const merged: PeerProfile = {
+        ...stale,
+        ...profile,
+        id: newId,
+        registeredAt: stale !== undefined && stale.registeredAt < profile.registeredAt ? stale.registeredAt : profile.registeredAt,
+      }
+      this.profiles.set(newId, merged)
+    } else if (stale !== undefined) {
+      this.profiles.set(newId, stale)
     } else {
       this.profiles.set(newId, { id: newId, registeredAt: Date.now() })
     }

@@ -484,6 +484,13 @@ try {
     await pB.call('bridge_register', { peerId: 'alice' })
     const restored = await pB.call('bridge_peers')
     check('alias restored from the roster file after restart', restored.peers.find(p => p.id === 'alice')?.alias === 'Persisted Alice', JSON.stringify(restored))
+    await pB.call('bridge_unregister')
+    // Stale-profile collision: a peer re-keying onto a persisted id adopts
+    // that id's alias (live profile fields win, missing ones are adopted).
+    const pC = makeClient('alice', 'http://127.0.0.1:19005/mcp')
+    await pC.init()
+    const merged = await pC.call('bridge_register', { peerId: 'alice2' })
+    check('re-key onto a persisted id adopts its alias', merged.ok === true && merged.alias === 'Persisted Alice', JSON.stringify(merged))
   } finally {
     hubB.close()
   }
