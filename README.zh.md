@@ -319,7 +319,7 @@ pnpm tauri:build      # 三平台安装包 (NSIS / MSI / dmg / AppImage / deb)
 | `unknown recipient: xxx` | 对方未注册（或用了别的 peerId）——先 `bridge_peers()` |
 | `not registered — call bridge_register` | 仅在显式注销后出现（正常连接会自动注册）；客户端没上报名字时会用 `agent` 兜底 |
 | `peer already registered by another connection` | 有人占了该 id——换个唯一 id（如 `工具:项目`）或重启 hub 清理 |
-| 端口冲突 | 默认 18764（dsh-mcode-bridge 用 18763）——`--port` 换端口并同步各 agent 配置 |
+| 端口冲突 | 默认 18764 被占用时用 `--port` 换端口，并同步各 agent 配置 |
 | PowerShell 客户端中文乱码 | 响应头已带 `charset=utf-8`；发送时用 `[System.Text.Encoding]::UTF8.GetBytes(...)` |
 
 ## 许可

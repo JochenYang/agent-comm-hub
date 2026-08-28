@@ -464,7 +464,7 @@ Tests cover registration, duplicate rejection, chat routing, sender-filtered wai
 | `unknown recipient: xxx` | The peer hasn't registered (or used a different peerId) — check `bridge_peers()` |
 | `not registered — call bridge_register` | Only appears after an explicit `bridge_unregister` (normal connections auto-register at connect); clients without a client name fall back to `agent` |
 | `peer already registered by another connection` | Another live connection holds the id — pick a unique peerId (e.g. `tool:project`) or restart the hub to clear stale bindings |
-| Port conflict | 18764 is the default; `dsh-mcode-bridge` uses 18763. Change with `--port` and update every agent config |
+| Port conflict | 18764 is the default; if it is taken, change with `--port` and update every agent config |
 | Chinese garbled in PowerShell clients | Response headers carry `charset=utf-8`; send request bodies as UTF-8 bytes (`[System.Text.Encoding]::UTF8.GetBytes(...)`) |
 
 ## License

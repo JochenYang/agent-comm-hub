@@ -112,7 +112,7 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs → 181 checks (80+32+11+35+23)
+                      #   + test/discover.mjs → 185 checks (80+36+11+35+23)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -123,7 +123,7 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 80/80 + 32/32 +
+  merging, the full `pnpm test` must stay green (verified: 80/80 + 36/36 +
   11/11 + 35/35 + 23/23 on Node 24 / Windows).
 
 ## Testing
@@ -142,9 +142,10 @@ pnpm pack             # build + npm pack (publishing artifact)
   unroutable, taken/reserved rejection; lossless self id-rename via
   bridge_register), history access gate (non-manager denied other-peer and
   peer="all" reads), roster persistence (stateFile write + restore).
-- `test/setup.mjs` (32 checks): `runSetup` against a fake home dir — only the
+- `test/setup.mjs` (36 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
-  idempotency, `remove` uninstall, DSH patch block insert/url-change/remove.
+  idempotency, `remove` uninstall, DSH patch block insert/url-change/remove,
+  duplicate-entry healing (markerless hub entries collapse to one).
 - `test/ops.mjs` (11 checks): `runStatus` against a live hub and a dead port,
   self-exclusion and cleanup of its probe peer, plus per-platform service
   `--dry-run` output (win32 / linux / darwin).

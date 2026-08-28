@@ -130,6 +130,66 @@ try {
   const afterTightRemove = readFileSync(patchPath, 'utf8')
   check('remove on tight block keeps the preceding entry intact', afterTightRemove.includes('key: 1') && !afterTightRemove.includes('dsh-mcp-client'), afterTightRemove)
 
+  console.log('== setup: dsh duplicate healing (marker lost / history double-insert) ==')
+  // A file holding TWO hub entries — one with the marker (old url), one the
+  // user's editor stripped the marker from (current url) — plus an unrelated
+  // entry. Older setup treated the markerless one as "not configured" and
+  // appended a third; DSH then loaded the plugin twice (crash loop).
+  const duplicated = `- id: web
+  config:
+    searchProvider: searxng
+# ── agent-comm-hub MCP client (installed by \`agent-comm-hub setup\`; undo with \`setup --remove\`) ─
+- insert:
+    - id: agent-hub
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agent-hub
+        transport: streamable-http
+        url: http://127.0.0.1:18764/mcp
+- insert:
+    - id: agent-hub
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agent-hub
+        transport: streamable-http
+        url: http://127.0.0.1:18999/mcp
+`
+  writeFileSync(patchPath, duplicated)
+  await runSetup({ homeDir: home, skillSrc, url: 'http://127.0.0.1:18999/mcp', ...quiet })
+  const healed = readFileSync(patchPath, 'utf8')
+  check(
+    'duplicate hub entries collapse to one with the current url',
+    healed.split('dsh-mcp-client').length === 2 && healed.includes('url: http://127.0.0.1:18999/mcp') && !healed.includes('url: http://127.0.0.1:18764/mcp') && healed.includes('searchProvider: searxng'),
+    healed,
+  )
+  await runSetup({ homeDir: home, skillSrc, url: 'http://127.0.0.1:18999/mcp', ...quiet })
+  check('re-run after healing leaves the file byte-identical', readFileSync(patchPath, 'utf8') === healed, readFileSync(patchPath, 'utf8'))
+
+  // Markerless entry + same url must be recognized as configured (no second insert).
+  const markerless = `- id: web
+  config:
+    searchProvider: searxng
+- insert:
+    - id: agent-hub
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agent-hub
+        transport: streamable-http
+        url: http://127.0.0.1:18999/mcp
+`
+  writeFileSync(patchPath, markerless)
+  const beforeMarkerless = markerless
+  await runSetup({ homeDir: home, skillSrc, url: 'http://127.0.0.1:18999/mcp', ...quiet })
+  const afterMarkerless = readFileSync(patchPath, 'utf8')
+  check(
+    'markerless hub entry with same url is left alone (no duplicate)',
+    afterMarkerless.split('dsh-mcp-client').length === 2 && afterMarkerless === beforeMarkerless,
+    afterMarkerless,
+  )
+  await runSetup({ homeDir: home, skillSrc, remove: true, ...quiet })
+  const markerlessRemoved = readFileSync(patchPath, 'utf8')
+  check('remove also strips a markerless hub entry', !markerlessRemoved.includes('dsh-mcp-client') && markerlessRemoved.includes('searchProvider: searxng'), markerlessRemoved)
+
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1
 } finally {

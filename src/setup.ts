@@ -158,15 +158,22 @@ function escapeRegExp(value: string): string {
 /** Marker comment of the DSH profile-patch block we insert (see below). */
 const DSH_PATCH_MARKER = '# ── agent-comm-hub MCP client'
 
+/** The DSH MCP-client plugin our block mounts — the STABLE identity of "our"
+ * entry. The marker comment above is cosmetic: an editor or an older setup
+ * run can drop/reformat it, and treating a markerless entry as "not
+ * configured" made setup append a SECOND hub plugin, which DSH then loads
+ * twice (observed: profile load crash-restart loop). Match by plugin name. */
+const DSH_PLUGIN_NAME = '@deepseek-ai/dsh-mcp-client'
+
 /** The block appended to a DSH profile `cordis.patch.yml` (top-level YAML
  * list of loader patch entries): an `insert` row that mounts the
- * `@deepseek-ai/dsh-mcp-client` plugin pointing at the hub endpoint. */
+ * {@link DSH_PLUGIN_NAME} plugin pointing at the hub endpoint. */
 function dshPatchBlock(url: string, serverName: string): string {
   return `
 ${DSH_PATCH_MARKER} (installed by \`agent-comm-hub setup\`; undo with \`setup --remove\`) ─
 - insert:
     - id: ${serverName}
-      name: '@deepseek-ai/dsh-mcp-client'
+      name: '${DSH_PLUGIN_NAME}'
       config:
         serverName: ${serverName}
         transport: streamable-http
@@ -177,9 +184,10 @@ ${DSH_PATCH_MARKER} (installed by \`agent-comm-hub setup\`; undo with \`setup --
 /**
  * Merge/remove the hub MCP-client block in one DSH profile patch file.
  * The patch is a YAML list; edits are line-scoped so unrelated entries are
- * never rewritten: the block (marker comment + its `- insert:` entry) is
- * appended at the end, replaced in place when the url changed, and removed
- * by its marker line. Backed up first, idempotent, missing files skipped.
+ * never rewritten. Our entries are found by plugin name ({@link
+ * DSH_PLUGIN_NAME}) — with or without the marker comment — and merging is
+ * self-healing: every existing hub entry is stripped, then exactly one block
+ * with the current url is appended. Backed up first; missing files skipped.
  */
 async function mergeDshPatch(
   file: string,
@@ -187,59 +195,49 @@ async function mergeDshPatch(
 ): Promise<'changed' | 'unchanged' | 'removed' | 'absent' | 'skipped'> {
   if (!existsSync(file)) return 'skipped'
   const text = await readFile(file, 'utf8')
-
-  // Locate the block by lines: the marker comment line, then the block spans
-  // up to the next top-level entry (a line starting with `- ` — indented
-  // `    - id:` lines inside the block never match). Leading blank lines are
-  // absorbed so replacing/removing never leaves stray gaps.
   const lines = text.split('\n')
-  const markerLine = lines.findIndex(line => line.includes(DSH_PATCH_MARKER))
-  const hasBlock = markerLine >= 0
-  const blockRange = (): { start: number; end: number } => {
-    // The block owns the marker comment plus its `- insert:` entry (and the
-    // entry's indented lines). Find the block's own top-level entry first,
-    // then the NEXT top-level entry after it (or EOF).
-    let entryStart = -1
-    for (let i = markerLine + 1; i < lines.length; i++) {
-      if (/^- /.test(lines[i])) {
-        entryStart = i
-        break
-      }
+
+  /** Ranges of every top-level `- insert:` entry mounting the hub plugin.
+   * Each range absorbs its leading blank lines and our marker comment. */
+  const hubEntryRanges = (): Array<{ start: number; end: number }> => {
+    const tops: number[] = []
+    for (let i = 0; i < lines.length; i++) {
+      if (/^- /.test(lines[i])) tops.push(i)
     }
-    let end = lines.length
-    if (entryStart >= 0) {
-      for (let i = entryStart + 1; i < lines.length; i++) {
-        if (/^- /.test(lines[i])) {
-          end = i
-          break
-        }
-      }
+    const ranges: Array<{ start: number; end: number }> = []
+    for (let k = 0; k < tops.length; k++) {
+      const end = k + 1 < tops.length ? tops[k + 1] : lines.length
+      if (!lines.slice(tops[k], end).some(line => line.includes(DSH_PLUGIN_NAME))) continue
+      let start = tops[k]
+      while (start > 0 && lines[start - 1].trim() === '') start--
+      if (start > 0 && lines[start - 1].includes(DSH_PATCH_MARKER)) start--
+      ranges.push({ start, end })
     }
-    let start = markerLine
-    while (start > 0 && lines[start - 1].trim() === '') start--
-    return { start, end }
+    return ranges
   }
-  const withoutBlock = (): string => {
-    const { start, end } = blockRange()
-    return lines.slice(0, start).concat(lines.slice(end)).join('\n')
+  const withoutHubEntries = (): string => {
+    let out = lines
+    for (const range of hubEntryRanges().reverse()) {
+      out = out.slice(0, range.start).concat(out.slice(range.end))
+    }
+    return out.join('\n')
   }
 
   if (opts.remove) {
-    if (!hasBlock) return 'absent'
-    const cleaned = withoutBlock()
+    if (hubEntryRanges().length === 0) return 'absent'
     await backup(file)
-    await writeFile(file, cleaned, 'utf8')
+    await writeFile(file, withoutHubEntries(), 'utf8')
     return 'removed'
   }
-  if (hasBlock) {
-    if (lines.some(line => line.includes(`url: ${opts.url}`))) return 'unchanged'
-    const replaced = withoutBlock()
-    await backup(file)
-    await writeFile(file, replaced.trimEnd() + dshPatchBlock(opts.url, opts.serverName), 'utf8')
-    return 'changed'
+  // Idempotent + self-healing: exactly ONE hub entry carrying the current
+  // url. Anything else — no entry, stale url, or MULTIPLE entries from an
+  // older buggy run — is rebuilt into that shape.
+  const ranges = hubEntryRanges()
+  if (ranges.length === 1 && lines.slice(ranges[0].start, ranges[0].end).some(line => line.includes(`url: ${opts.url}`))) {
+    return 'unchanged'
   }
   await backup(file)
-  await writeFile(file, text.trimEnd() + dshPatchBlock(opts.url, opts.serverName), 'utf8')
+  await writeFile(file, withoutHubEntries().trimEnd() + dshPatchBlock(opts.url, opts.serverName), 'utf8')
   return 'changed'
 }
 

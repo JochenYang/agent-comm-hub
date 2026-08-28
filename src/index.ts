@@ -33,7 +33,7 @@ export const SERVER_VERSION = '0.6.0'
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
 
-/** Default port (18764 — dsh-mcode-bridge uses 18763, avoid clashing). */
+/** Default port. */
 export const DEFAULT_PORT = 18764
 
 /** Default URL path of the MCP endpoint. */
