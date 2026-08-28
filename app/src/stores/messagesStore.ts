@@ -8,6 +8,7 @@ import {
   type LocalMessageRecord
 } from '@/lib/tauri'
 import { serializeError } from '@/lib/serializeError'
+import { SELF_PEER_ID } from '@/lib/self'
 
 /**
  * 消息 store —— zustand 全局单例（SPEC §5.2 设计；此前的手写 hook 每个组件
@@ -52,8 +53,6 @@ interface MessagesState {
 
 const POLL_INTERVAL_MS = 3_000
 const HISTORY_LIMIT = 100
-/** 本端在 hub 里的 peer id（与 Rust 侧注册身份一致）。 */
-const SELF_PEER_ID = 'agent-hub-cli'
 
 /** 是否属于当前视图。拉取已是全量 ring 尾部（peer="all"，见 refresh），过滤
  * 全部在客户端做：无会话 = 只看与自己相关 + 广播（镜像 hub 的 history 过滤
@@ -214,7 +213,7 @@ useMessagesStore.subscribe((s) => {
   const out: Record<string, number> = {}
   for (const m of s.messages) {
     const peer = m.from
-    if (peer === 'agent-hub-cli') continue
+    if (peer === SELF_PEER_ID) continue
     if (m.ts > (s.lastReadTs[peer] ?? 0)) out[peer] = (out[peer] ?? 0) + 1
   }
   // 值变化才 set，避免无限循环（unreadMap 不在 state 里持久化，仅派生快照）

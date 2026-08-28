@@ -146,7 +146,22 @@
     "back_conv": "back to my conversation",
     "on": "on",
     "off": "off",
-    "self": "(self)"
+    "self": "(self)",
+    "online_group": "online",
+    "offline_group": "offline · known",
+    "rename": "rename",
+    "clear_alias": "clear alias",
+    "remove": "remove",
+    "remove_confirm": "remove {{name}}? it will be kicked from the hub",
+    "rename_placeholder": "new alias",
+    "ok": "ok",
+    "renamed_toast": "{{name}} renamed to {{alias}}",
+    "alias_cleared_toast": "alias cleared for {{name}}",
+    "removed_toast": "{{name}} removed",
+    "forget": "remove from local roster",
+    "forgot_toast": "{{name}} removed from local roster",
+    "joined_toast": "{{name}} joined",
+    "left_toast": "{{name}} went offline"
   },
   "detail": {
     "select_hint": "← select a message",

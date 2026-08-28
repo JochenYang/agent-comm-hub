@@ -3,6 +3,7 @@
 //! 所有 Hub 进程 + bridge 工具 + SQLite 配置的 RPC 都通过这里暴露。
 //! 前端调用 `invoke('hub_start')` / `invoke('bridge_peers')` / `invoke('config_get')` 等。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,13 +15,23 @@ use tokio::sync::RwLock;
 use crate::herdr_client::{HerdrAgent, HerdrCtl, HerdrPane, HerdrRead, HerdrSettled};
 use crate::hub_process::{hub_cli_command, HubConfig, HubProcess, HubState, HubStatus, LogLine};
 use crate::mcp_client::{ClientInfo, McpError, McpClient};
-use crate::sqlite_store::{MessageRecord, Store, UnreadRecord};
+use crate::sqlite_store::{MessageRecord, PeerRecord, Store, UnreadRecord};
+
+/// 被踢 peer 的本地抑制集（P3-2 竞态防御，语义见 sync_roster_to_store）。
+/// 临界区是常数级集合操作，用 std Mutex 即可，不需要 async 锁。
+pub(crate) type KickedPeers = Arc<std::sync::Mutex<HashSet<String>>>;
+
+/// 本端（桌面 GUI）在 hub 里的 peer id —— hub 默认管理端（managerPeers）。
+/// clientInfo.name 即此 id（hub 按名字 auto-register，同名连接 N:1 attach）。
+/// 前端 src/lib/self.ts 的 SELF_PEER_ID 与这里保持一致。
+pub(crate) const SELF_PEER_ID: &str = "agent-hub-cli";
 
 /// Tauri 全局状态：单例 HubProcess + 懒初始化的 McpClient + SQLite store。
 pub struct AppState {
     pub hub: Arc<HubProcess>,
     pub mcp: Arc<RwLock<Option<Arc<McpClient>>>>,
     pub store: Arc<Store>,
+    pub kicked: KickedPeers,
 }
 
 impl AppState {
@@ -29,6 +40,7 @@ impl AppState {
             hub: HubProcess::new(config),
             mcp: Arc::new(RwLock::new(None)),
             store,
+            kicked: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 }
@@ -220,7 +232,7 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
         &cfg.host,
         cfg.port,
         &cfg.path,
-        ClientInfo::new("agent-hub-cli", env!("CARGO_PKG_VERSION")),
+        ClientInfo::new(SELF_PEER_ID, env!("CARGO_PKG_VERSION")),
     ));
     // 端口就绪 ≠ hub 完全 ready：initialize 可能撞上启动竞态（尤其 npx 冷下载 /
     // 端口刚释放的场景），重试 15 次 × 1s（15s 窗口）后再放弃（失败只 log，UI 仍可用）。
@@ -245,10 +257,10 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
     // 显式 bridge_register "agent-hub-cli"（auto-register 时 hub 已用 clientInfo.name
     // sanitize 成同名 peer；显式 register 是冗余但 idempotent,确保连接语义）。
     if let Err(e) = client
-        .tools_call("bridge_register", json!({ "peerId": "agent-hub-cli" }))
+        .tools_call("bridge_register", json!({ "peerId": SELF_PEER_ID }))
         .await
     {
-        log::warn!("bridge_register agent-hub-cli 失败: {e}");
+        log::warn!("bridge_register {SELF_PEER_ID} 失败: {e}");
     }
 
     // 开 SSE 长连接保活 —— 这是"CLI 一启动就一直保持长连接"在 MCP 设计里的正确玩法。
@@ -257,19 +269,48 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
     // agent-hub-cli 这一行, `bridge_peers` 会报 connected=true,跟 `bridge_wait`
     // long-poll 是同等地位 (只不过 bridge_wait 走 POST + 队列等待)。
     //
-    // 顺便: 兼容 hub 未来走 SSE 推送 notifications/message 的扩展点 —— 当前 hub
-    // 主要是 (`: connected\n\n`) 的心跳注释,本消费 task 啥都不做也无所谓;真有
-    // 通知到达时尝试解析为 `{method:"notifications/message", params:{message}}`,
-    // 并 emit 一个 Tauri `hub:message` 事件给前端 zustand store 监听。
+    // hub 在这条 SSE 上推 JSON-RPC 通知 `{method:"notifications/message",
+    // params:{level,logger,data}}`，data 按事件分支（hub ≥ 0.6 协议契约）：
+    // - `{event:"peers_changed", peers:[完整花名册]}` → 落库 SQLite + emit `hub:peers`
+    //   （前端花名册主通道，任何 peer 上下线/改名都会推）
+    // - `{event:"message", message:{BridgeMessage, content 已解码}}` → emit `hub:message`
+    // 解析全程防御：字段缺失只记 debug 日志，绝不 panic（通知是尽力而为的旁路）。
     match client.subscribe_notifications().await {
         Ok(mut rx) => {
             let app = app.clone();
+            let store = state.store.clone();
+            let kicked = state.kicked.clone();
             tokio::spawn(async move {
                 while let Some(notif) = rx.recv().await {
                     let method = notif.get("method").and_then(|v| v.as_str()).unwrap_or("");
                     if method == "notifications/message" {
-                        if let Some(msg) = notif.get("params").and_then(|p| p.get("message")) {
-                            let _ = app.emit("hub:message", msg);
+                        let data = notif.pointer("/params/data");
+                        match data.and_then(|d| d.get("event")).and_then(Value::as_str) {
+                            Some("peers_changed") => {
+                                match data.and_then(|d| d.get("peers")).and_then(Value::as_array) {
+                                    Some(peers) => {
+                                        sync_roster_to_store(&store, &kicked, peers);
+                                        let _ = app.emit("hub:peers", peers);
+                                    }
+                                    // 缺 peers 字段直接跳过：emit 空数组会把前端名单清空。
+                                    None => {
+                                        log::debug!("SSE peers_changed 缺 data.peers 字段，忽略");
+                                    }
+                                }
+                            }
+                            Some("message") => match data.and_then(|d| d.get("message")) {
+                                Some(msg) => {
+                                    let _ = app.emit("hub:message", msg);
+                                }
+                                None => {
+                                    log::debug!("SSE message 通知缺 data.message 字段，忽略");
+                                }
+                            },
+                            // 旧协议假设 params.message（hub 从未发过）已废弃；
+                            // 未知形状一律走 debug，不往 UI 打扰。
+                            other => {
+                                log::debug!("SSE notifications/message data.event={other:?}");
+                            }
                         }
                     } else if !method.is_empty() {
                         log::debug!("SSE notification: {method}");
@@ -285,12 +326,125 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
     *state.mcp.write().await = Some(client);
 }
 
+/// 把 hub 的 peers 快照（bridge_peers 结果 / peers_changed 事件里的数组）落库 SQLite。
+///
+/// id 缺失的畸形行跳过；lastSeenMs 缺省回退当前时间；alias/clientName/clientVersion
+/// 缺省保留旧值（COALESCE，见 upsert_peer：旧版 hub 根本不回传这些字段，被动快照
+/// 不应清空本地已知信息；显式清别名走 bridge_rename 权威同步 set_peer_alias）。
+///
+/// P3-2 踢人在途快照竞态：kick 早于某快照生成、delete 却先于该快照被消费时，
+/// 直接 upsert 会把被踢行"复活"。kick 时把 id 加入抑制集；sync 遇到被抑制 id 的
+/// 第一次出现**只解除抑制、跳过 upsert**（这次快照可能就是在途的旧数据），
+/// 此后的 roster 再包含该 id（hub 持续列出 = 已重新注册）才正常落库。
+fn sync_roster_to_store(store: &Store, kicked: &KickedPeers, peers: &[Value]) {
+    let now = now_ms();
+    for p in peers {
+        let Some(id) = p.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        {
+            let mut suppress = kicked.lock().unwrap_or_else(|po| po.into_inner());
+            if suppress.remove(id) {
+                log::debug!("roster 跳过被抑制（刚被踢）的 peer {id}，仅解除抑制");
+                continue;
+            }
+        }
+        let rec = PeerRecord {
+            peer_id: id.to_string(),
+            last_seen: p.get("lastSeenMs").and_then(Value::as_i64).unwrap_or(now),
+            online: p.get("connected").and_then(Value::as_bool).unwrap_or(false),
+            client_name: p.get("clientName").and_then(Value::as_str).map(String::from),
+            alias: p.get("alias").and_then(Value::as_str).map(String::from),
+            client_version: p.get("clientVersion").and_then(Value::as_str).map(String::from),
+            created_at: now,
+        };
+        if let Err(e) = store.upsert_peer(&rec) {
+            log::warn!("roster upsert_peer({id}) 失败: {e}");
+        }
+    }
+}
+
+// -------- 花名册管理（rename / kick / 本地 roster） --------
+
+/// `bridge_rename`：改别名。alias trim 后 1-64 字符、不得含控制字符（hub 校验）；
+/// 空串/纯空白 = 清除别名。不传 peer = 改自己；传 peer = 管理端改别人
+/// （本端 agent-hub-cli 是 hub 默认管理端，恒有权限；hub 拒绝时错误透传前端）。
+#[tauri::command]
+pub async fn bridge_rename(
+    state: State<'_, AppState>,
+    peer: Option<String>,
+    alias: String,
+) -> CmdResult<Value> {
+    let mut args = serde_json::Map::new();
+    args.insert("alias".into(), json!(alias));
+    if let Some(p) = peer {
+        args.insert("peer".into(), json!(p));
+    }
+    let result = tools_call_checked(&state, "bridge_rename", Value::Object(args)).await?;
+    // rename 结果是别名的唯一权威来源（快照缺省有二义，见 set_peer_alias）：
+    // 结果带 alias → 写入；缺省（已清除）→ 落 NULL。
+    if let (Some(id), Some(alias_out)) = (
+        result.get("peerId").and_then(Value::as_str),
+        result.get("alias").and_then(Value::as_str),
+    ) {
+        if let Err(e) = state.store.set_peer_alias(id, Some(alias_out)) {
+            log::warn!("rename 后同步本地 alias 失败 ({id}): {e}");
+        }
+    } else if let Some(id) = result.get("peerId").and_then(Value::as_str) {
+        if let Err(e) = state.store.set_peer_alias(id, None) {
+            log::warn!("rename 后清除本地 alias 失败 ({id}): {e}");
+        }
+    }
+    Ok(result)
+}
+
+/// `bridge_unregister_peer`：管理端踢人（hub bridge_unregister 带 peer 参数）。
+/// kicked=true 时目标已从 hub 移除 —— 同步删本地 roster 行，并把它加入抑制集，
+/// 防止在途的旧快照把被踢行复活（见 sync_roster_to_store）。
+#[tauri::command]
+pub async fn bridge_unregister_peer(
+    state: State<'_, AppState>,
+    peer: String,
+) -> CmdResult<Value> {
+    let result = tools_call_checked(&state, "bridge_unregister", json!({ "peer": peer })).await?;
+    if result.get("kicked").and_then(Value::as_bool).unwrap_or(false) {
+        if let Err(e) = state.store.delete_peer(&peer) {
+            log::warn!("踢人后删除本地 roster 行失败 ({peer}): {e}");
+        }
+        state
+            .kicked
+            .lock()
+            .unwrap_or_else(|po| po.into_inner())
+            .insert(peer);
+    }
+    Ok(result)
+}
+
+/// `roster_forget`：仅删除本地 SQLite roster 行（不动 hub）—— offline·known
+/// 行没有 hub 侧对应物，没有这个入口本地花名册只增不减。
+#[tauri::command]
+pub async fn roster_forget(state: State<'_, AppState>, peer_id: String) -> CmdResult<()> {
+    wrap(state.store.delete_peer(&peer_id))
+}
+
+/// `roster_list`：SQLite 全部 peer 行（含 offline 已知 peer），前端启动时
+/// 用它恢复重启前的花名册；实时快照（bridge_peers / hub:peers）优先。
+#[tauri::command]
+pub async fn roster_list(state: State<'_, AppState>) -> CmdResult<Vec<PeerRecord>> {
+    wrap(state.store.list_peers())
+}
+
 // -------- bridge_* 通用入口（MCP 透传） --------
 
-/// `bridge_peers`：列出当前 hub 上的所有 peer。
+/// `bridge_peers`：列出当前 hub 上的所有 peer，并把快照旁路落库 SQLite
+/// （roster_list 据此恢复重启前的完整花名册，含 offline 已知 peer）。
 #[tauri::command]
 pub async fn bridge_peers(state: State<'_, AppState>) -> CmdResult<Value> {
-    tools_call_checked(&state, "bridge_peers", json!({})).await
+    let result = tools_call_checked(&state, "bridge_peers", json!({})).await?;
+    if let Some(peers) = result.get("peers").and_then(Value::as_array) {
+        sync_roster_to_store(&state.store, &state.kicked, peers);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -368,7 +522,8 @@ pub async fn history_local(
     // 身份都查，合并去重。
     let identities = match peer {
         Some(p) => vec![p],
-        None => vec!["agent-hub-cli".to_string(), "agent-comm-hub-cli".to_string()],
+        // 兼容旧身份 'agent-comm-hub-cli'：改名修复前 app 的注册身份，两个都查。
+        None => vec![SELF_PEER_ID.to_string(), "agent-comm-hub-cli".to_string()],
     };
     let mut all: Vec<MessageRecord> = Vec::new();
     for id in &identities {
@@ -408,8 +563,8 @@ fn json_to_message_record(v: &Value, _now: i64) -> Option<MessageRecord> {
         content: v.to_string(), // 整个 message 序列化为 JSON 字符串
         ref_id: v.get("ref").and_then(|r| r.as_str()).map(|s| s.to_string()),
         ts: v.get("ts")?.as_i64()?,
-        involved_me: v.get("from")?.as_str() == Some("agent-hub-cli")
-            || v.get("to")?.as_str() == Some("agent-hub-cli"),
+        involved_me: v.get("from")?.as_str() == Some(SELF_PEER_ID)
+            || v.get("to")?.as_str() == Some(SELF_PEER_ID),
     })
 }
 
@@ -441,7 +596,7 @@ fn persist_receipt(state: &AppState, receipt: &Value, body: Value, ref_id: Optio
         content: message.to_string(),
         ref_id,
         ts,
-        involved_me: from == "agent-hub-cli" || to == "agent-hub-cli",
+        involved_me: from == SELF_PEER_ID || to == SELF_PEER_ID,
     };
     if let Err(e) = state.store.insert_message(&rec) {
         log::warn!("persist_receipt 失败: {e}");
@@ -958,5 +1113,86 @@ mod tests {
         });
         let out = unwrap_tool_result(envelope).expect("plain text unwraps");
         assert_eq!(out, json!("just a line"));
+    }
+
+    /// peers 快照落库：alias/clientVersion 有则写入、缺省保留旧值（COALESCE）、
+    /// 畸形行（缺 id）跳过不 panic。
+    #[test]
+    fn sync_roster_to_store_upserts_and_tolerates_malformed_rows() {
+        let store = Store::open_in_memory().unwrap();
+        let kicked: KickedPeers = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        store
+            .upsert_peer(&PeerRecord {
+                peer_id: "a".into(),
+                last_seen: 1,
+                online: false,
+                client_name: None,
+                alias: Some("keep-me".into()),
+                client_version: Some("1.0".into()),
+                created_at: 1,
+            })
+            .unwrap();
+        sync_roster_to_store(
+            &store,
+            &kicked,
+            &[
+                json!({ "id": "a", "connected": true, "lastSeenMs": 42 }),
+                json!({ "connected": true }), // 缺 id：跳过
+                json!({ "id": "b", "connected": false, "alias": "B", "clientVersion": "2.0" }),
+            ],
+        );
+        let peers = store.list_peers().unwrap();
+        let a = peers.iter().find(|p| p.peer_id == "a").unwrap();
+        assert!(a.online);
+        assert_eq!(a.last_seen, 42);
+        assert_eq!(a.alias.as_deref(), Some("keep-me")); // 缺省保留旧值
+        assert_eq!(a.client_version.as_deref(), Some("1.0"));
+        let b = peers.iter().find(|p| p.peer_id == "b").unwrap();
+        assert_eq!(b.alias.as_deref(), Some("B"));
+        assert_eq!(b.client_version.as_deref(), Some("2.0"));
+    }
+
+    /// P3-2 竞态：抑制集中的 id 不被在途快照复活 —— 第一次出现仅解除抑制，
+    /// 后续 roster 再包含该 id（重新注册回来）才正常落库。
+    #[test]
+    fn sync_roster_suppresses_kicked_peer_until_next_roster() {
+        let store = Store::open_in_memory().unwrap();
+        let kicked: KickedPeers =
+            Arc::new(std::sync::Mutex::new(std::iter::once("x".to_string()).collect()));
+        let roster = [json!({ "id": "x", "connected": true })];
+        // kick 后到达的第一份含 x 的 roster：解除抑制但不复活被踢行
+        sync_roster_to_store(&store, &kicked, &roster);
+        assert!(
+            store.list_peers().unwrap().iter().all(|p| p.peer_id != "x"),
+            "suppressed peer must not be resurrected by an in-flight snapshot"
+        );
+        assert!(!kicked.lock().unwrap().contains("x"), "suppression lifts on first sight");
+        // 之后的 roster（x 重新注册、hub 持续列出）：正常落库
+        sync_roster_to_store(&store, &kicked, &roster);
+        assert!(store.list_peers().unwrap().iter().any(|p| p.peer_id == "x"));
+    }
+
+    /// SSE 通知解析的关键形状（消费循环里同款防御式取值）：
+    /// peers_changed / message 各取所需；字段缺失返回空/None 而不是 panic。
+    #[test]
+    fn notification_data_shape_extraction() {
+        let peers_changed = json!({
+            "method": "notifications/message",
+            "params": { "level": "info", "logger": "bridge",
+                        "data": { "event": "peers_changed", "peers": [{ "id": "x" }] } }
+        });
+        let data = peers_changed.pointer("/params/data").unwrap();
+        assert_eq!(data["event"], "peers_changed");
+        assert_eq!(data["peers"].as_array().unwrap().len(), 1);
+
+        let message = json!({
+            "method": "notifications/message",
+            "params": { "data": { "event": "message", "message": { "id": "m1" } } }
+        });
+        assert_eq!(message.pointer("/params/data/message/id").unwrap(), "m1");
+
+        // 旧协议假设 params.message（hub 从未发过）：新解析取不到 data 分支
+        let legacy = json!({ "method": "notifications/message", "params": { "message": {} } });
+        assert!(legacy.pointer("/params/data").is_none());
     }
 }

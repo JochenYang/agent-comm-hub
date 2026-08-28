@@ -5,7 +5,7 @@
 
 ## 1. Problem
 
-`agent-comm-hub` 现在的所有能力都暴露在 `npx agent-comm-hub <cmd>` CLI 与 21 个 MCP `bridge_*` 工具里。Agent 用户必须在终端或自己的 agent TUI 里操作 hub 状态，无法在桌面侧：
+`agent-comm-hub` 现在的所有能力都暴露在 `npx agent-comm-hub <cmd>` CLI 与 22 个 MCP `bridge_*` 工具里。Agent 用户必须在终端或自己的 agent TUI 里操作 hub 状态，无法在桌面侧：
 - 一眼看到所有已注册 peer 与在线状态
 - 阅读 / 回复任意两个 agent 之间的消息（不参与它们的会话也能看）
 - 直接以管理员身份发消息（不打开任何 agent TUI）
@@ -104,7 +104,30 @@
 
 **启动**：UI 启动 → Rust 端检查 127.0.0.1:18764 是否已在响应 → 否就 spawn hub 子进程 → 等端口就绪 → Rust mcp_client 建 MCP SSE 连接 + `initialize` 自动注册 `agent-hub-cli` peer → 前端订阅 store → 拉 peer 列表 + 最近 100 条消息 → UI 渲染。
 
-**收消息**：hub SSE 推 `notifications/message` → Rust mcp_client 解析 → 写 SQLite → emit Tauri event `hub:message` → 前端 store 更新 → 消息流虚拟列表追加 → 托盘未读 +1。
+**收消息**：hub SSE 推 `notifications/message`（`params.data` 按事件分支，见下节）→ Rust mcp_client 解析 → 花名册/消息旁路写 SQLite → emit Tauri event `hub:peers` / `hub:message` → 前端 store 更新 → 消息流虚拟列表追加 → 托盘未读 +1。
+
+### SSE 推送事件契约（hub → app）
+
+hub 在 app 的 SSE 长连接上推 JSON-RPC 通知：
+
+```json
+{ "jsonrpc": "2.0", "method": "notifications/message",
+  "params": { "level": "info", "logger": "bridge", "data": { ... } } }
+```
+
+`data` 有两种形状（app/src-tauri/src/commands.rs 的 SSE 消费循环按 `data.event` 分支）：
+
+| `data.event` | `data` 形状 | Rust 行为 |
+|---|---|---|
+| `peers_changed` | `{ event, peers: [{ id, alias?, clientName?, clientVersion?, connected, lastSeenMs }] }`（任何 peer 上下线/改名都推，含完整花名册；alias 等缺省即无） | upsert SQLite peers 表 → `app.emit("hub:peers", peers)` |
+| `message` | `{ event, message: { id, from, to, kind, content, ref?, ts } }`（BridgeMessage，content 已解码；只推给收件人对应 session） | `app.emit("hub:message", message)` |
+
+解析防御式：字段缺失记 debug 日志，不 panic。前端 peersStore 监听 `hub:peers` 作为花名册主通道；`bridge_peers` 轮询降级为 10s 补偿。
+
+### 工具签名增量（hub ≥ 0.6）
+
+- `bridge_rename` `{ alias: string, peer?: string }` → `{ ok: true, peerId, alias? }`：不传 `peer` 改自己别名；传 `peer` 管理端改别人（GUI 以 `agent-hub-cli` 连接，是 hub 默认管理端）。alias trim 后 1-64 字符、不含控制字符；**空串/纯空白 = 清除别名**（结果缺省 `alias`）。
+- `bridge_unregister` 扩展参数 `{ peer?: string }`：不传 = 自己离开（原行为不变）；传 `peer` = 管理端踢人 → `{ ok: true, peerId, kicked, detachedSessions? }`（目标不存在时 `kicked: false, peerId: null`）。app 侧命令名 `bridge_unregister_peer`。
 
 **发消息**：用户在输入框打字 → 客户端校验（peer 存在 / 长度 / Markdown）→ invoke `bridge_chat` Rust command → Rust 调 mcp_client `tools/call` → hub 接收 → 同 session 间立即返回 receipt + 推 SSE 给目标 peer → 前端 store 收到 receipt 后把消息标记为 sent（optimistic）。
 
@@ -184,6 +207,8 @@ CREATE TABLE peers (
   last_seen INTEGER NOT NULL,
   online INTEGER NOT NULL DEFAULT 0,
   client_name TEXT,
+  alias TEXT,            -- v2 追加（bridge_rename / 花名册回传）
+  client_version TEXT,   -- v2 追加
   created_at INTEGER NOT NULL
 );
 
@@ -283,7 +308,7 @@ CREATE TABLE unread (
 ## 8. References
 
 - 主仓架构：`../ARCHITECTURE.md`
-- 21 个 bridge 工具签名：`../src/hub-tools.ts`
+- 22 个 bridge 工具签名：`../src/hub-tools.ts`
 - Hub 配置默认值：`../src/index.ts` 的 `DEFAULT_CONFIG`
 - Herdr 适配：`../src/herdr-ctl.ts`
 - AGENTS.md 不可破约束：zero runtime deps / lossless JSON / peer id 校验 / UTF-8 no BOM / `~/.claude.json` 不动

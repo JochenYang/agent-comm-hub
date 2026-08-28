@@ -12,11 +12,11 @@ import { usePeersStore } from '@/stores/peersStore'
 import { useMessagesStore } from '@/stores/messagesStore'
 import { useHubStore } from '@/stores/hubStore'
 import type { PresentedMessage } from '@/lib/tauri'
+import { SELF_PEER_ID } from '@/lib/self'
 import { Markdown } from '@/lib/markdown'
 import { CommandPalette, tryExecuteServerSide, COMMAND_HELP_LINES, type CommandResult } from '@/components/CommandPalette'
 import { useTranslation } from '@/i18n'
 
-const SELF_PEER_ID = 'agent-hub-cli'
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
 
 const KIND_BADGE: Record<PresentedMessage['kind'], string> = {

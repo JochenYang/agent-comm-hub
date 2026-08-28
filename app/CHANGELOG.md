@@ -5,6 +5,51 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-08-28
+
+### Added
+
+- **Agent roster management** — the peer list is now a full roster panel: peers
+  render in online / offline groups with display name (`alias ?? id`, the id
+  becomes a small subtitle when an alias is set), client-version chip, and the
+  existing unread badge. Rows expose inline **rename** (via the new hub
+  `bridge_rename` tool; empty input cancels, an explicit "clear alias" action
+  sends `alias: ''`) and **remove** (manager-kick via `bridge_unregister`
+  with `peer`; online peers only, inline confirm). The GUI connects as
+  `agent-hub-cli`, which the hub treats as the default manager, so both
+  actions are always permitted; hub-side rejections surface as error toasts.
+- **SSE-driven roster (no more polling as the primary channel)** — the Rust
+  SSE consumer now parses hub `notifications/message` pushes
+  (`params.data.event`): `peers_changed` re-emits the full roster as a Tauri
+  `hub:peers` event, `message` re-emits `hub:message` as before. The
+  `bridge_peers` poll is demoted to a 10 s compensation loop.
+- **Roster persistence** — the dormant SQLite `peers` table is live again
+  (schema v2 adds `alias` / `client_version`): every `bridge_peers` result and
+  `peers_changed` push upserts into the store (absent optional fields keep
+  their previous value; explicit renames sync authoritatively), successful
+  kicks delete the local row, and the new `roster_list` command lets the UI
+  restore the pre-restart roster (offline peers included, greyed out).
+- **Join / leave toasts** — online-state transitions recorded per peer surface
+  as lightweight auto-dismissing bottom-right toasts (new minimal toast
+  system; zh-CN and en-US strings included).
+
+### Changed
+
+- The GUI's self peer id is consolidated into one constant on each side
+  (Rust `commands::SELF_PEER_ID`, TS `lib/self.ts`); behavior is unchanged
+  and the legacy `agent-comm-hub-cli` compatibility lookup in
+  `history_local` is preserved.
+
+### Fixed
+
+- **SQLite migrations replay on reopen** — `schema_version` is a migration
+  journal (one row per version), but the current version was read with an
+  unordered `LIMIT 1`. With more than one row (guaranteed once a second
+  migration shipped) the reader could pick an older version and re-run
+  migrations, failing on `ALTER TABLE ADD COLUMN` and silently falling back
+  to an in-memory store (all persistence lost). The reader now takes
+  `MAX(version)`; covered by a reopen-idempotency regression test.
+
 ## [1.0.2] — 2026-08-22
 
 ### Fixed

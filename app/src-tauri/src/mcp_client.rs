@@ -67,7 +67,15 @@ enum ConnState {
 pub struct McpClient {
     base_url: String,
     mcp_path: String,
+    /// 请求-响应调用（initialize / tools/call）：30s 总超时兜底，防止挂死。
     http: reqwest::Client,
+    /// SSE 长连接专用 client。reqwest 的总超时语义是"从发起连接到响应 body
+    /// 读完"—— SSE 的 body 永远读不完，任何整体 timeout 都会在到期时把长连接
+    /// 客户端单方面掐断（推送主通道静默死亡）。这里只保留 TCP 连接建立超时，
+    /// 读流不设上限；连接失效由 channel 关闭 / hub 断开自然暴露。
+    /// （`RequestBuilder::timeout` 只能覆盖为某个 Duration，无法关掉总超时，
+    /// 所以必须用独立 client。）
+    sse_http: reqwest::Client,
     session_id: Arc<RwLock<Option<String>>>,
     next_id: Arc<RwLock<u64>>,
     state: Arc<RwLock<ConnState>>,
@@ -80,10 +88,16 @@ impl McpClient {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest client build");
+        // SSE client：不设 .timeout（总超时会掐断长连接），只限连接建立时长。
+        let sse_http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("reqwest sse client build");
         Self {
             base_url: format!("http://{}:{}", host, port),
             mcp_path: path.to_string(),
             http,
+            sse_http,
             session_id: Arc::new(RwLock::new(None)),
             next_id: Arc::new(RwLock::new(1)),
             state: Arc::new(RwLock::new(ConnState::Disconnected)),
@@ -190,9 +204,14 @@ impl McpClient {
 
     /// SSE 长连接：GET /mcp 接收 `notifications/*` 推送，返回 mpsc::Receiver。
     /// 调用方负责消费；连接断开时接收端自然关闭。
+    ///
+    /// 必须走 `sse_http`（无总超时）而不是 `http`：`http` 的 30s `.timeout()`
+    /// 覆盖"连接 + 响应 body 全部读完"，SSE 流永不完结，约 30s 后 reqwest 会在
+    /// 客户端侧掐断这条流 —— 表现为 hub:peers / hub:message 推送静默停止，
+    /// 无任何错误日志（P1 修复）。
     pub async fn subscribe_notifications(&self) -> Result<mpsc::Receiver<Value>> {
         let url = self.endpoint_url();
-        let mut req = self.http.get(&url).header("Accept", "text/event-stream");
+        let mut req = self.sse_http.get(&url).header("Accept", "text/event-stream");
         if let Some(sid) = self.session_id.read().await.as_ref() {
             req = req.header("Mcp-Session-Id", sid.clone());
         }
@@ -207,14 +226,18 @@ impl McpClient {
         let mut stream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Value>(64);
         tokio::spawn(async move {
-            let mut buffer = String::new();
+            // 按原始字节缓冲、只在事件边界（\n\n，ASCII 序列，字节级查找安全；
+            // UTF-8 多字节序列不含 0x0A，不会把码点劈成两半）解码：多字节字符
+            // （如中文）跨 TCP chunk 边界时，逐 chunk from_utf8_lossy 会静默
+            // 产生 U+FFFD。事件块完整后再统一解码，JSON 永远在完整字节序列上解析。
+            let mut buffer: Vec<u8> = Vec::new();
             while let Some(chunk_res) = stream.next().await {
                 let Ok(chunk) = chunk_res else { break };
-                let s = String::from_utf8_lossy(&chunk);
-                buffer.push_str(&s);
+                buffer.extend_from_slice(&chunk);
                 // SSE 事件以双换行 `\n\n` 分隔
-                while let Some(idx) = buffer.find("\n\n") {
-                    let block: String = buffer.drain(..idx + 2).collect();
+                while let Some(idx) = buffer.windows(2).position(|w| w == b"\n\n") {
+                    let block_bytes: Vec<u8> = buffer.drain(..idx + 2).collect();
+                    let block = String::from_utf8_lossy(&block_bytes);
                     let mut data = String::new();
                     for line in block.lines() {
                         let line = line.trim_end_matches('\r');

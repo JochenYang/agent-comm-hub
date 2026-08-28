@@ -5,10 +5,11 @@
 //!
 //! Schema（SPEC §5.3）：
 //! - config(key, value, updated_at)
-//! - peers(peer_id, last_seen, online, client_name, created_at)
+//! - peers(peer_id, last_seen, online, client_name, created_at) + v2 追加 alias, client_version
 //! - messages(id, from_peer, to_peer, kind, content, ref_id, ts, involved_me) + ts DESC 索引 + involved_me 索引
 //! - unread(peer_id, count, last_read_ts)
-//! - schema_version(version) — 单版本迁移记录
+//! - schema_version(version) — 迁移日志（每版本一行；当前版本 = MAX(version)，
+//!   读取端不得裸 LIMIT 1 —— 无序读多行会随机取旧版本导致迁移重放）
 //!
 //! 设计要点：
 //! - 同步 rusqlite API（连接走 std::sync::Mutex 串行化）
@@ -48,6 +49,10 @@ pub struct PeerRecord {
     pub last_seen: i64,
     pub online: bool,
     pub client_name: Option<String>,
+    /// hub bridge_peers 回传的 alias?（缺省 = 无/未知，upsert 时保留旧值）。
+    pub alias: Option<String>,
+    /// hub 回传的 clientVersion?（缺省保留旧值，理由同 alias）。
+    pub client_version: Option<String>,
     pub created_at: i64,
 }
 
@@ -108,11 +113,14 @@ impl Store {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
         )?;
-        let current: Option<i64> = tx
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
-                row.get(0)
-            })
-            .optional()?;
+        // 当前版本 = MAX(version)：schema_version 是迁移日志（每版本一行），
+        // 不能假设单行 —— LIMIT 1 无序读取会随机取到旧版本导致迁移重放。
+        // MAX 恒返回一行（空表为 NULL），闭包里显式取 Option 而非 .optional() 包装。
+        let current: Option<i64> = tx.query_row(
+            "SELECT MAX(version) FROM schema_version",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
         let current = current.unwrap_or(0);
         if current < 1 {
             tx.execute_batch(
@@ -147,7 +155,23 @@ impl Store {
                     count INTEGER NOT NULL DEFAULT 0,
                     last_read_ts INTEGER
                 );
-                INSERT OR REPLACE INTO schema_version (version) VALUES (1);
+                INSERT INTO schema_version (version) VALUES (1)
+                    ON CONFLICT(version) DO UPDATE SET version = 1;
+                "#,
+            )?;
+        }
+        if current < 2 {
+            // v2：peers 表加 alias / client_version 列（花名册管理：hub 的
+            // bridge_peers / peers_changed 现在回传 alias?/clientName?/clientVersion?）。
+            // SQLite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS —— 幂等性由
+            // schema_version 单调推进保证（v1 全新建库也会顺序走到这里）。
+            // 版本行用 INSERT OR REPLACE（日志语义：每版本一行，读取取 MAX）。
+            // 注意不能用裸 INSERT：若未来版本重放（部分失败恢复）会撞唯一键。
+            tx.execute_batch(
+                r#"
+                ALTER TABLE peers ADD COLUMN alias TEXT;
+                ALTER TABLE peers ADD COLUMN client_version TEXT;
+                INSERT OR REPLACE INTO schema_version (version) VALUES (2);
                 "#,
             )?;
         }
@@ -160,19 +184,37 @@ impl Store {
     pub fn upsert_peer(&self, peer: &PeerRecord) -> Result<()> {
         let conn = self.conn.lock()?;
         conn.execute(
-            "INSERT INTO peers (peer_id, last_seen, online, client_name, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO peers (peer_id, last_seen, online, client_name, alias, client_version, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(peer_id) DO UPDATE SET
                last_seen = excluded.last_seen,
                online = excluded.online,
-               client_name = COALESCE(excluded.client_name, peers.client_name)",
+               client_name = COALESCE(excluded.client_name, peers.client_name),
+               alias = COALESCE(excluded.alias, peers.alias),
+               client_version = COALESCE(excluded.client_version, peers.client_version)",
             params![
                 peer.peer_id,
                 peer.last_seen,
                 peer.online as i64,
                 peer.client_name,
+                peer.alias,
+                peer.client_version,
                 peer.created_at
             ],
+        )?;
+        Ok(())
+    }
+
+    /// 显式设置/清除别名（bridge_rename 成功后的权威同步）。
+    ///
+    /// 走 upsert_peer 的 COALESCE 语义无法清除别名 —— 快照里 alias 缺省有二义
+    /// （真没别名 vs 旧版 hub 根本不回传），rename 结果是唯一权威来源：
+    /// `alias` 为 `Some("")` / `None` 都落 NULL。
+    pub fn set_peer_alias(&self, peer_id: &str, alias: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock()?;
+        conn.execute(
+            "UPDATE peers SET alias = ?2 WHERE peer_id = ?1",
+            params![peer_id, alias.filter(|a| !a.is_empty())],
         )?;
         Ok(())
     }
@@ -180,7 +222,7 @@ impl Store {
     pub fn list_peers(&self) -> Result<Vec<PeerRecord>> {
         let conn = self.conn.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT peer_id, last_seen, online, client_name, created_at
+            "SELECT peer_id, last_seen, online, client_name, alias, client_version, created_at
              FROM peers ORDER BY last_seen DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -189,7 +231,9 @@ impl Store {
                 last_seen: row.get(1)?,
                 online: row.get::<_, i64>(2)? != 0,
                 client_name: row.get(3)?,
-                created_at: row.get(4)?,
+                alias: row.get(4)?,
+                client_version: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -361,6 +405,8 @@ mod tests {
                 last_seen: 100,
                 online: true,
                 client_name: Some("claude-code".into()),
+                alias: Some("Claude".into()),
+                client_version: Some("1.2.3".into()),
                 created_at: 50,
             })
             .unwrap();
@@ -370,6 +416,8 @@ mod tests {
                 last_seen: 90,
                 online: false,
                 client_name: None,
+                alias: None,
+                client_version: None,
                 created_at: 40,
             })
             .unwrap();
@@ -377,6 +425,8 @@ mod tests {
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].peer_id, "claude");
         assert!(peers[0].online);
+        assert_eq!(peers[0].alias.as_deref(), Some("Claude"));
+        assert_eq!(peers[0].client_version.as_deref(), Some("1.2.3"));
         assert_eq!(peers[1].peer_id, "codex");
         assert!(!peers[1].online);
     }
@@ -390,6 +440,8 @@ mod tests {
                 last_seen: 1,
                 online: false,
                 client_name: None,
+                alias: None,
+                client_version: None,
                 created_at: 1,
             })
             .unwrap();
@@ -399,6 +451,8 @@ mod tests {
                 last_seen: 2,
                 online: true,
                 client_name: Some("client-x".into()),
+                alias: None,
+                client_version: None,
                 created_at: 1,
             })
             .unwrap();
@@ -407,6 +461,114 @@ mod tests {
         assert_eq!(peers[0].last_seen, 2);
         assert!(peers[0].online);
         assert_eq!(peers[0].client_name.as_deref(), Some("client-x"));
+    }
+
+    /// 快照缺省（None）不抹掉已知 alias / client_version —— 旧版 hub 根本不回传
+    /// 这些字段，COALESCE 语义保证本地花名册不被被动快照清空。
+    #[test]
+    fn upsert_peer_coalesce_keeps_alias_when_absent() {
+        let store = fresh();
+        store
+            .upsert_peer(&PeerRecord {
+                peer_id: "a".into(),
+                last_seen: 1,
+                online: true,
+                client_name: None,
+                alias: Some("Alpha".into()),
+                client_version: Some("9.9".into()),
+                created_at: 1,
+            })
+            .unwrap();
+        store
+            .upsert_peer(&PeerRecord {
+                peer_id: "a".into(),
+                last_seen: 2,
+                online: false,
+                client_name: None,
+                alias: None,
+                client_version: None,
+                created_at: 1,
+            })
+            .unwrap();
+        let peers = store.list_peers().unwrap();
+        assert_eq!(peers[0].alias.as_deref(), Some("Alpha"));
+        assert_eq!(peers[0].client_version.as_deref(), Some("9.9"));
+    }
+
+    /// set_peer_alias 是清除别名的唯一路径：None / 空串都落 NULL（rename 权威同步）。
+    #[test]
+    fn set_peer_alias_sets_and_clears() {
+        let store = fresh();
+        store
+            .upsert_peer(&PeerRecord {
+                peer_id: "a".into(),
+                last_seen: 1,
+                online: true,
+                client_name: None,
+                alias: Some("old".into()),
+                client_version: None,
+                created_at: 1,
+            })
+            .unwrap();
+        store.set_peer_alias("a", Some("new")).unwrap();
+        assert_eq!(store.list_peers().unwrap()[0].alias.as_deref(), Some("new"));
+        store.set_peer_alias("a", Some("")).unwrap();
+        assert_eq!(store.list_peers().unwrap()[0].alias, None);
+        store.set_peer_alias("a", None).unwrap();
+        assert_eq!(store.list_peers().unwrap()[0].alias, None);
+    }
+
+    /// v2 迁移对旧库生效：schema_version 回拨到 1 后重新 migrate，alias /
+    /// client_version 列补齐且存量行保留。
+    #[test]
+    fn migrate_v2_adds_alias_columns() {
+        let store = fresh();
+        store
+            .upsert_peer(&PeerRecord {
+                peer_id: "legacy".into(),
+                last_seen: 1,
+                online: true,
+                client_name: Some("c".into()),
+                alias: None,
+                client_version: None,
+                created_at: 1,
+            })
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // 模拟 v1 旧库：版本日志只剩 1，且无 v2 列（bundled SQLite ≥ 3.35
+            // 支持 DROP COLUMN）。
+            conn.execute("DELETE FROM schema_version", []).unwrap();
+            conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])
+                .unwrap();
+            conn.execute("ALTER TABLE peers DROP COLUMN alias", []).unwrap();
+            conn.execute("ALTER TABLE peers DROP COLUMN client_version", [])
+                .unwrap();
+        }
+        store.migrate().unwrap();
+        let peers = store.list_peers().unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].peer_id, "legacy");
+        assert_eq!(peers[0].alias, None);
+        assert_eq!(peers[0].client_version, None);
+    }
+
+    /// 迁移幂等（app 重启 reopen 同库的场景）：migrate 重复调用不重放、不报错。
+    /// schema_version 是迁移日志（v1、v2 各一行），当前版本 = MAX(version)。
+    #[test]
+    fn migrate_is_idempotent_on_reopen() {
+        let store = fresh();
+        store.migrate().unwrap();
+        store.migrate().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let (n, v): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(version) FROM schema_version",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((n, v), (2, 2));
     }
 
     #[test]

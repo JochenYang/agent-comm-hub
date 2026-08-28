@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMessagesStore } from '@/stores/messagesStore'
 import type { PresentedMessage, TaskContent, AckContent } from '@/lib/tauri'
+import { SELF_PEER_ID } from '@/lib/self'
 import { Markdown } from '@/lib/markdown'
 import { useTranslation } from '@/i18n'
-
-const SELF_PEER_ID = 'agent-hub-cli'
 
 interface Props {
   /** 当前 UI 的 peer id。 */

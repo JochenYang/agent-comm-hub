@@ -146,7 +146,22 @@
     "back_conv": "返回我的会话",
     "on": "在线",
     "off": "离线",
-    "self": "（自身）"
+    "self": "（自身）",
+    "online_group": "在线",
+    "offline_group": "离线 · 已知",
+    "rename": "重命名",
+    "clear_alias": "清除别名",
+    "remove": "移除",
+    "remove_confirm": "移除 {{name}}？将把它踢出 hub",
+    "rename_placeholder": "输入新别名",
+    "ok": "确定",
+    "renamed_toast": "{{name}} 已改名为 {{alias}}",
+    "alias_cleared_toast": "已清除 {{name}} 的别名",
+    "removed_toast": "{{name}} 已移除",
+    "forget": "从本地名单移除",
+    "forgot_toast": "{{name}} 已从本地名单移除",
+    "joined_toast": "{{name}} 已上线",
+    "left_toast": "{{name}} 已离线"
   },
   "detail": {
     "select_hint": "← 选中一条消息",

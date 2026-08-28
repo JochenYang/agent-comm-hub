@@ -13,9 +13,9 @@ import { useHubStore } from '@/stores/hubStore'
 import { useMessagesStore } from '@/stores/messagesStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { tauri } from '@/lib/tauri'
+import { SELF_PEER_ID } from '@/lib/self'
+import { PeerActivityToasts } from '@/components/PeerActivityToasts'
 import { useTranslation } from '@/i18n'
-
-const SELF_PEER_ID = 'agent-hub-cli'
 
 type Tab = 'main' | 'terminal' | 'settings'
 
@@ -305,6 +305,9 @@ export default function App(): React.JSX.Element {
           <SettingsView />
         )}
       </main>
+
+      {/* toast 视口 + 上下线提示（全局，右下角自动消失） */}
+      <PeerActivityToasts />
 
       {/* 关闭确认 modal：最小化到托盘 / 退出程序 / 取消 */}
       {showCloseModal && (

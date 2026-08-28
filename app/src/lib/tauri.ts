@@ -26,6 +26,37 @@ export interface LogLine {
 export interface Peer {
   id: string
   connected: boolean
+  /** hub bridge_peers / peers_changed 回传的可选字段（缺省 = 无）。 */
+  alias?: string
+  clientName?: string
+  clientVersion?: string
+  lastSeenMs?: number
+}
+
+/** roster_list 返回的 SQLite peer 行（含 offline 已知 peer，用于恢复重启前花名册）。 */
+export interface RosterRecord {
+  peer_id: string
+  last_seen: number
+  online: boolean
+  client_name: string | null
+  alias: string | null
+  client_version: string | null
+  created_at: number
+}
+
+/** bridge_rename 结果：alias 清除时缺省。 */
+export interface RenameResult {
+  ok: boolean
+  peerId: string
+  alias?: string
+}
+
+/** bridge_unregister（带 peer = 管理端踢人）结果：目标不存在时 kicked=false。 */
+export interface UnregisterPeerResult {
+  ok: boolean
+  peerId: string | null
+  kicked: boolean
+  detachedSessions?: number
 }
 
 export interface BridgePeersResult {
@@ -168,6 +199,13 @@ export const tauri = {
     appReady: () => tauriInvoke<HubStatus>('app_ready'),
     quitApp: () => tauriInvoke<void>('quit_app'),
     bridgePeers: () => tauriInvoke<BridgePeersResult>('bridge_peers'),
+    bridgeRename: (peer: string | null, alias: string) =>
+      tauriInvoke<RenameResult>('bridge_rename', { peer: peer ?? null, alias }),
+    bridgeUnregisterPeer: (peer: string) =>
+      tauriInvoke<UnregisterPeerResult>('bridge_unregister_peer', { peer }),
+    rosterList: () => tauriInvoke<RosterRecord[]>('roster_list'),
+    rosterForget: (peerId: string) =>
+      tauriInvoke<void>('roster_forget', { peerId }),
     bridgeStatus: () => tauriInvoke<unknown>('bridge_status'),
     bridgeWait: (timeoutMs?: number, from?: string) =>
       tauriInvoke<WaitResult>('bridge_wait', {
@@ -282,6 +320,9 @@ export const tauri = {
       tauriListen<HubStatus>('hub:state', (e) => handler(e.payload)),
     /** hub SSE 推送的消息（Rust 侧转发 notifications/message → Tauri `hub:message`）。 */
     onHubMessage: (handler: (msg: PresentedMessage) => void): Promise<UnlistenFn> =>
-      tauriListen<PresentedMessage>('hub:message', (e) => handler(e.payload))
+      tauriListen<PresentedMessage>('hub:message', (e) => handler(e.payload)),
+    /** hub SSE peers_changed → Tauri `hub:peers`：payload 是完整花名册（Peer 数组）。 */
+    onHubPeers: (handler: (peers: Peer[]) => void): Promise<UnlistenFn> =>
+      tauriListen<Peer[]>('hub:peers', (e) => handler(Array.isArray(e.payload) ? e.payload : []))
   }
 }
