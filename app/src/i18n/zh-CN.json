@@ -161,7 +161,10 @@
     "forget": "从本地名单移除",
     "forgot_toast": "{{name}} 已从本地名单移除",
     "joined_toast": "{{name}} 已上线",
-    "left_toast": "{{name}} 已离线"
+    "left_toast": "{{name}} 已离线",
+    "rename_id_placeholder": "新 ID（可选 · 管理端）",
+    "rename_id_hint": "真改名：迁移该 peer 的全部会话、邮箱与历史",
+    "rekeyed_toast": "{{old}} 已改 ID 为 {{id}}"
   },
   "detail": {
     "select_hint": "← 选中一条消息",

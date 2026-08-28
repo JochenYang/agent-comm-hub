@@ -166,6 +166,18 @@ export class SessionRegistry {
     return sessions
   }
 
+  /** Re-point every session bound to `oldId` at `newId` (true rename). */
+  rebindPeerId(oldId: string, newId: string): number {
+    let count = 0
+    for (const [sessionId, bound] of this.peerBindings) {
+      if (bound === oldId) {
+        this.peerBindings.set(sessionId, newId)
+        count++
+      }
+    }
+    return count
+  }
+
   /** How many sessions are currently attached to `peerId`. */
   attachedCount(peerId: string): number {
     let count = 0

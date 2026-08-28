@@ -11,6 +11,12 @@ import { startHub, SERVER_VERSION } from './index.js'
 import { runSetup } from './setup.js'
 import { runService, runStatus, runUpdate } from './ops.js'
 import { runDiscover } from './discover.js'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
+/** Default roster persistence file (the CLI opts in; programmatic use of
+ * startHub stays in-memory unless stateFile is passed). */
+const DEFAULT_STATE_FILE = join(homedir(), '.agent-comm-hub', 'roster.json')
 
 interface CliArgs {
   [key: string]: number | string | boolean
@@ -19,7 +25,7 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
   const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
-  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers'])
+  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
@@ -83,6 +89,10 @@ Hub options:
   --manager-peers <ids>      Comma-separated peer ids allowed to manage the
                              roster (rename others / kick), or "all".
                              (default agent-hub-cli — the desktop GUI identity)
+  --state-file <path>        Persist the peer roster (aliases, client info) to
+                             this JSON file so identities survive restarts
+                             (default ~/.agent-comm-hub/roster.json; "off"
+                             keeps everything in memory)
 
 Setup options:
   --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
@@ -145,7 +155,8 @@ try {
       console.log('no peers online yet — start an agent session to see it appear')
     } else {
       for (const peer of result.peers) {
-        console.log(`  ${peer.id.padEnd(32)} ${peer.connected ? 'connected' : 'offline'}`)
+        const label = peer.alias !== undefined && peer.alias !== peer.id ? `${peer.id} (${peer.alias})` : peer.id
+        console.log(`  ${label.padEnd(32)} ${peer.connected ? 'connected' : 'offline'}`)
       }
     }
     process.exit(0)
@@ -214,6 +225,11 @@ try {
       : args['--manager-peers'] === 'all'
         ? 'all'
         : String(args['--manager-peers']).split(',').map(id => id.trim()).filter(id => id !== ''),
+    stateFile: args['--state-file'] === undefined
+      ? DEFAULT_STATE_FILE
+      : args['--state-file'] === 'off'
+        ? undefined
+        : String(args['--state-file']),
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

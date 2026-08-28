@@ -9,6 +9,8 @@
  */
 
 import { startHub } from './entry.mjs'
+import { tmpdir } from 'node:os'
+import { readFileSync, rmSync } from 'node:fs'
 
 const PORT = 18998
 const BASE = `http://127.0.0.1:${PORT}/mcp`
@@ -95,7 +97,7 @@ function makeClient(name, base = BASE) {
   }
 }
 
-const hub = startHub({ port: PORT, waitTimeoutMs: 3000, maxQueue: 20, historyLimit: 50 }, { info: () => {}, warn: () => {} })
+const hub = startHub({ port: PORT, waitTimeoutMs: 3000, maxQueue: 20, historyLimit: 50, managerPeers: ['mavis'] }, { info: () => {}, warn: () => {} })
 
 try {
   const mavis = makeClient('mavis')
@@ -166,10 +168,14 @@ try {
   check('bridge_peers shows connected peers', peers.peers.length === 3 && peers.peers.every(p => p.connected === true), JSON.stringify(peers))
   const history = await claude.call('bridge_history', { limit: 10 })
   check('history non-empty and newest first', history.messages.length >= 4 && history.messages[0].ts >= history.messages[history.messages.length - 1].ts, JSON.stringify(history))
-  // peer="all" returns the unfiltered ring tail: claude must see the private
-  // opencode→mavis note that its own conversation view excludes (the archiver
-  // path — desktop app persists peer-to-peer traffic it is not a party of).
-  const historyAll = await claude.call('bridge_history', { peer: 'all', limit: 20 })
+  // peer="all" is the unfiltered archiver view — now manager-gated: claude
+  // (plain agent) is denied other-peer reads; mavis (manager on this hub
+  // instance) gets the full tail including the private opencode→mavis note.
+  const deniedAll = await claude.callRaw('bridge_history', { peer: 'all', limit: 20 })
+  check('peer=all denied for non-manager', deniedAll.error !== undefined && /manager/.test(deniedAll.error), JSON.stringify(deniedAll))
+  const deniedOther = await claude.callRaw('bridge_history', { peer: 'opencode', limit: 20 })
+  check('other-peer history denied for non-manager', deniedOther.error !== undefined && /manager/.test(deniedOther.error), JSON.stringify(deniedOther))
+  const historyAll = await mavis.call('bridge_history', { peer: 'all', limit: 20 })
   const othersPrivate = historyAll.messages.find(m => m.from === 'opencode' && m.to === 'mavis' && m.content === 'opencode note')
   check('peer=all returns other peers private traffic', othersPrivate !== undefined && historyAll.messages[0].ts >= historyAll.messages[historyAll.messages.length - 1].ts, JSON.stringify(historyAll))
   check('own history hides other peers private traffic', history.messages.every(m => !(m.from === 'opencode' && m.to === 'mavis')), JSON.stringify(history))
@@ -397,6 +403,91 @@ try {
   } finally {
     hubEvt.close()
   }
+
+  console.log('== true rename (re-key) and history gate ==')
+  const hubKey = startHub({ port: 19003, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 30, connectedWindowMs: 60_000 }, { info: () => {}, warn: () => {} })
+  try {
+    const base = 'http://127.0.0.1:19003/mcp'
+    const mgr = makeClient('agent-hub-cli', base)
+    const ren = makeClient('ren', base)
+    const peer = makeClient('peer', base)
+    await Promise.all([mgr.init(), ren.init(), peer.init()])
+
+    // Traffic to reattribute: ren↔peer history + a task QUEUED for ren.
+    await ren.call('bridge_chat', { to: 'peer', message: 'before rename' })
+    await peer.call('bridge_wait', { timeoutMs: 2000 })
+    await peer.call('bridge_task', { to: 'ren', prompt: 'queued task' })
+    await ren.call('bridge_rename', { alias: 'Ren Prime' }) // self alias, no re-key
+
+    const rekey = await mgr.call('bridge_rename', { peer: 'ren', peerId: 'ren2' })
+    check('manager re-keys a peer', rekey.ok === true && rekey.peerId === 'ren2' && rekey.previousId === 'ren', JSON.stringify(rekey))
+    const roster = await peer.call('bridge_peers')
+    check('roster shows only the new id', roster.peers.some(p => p.id === 'ren2') && !roster.peers.some(p => p.id === 'ren'), JSON.stringify(roster))
+    check('alias follows the re-key', rekey.alias === 'Ren Prime' || roster.peers.find(p => p.id === 'ren2')?.alias === 'Ren Prime', JSON.stringify(roster))
+
+    // The renamed session keeps working under the new id (binding moved).
+    const drained = await ren.call('bridge_poll')
+    check('queued message survives the re-key', drained.messages.length === 1 && drained.messages[0].from === 'peer' && drained.messages[0].kind === 'task', JSON.stringify(drained))
+    // ack after re-key routes back to the ORIGINAL sender (history rewritten).
+    await ren.call('bridge_ack', { ref: drained.messages[0].id, status: 'accepted' })
+    const ackBack = await peer.call('bridge_wait', { timeoutMs: 2000 })
+    check('ack after re-key routed to original sender', ackBack.type === 'message' && ackBack.message.from === 'ren2' && ackBack.message.kind === 'ack', JSON.stringify(ackBack))
+    // History attribution rewritten: peer's own view shows ren2, not ren.
+    const peerHistory = await peer.call('bridge_history', { limit: 20 })
+    check('history attribution follows the new id', peerHistory.messages.some(m => m.from === 'ren2' && m.content === 'before rename') && !peerHistory.messages.some(m => m.from === 'ren'), JSON.stringify(peerHistory.messages.map(m => m.from)))
+    // Old id is free but no longer routable.
+    const oldId = await peer.callRaw('bridge_chat', { to: 'ren', message: 'x' })
+    check('old id unknown after re-key', oldId.error !== undefined, JSON.stringify(oldId))
+
+    const denied = await peer.callRaw('bridge_rename', { peer: 'ren2', peerId: 'stolen' })
+    check('non-manager re-key rejected', denied.error !== undefined && /manager/.test(denied.error), JSON.stringify(denied))
+    const taken = await mgr.callRaw('bridge_rename', { peer: 'ren2', peerId: 'peer' })
+    check('re-key onto a taken id rejected', taken.error !== undefined && /already registered/.test(taken.error), JSON.stringify(taken))
+    const reserved = await mgr.callRaw('bridge_rename', { peer: 'ren2', peerId: 'all' })
+    check('re-key onto the broadcast address rejected', reserved.error !== undefined && /reserved/.test(reserved.error), JSON.stringify(reserved))
+    const invalid = await mgr.callRaw('bridge_rename', { peer: 'ren2', peerId: 'bad id!' })
+    check('re-key onto an invalid id rejected', invalid.error !== undefined, JSON.stringify(invalid))
+    const reservedReg = await peer.callRaw('bridge_register', { peerId: 'all' })
+    check('registering the broadcast address rejected', reservedReg.error !== undefined && /reserved/.test(reservedReg.error), JSON.stringify(reservedReg))
+
+    // Self id-rename via bridge_register is now lossless too.
+    const carol = makeClient('carol', base)
+    await carol.init()
+    await carol.call('bridge_register', { peerId: 'carol', alias: 'Carol C' })
+    await peer.call('bridge_chat', { to: 'carol', message: 'queued for carol' })
+    const selfRenamed = await carol.call('bridge_register', { peerId: 'carol2' })
+    check('self id-rename carries the alias', selfRenamed.ok === true && selfRenamed.alias === 'Carol C', JSON.stringify(selfRenamed))
+    const carolDrained = await carol.call('bridge_poll')
+    check('self id-rename keeps the queued mailbox', carolDrained.messages.length === 1 && carolDrained.messages[0].content === 'queued for carol', JSON.stringify(carolDrained))
+  } finally {
+    hubKey.close()
+  }
+
+  console.log('== roster persistence (stateFile) ==')
+  const stateFile = `${tmpdir()}/hub-roster-test-${Date.now()}.json`
+  const hubA = startHub({ port: 19004, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 10, stateFile }, { info: () => {}, warn: () => {} })
+  try {
+    const pA = makeClient('alice', 'http://127.0.0.1:19004/mcp')
+    await pA.init()
+    await pA.call('bridge_register', { peerId: 'alice', alias: 'Persisted Alice' })
+    await pA.call('bridge_peers')
+  } finally {
+    hubA.close() // flushes the roster synchronously
+  }
+  const saved = JSON.parse(readFileSync(stateFile, 'utf8'))
+  check('roster file written with profiles', saved.version === 1 && saved.profiles.some(p => p.id === 'alice' && p.alias === 'Persisted Alice'), JSON.stringify(saved))
+
+  const hubB = startHub({ port: 19005, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 10, stateFile }, { info: () => {}, warn: () => {} })
+  try {
+    const pB = makeClient('alice', 'http://127.0.0.1:19005/mcp')
+    await pB.init()
+    await pB.call('bridge_register', { peerId: 'alice' })
+    const restored = await pB.call('bridge_peers')
+    check('alias restored from the roster file after restart', restored.peers.find(p => p.id === 'alice')?.alias === 'Persisted Alice', JSON.stringify(restored))
+  } finally {
+    hubB.close()
+  }
+  rmSync(stateFile, { force: true })
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1

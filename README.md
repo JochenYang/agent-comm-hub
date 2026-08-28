@@ -298,12 +298,18 @@ hard control — an injected `/clear` clears the target's context.
 Peers carry a **profile**: the client name/version reported at connect, plus
 an optional **display alias** (`bridge_rename`). The alias is cosmetic — it
 shows up in `bridge_peers` / `bridge_status` and the desktop roster, while
-routing, mailboxes, history, and acks keep using the immutable peer id, so a
-rename never drops messages. Renaming yourself is open to everyone; renaming
-**another** peer or kicking one (`bridge_unregister { peer }`) requires the
-**manager** role (`--manager-peers`, default `agent-hub-cli` — the desktop GUI
-identity). This is a convention on top of the loopback trust model, not
-authentication.
+routing, mailboxes, history, and acks keep using the peer id, so a rename
+never drops messages. A manager can also **truly rename** a registered peer
+(`bridge_rename { peer, peerId }`): mailbox, waiters, session bindings, and
+history attribution move atomically — queued messages and acks stay
+continuous. Renaming yourself is open to everyone; renaming/kicking
+**another** peer (`bridge_unregister { peer }`) or reading another peer's
+history (`bridge_history { peer }` / `peer: "all"`) requires the **manager**
+role (`--manager-peers`, default `agent-hub-cli` — the desktop GUI identity).
+This is a convention on top of the loopback trust model, not authentication.
+
+Rosters persist: `--state-file` (default `~/.agent-comm-hub/roster.json`,
+`off` to disable) keeps aliases and client info across hub restarts.
 
 Roster changes and queued mail are pushed over the SSE channel as
 `notifications/message` events (`data.event: "peers_changed"` with the full
@@ -336,6 +342,8 @@ agent-comm-hub service install|uninstall [options]   one-shot auto-start
 --herdr-timeout-ms <n>   Default cap for one herdr call in ms (default 30000)
 --manager-peers <ids>    Comma-separated roster managers, or "all"
                          (default agent-hub-cli — the desktop GUI identity)
+--state-file <path>      Roster persistence file
+                         (default ~/.agent-comm-hub/roster.json; "off" = memory only)
 --url <u> / --server-name <n> / --remove / --dry-run   (setup/service/status)
 -h, --help               Show help
 -V, --version            Show version
@@ -411,7 +419,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (162 checks: 61 smoke + 32 setup + 11 ops + 35 herdr + 23 discover)
+pnpm test             # test suite (180 checks: 79 smoke + 32 setup + 11 ops + 35 herdr + 23 discover)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
 ```

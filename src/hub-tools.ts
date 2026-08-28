@@ -8,7 +8,7 @@
 import type { AgentHub } from './hub.js'
 import type { McpTool, SessionRegistry } from './mcp-server.js'
 import { AGENT_STATUSES, type HerdrCtl } from './herdr-ctl.js'
-import { decodeContent, type AckContent, type BridgeMessage, BROADCAST, type TaskContent } from './protocol.js'
+import { decodeContent, type AckContent, type BridgeMessage, BROADCAST, PEER_ID_PATTERN, type TaskContent } from './protocol.js'
 
 /** Default wait budget when a client omits timeoutMs. */
 export const DEFAULT_WAIT_MS = 30_000
@@ -221,29 +221,37 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       }, ['peerId']),
       handler: async (args, sessionId) => {
         const peerId = String(args.peerId)
-        if (!/^[A-Za-z0-9._:-]{1,64}$/.test(peerId)) {
+        if (!PEER_ID_PATTERN.test(peerId)) {
           throw new Error(`invalid peerId: ${peerId} (expected [A-Za-z0-9._:-]{1,64})`)
+        }
+        if (peerId === BROADCAST) {
+          throw new Error(`reserved peer id: ${peerId} (it is the broadcast address)`)
         }
         const alias = args.alias === undefined ? undefined : sanitizeAlias(String(args.alias))
         if (hub.has(peerId) && registry.peerFor(sessionId) !== peerId) {
           throw new Error(`peer already registered by another connection: ${peerId}`)
         }
         const current = registry.peerFor(sessionId)
-        // Carry the old display alias across a self-rename so a session that
-        // was renamed by a manager (or set its own alias) keeps it.
-        const carriedAlias = current !== undefined && current !== peerId ? hub.profileOf(current)?.alias : undefined
         if (current !== undefined && current !== peerId) {
-          // Rename: detach first, then drop the old peer when no other
-          // session is still attached to it (same-name sessions share it).
-          registry.unbindPeer(sessionId)
-          if (registry.attachedCount(current) === 0) hub.unregister(current)
+          if (registry.attachedCount(current) === 1) {
+            // Sole session on the old id: atomically re-key the peer —
+            // mailbox, waiters, history attribution, and profile all move,
+            // so nothing queued or acked is lost (the old unregister-based
+            // path dropped the mailbox and broke acks/history).
+            hub.renamePeer(current, peerId)
+            registry.rebindPeerId(current, peerId)
+          } else {
+            // Other sessions still share the old id: legacy split — detach
+            // only this session and drop the old peer when the last leaves.
+            registry.unbindPeer(sessionId)
+            if (registry.attachedCount(current) === 0) hub.unregister(current)
+          }
         }
-        registry.bindPeer(sessionId, peerId)
         if (!hub.has(peerId)) hub.register(peerId)
+        registry.bindPeer(sessionId, peerId)
         registry.clearSuppress(sessionId)
         hub.touch(peerId)
         if (alias !== undefined) hub.setAlias(peerId, alias)
-        else if (carriedAlias !== undefined && hub.profileOf(peerId)?.alias === undefined) hub.setAlias(peerId, carriedAlias)
         const finalAlias = hub.profileOf(peerId)?.alias
         return { ok: true, peerId, ...(finalAlias !== undefined ? { alias: finalAlias } : {}), peers: hub.peers() }
       },
@@ -281,18 +289,40 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_rename',
-      description: 'Set a display alias on a peer. The alias is cosmetic — it shows up in bridge_peers / bridge_status and the desktop roster, while message routing, mailboxes, and history keep using the immutable peer id, so renaming is safe at any time. Omitting `peer` renames yourself; renaming ANOTHER peer requires manager rights (hub managerPeers).',
+      description: 'Rename on the hub, two layers: (1) `alias` sets a display name — cosmetic only, it shows up in bridge_peers / bridge_status and the desktop roster while routing, mailboxes, and history keep the immutable peer id; renaming yourself is open to everyone. (2) `peerId` truly re-keys another registered peer (manager rights required): mailbox, waiters, session bindings, and history attribution move atomically, so queued messages and acks stay continuous. Renaming ANOTHER peer (either layer) requires manager rights (hub managerPeers).',
       inputSchema: schema({
-        alias: str('New display name (1-64 chars, spaces/CJK allowed; empty string clears back to no alias).'),
-        peer: optStr('Whose alias to set; default yourself. Renaming another peer requires manager rights.'),
-      }, ['alias']),
+        alias: optStr('New display name (1-64 chars, spaces/CJK allowed; empty string clears back to no alias).'),
+        peerId: optStr('New routing id for `peer` — a true rename that moves all state (manager only). Target must be a registered peer.'),
+        peer: optStr('Whose name/id to change; default yourself. Changing another peer requires manager rights.'),
+      }),
       handler: wrap(true, async (args, peer) => {
-        const target = args.peer === undefined ? peer : String(args.peer)
+        const hasAlias = args.alias !== undefined
+        const hasPeerId = args.peerId !== undefined
+        if (!hasAlias && !hasPeerId) {
+          throw new Error('nothing to rename: pass alias and/or peerId')
+        }
+        let target = args.peer === undefined ? peer : String(args.peer)
         if (target !== peer) requireManager(peer, `renaming '${target}'`)
-        const alias = String(args.alias).trim()
-        hub.setAlias(target, alias === '' ? undefined : sanitizeAlias(alias))
+        let previousId: string | undefined
+        if (hasPeerId) {
+          if (args.peer === undefined) {
+            throw new Error('peerId requires peer — to change your own id, call bridge_register(newId)')
+          }
+          const newId = String(args.peerId)
+          if (!PEER_ID_PATTERN.test(newId)) {
+            throw new Error(`invalid peerId: ${newId} (expected [A-Za-z0-9._:-]{1,64})`)
+          }
+          previousId = target
+          hub.renamePeer(target, newId)
+          registry.rebindPeerId(target, newId)
+          target = newId
+        }
+        if (hasAlias) {
+          const alias = String(args.alias).trim()
+          hub.setAlias(target, alias === '' ? undefined : sanitizeAlias(alias))
+        }
         const applied = hub.profileOf(target)?.alias
-        return { ok: true, peerId: target, ...(applied !== undefined ? { alias: applied } : {}) }
+        return { ok: true, peerId: target, ...(previousId !== undefined ? { previousId } : {}), ...(applied !== undefined ? { alias: applied } : {}) }
       }),
     },
     {
@@ -371,13 +401,17 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_history',
-      description: 'Recent messages involving you (newest first); pass `peer` to inspect another peer\'s conversation, or `peer: "all"` for the unfiltered tail across every peer. Use to refresh context after a reconnect.',
-      inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; "all" = every peer; default: yourself.'), limit: int('How many messages to return (default 20).') }),
+      description: 'Recent messages involving you (newest first). Use to refresh context after a reconnect. Reading ANOTHER peer\'s conversation — or `peer: "all"` for the unfiltered tail — requires manager rights (hub managerPeers).',
+      inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; "all" = every peer; default: yourself. Other peers / "all" require manager rights.'), limit: int('How many messages to return (default 20).') }),
       handler: wrap(true, async (args, peer) => {
         const limit = Math.min(args.limit === undefined ? 20 : Number(args.limit), 1000)
-        const messages = args.peer === 'all'
+        const target = args.peer === undefined ? peer : String(args.peer)
+        if (target !== peer) {
+          requireManager(peer, `reading ${target === BROADCAST ? 'the full history' : `peer '${target}' history`} requires manager rights`)
+        }
+        const messages = target === BROADCAST
           ? hub.historyAll(limit)
-          : hub.history(args.peer === undefined ? peer : String(args.peer), limit)
+          : hub.history(target, limit)
         return { messages: messages.map(present) }
       }),
     },

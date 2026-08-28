@@ -366,21 +366,37 @@ fn sync_roster_to_store(store: &Store, kicked: &KickedPeers, peers: &[Value]) {
 
 // -------- 花名册管理（rename / kick / 本地 roster） --------
 
-/// `bridge_rename`：改别名。alias trim 后 1-64 字符、不得含控制字符（hub 校验）；
-/// 空串/纯空白 = 清除别名。不传 peer = 改自己；传 peer = 管理端改别人
-/// （本端 agent-hub-cli 是 hub 默认管理端，恒有权限；hub 拒绝时错误透传前端）。
+/// `bridge_rename`：改别名 / 改路由 id。alias trim 后 1-64 字符、不得含控制
+/// 字符（hub 校验）；空串/纯空白 = 清除别名。不传 peer = 改自己；传 peer =
+/// 管理端改别人（本端 agent-hub-cli 是 hub 默认管理端，恒有权限；hub 拒绝时
+/// 错误透传前端）。new_peer_id = 管理端真改名（re-key）：hub 原子迁移该 peer
+/// 的邮箱、等待器、session 绑定与历史归属，必须配合显式 peer。
 #[tauri::command]
 pub async fn bridge_rename(
     state: State<'_, AppState>,
     peer: Option<String>,
-    alias: String,
+    alias: Option<String>,
+    new_peer_id: Option<String>,
 ) -> CmdResult<Value> {
     let mut args = serde_json::Map::new();
-    args.insert("alias".into(), json!(alias));
+    if let Some(a) = alias {
+        args.insert("alias".into(), json!(a));
+    }
     if let Some(p) = peer {
         args.insert("peer".into(), json!(p));
     }
+    if let Some(id) = new_peer_id {
+        args.insert("peerId".into(), json!(id));
+    }
     let result = tools_call_checked(&state, "bridge_rename", Value::Object(args)).await?;
+    // id re-key：previousId 存在 = 路由 id 变了，旧 id 的本地行整体作废删除；
+    // 别名/元数据由下一帧 roster 快照按新 id 重建（re-key 时 profile 连同
+    // alias 一起迁移，下方同步逻辑会把 alias 写到新 id 行）。
+    if let Some(prev) = result.get("previousId").and_then(Value::as_str) {
+        if let Err(e) = state.store.delete_peer(prev) {
+            log::warn!("re-key 后删除旧 id 本地行失败 ({prev}): {e}");
+        }
+    }
     // rename 结果是别名的唯一权威来源（快照缺省有二义，见 set_peer_alias）：
     // 结果带 alias → 写入；缺省（已清除）→ 落 NULL。
     if let (Some(id), Some(alias_out)) = (

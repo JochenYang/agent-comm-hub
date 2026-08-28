@@ -27,6 +27,8 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
   // 行内编辑/确认状态：同一时刻最多一个 peer 处于重命名或确认移除。
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
+  // 新路由 id（可选，管理端）：非空且不同于现 id 时提交真改名（re-key）。
+  const [idDraft, setIdDraft] = useState('')
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
 
   const online = peers.filter((p) => p.connected)
@@ -36,13 +38,19 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
 
   const submitRename = async (p: Peer): Promise<void> => {
     const draft = renameDraft.trim()
+    const idT = idDraft.trim()
     setRenamingId(null)
-    // 空输入 = 取消（清除别名走显式入口，避免误清）。
-    if (draft === '' || draft === (p.alias ?? '')) return
-    if (await renamePeer(p.id, draft)) {
+    // 别名/新 id 都没有实际变化 = 取消（清除别名走显式入口，避免误清）。
+    const aliasWanted = draft !== '' && draft !== (p.alias ?? '')
+    const idWanted = idT !== '' && idT !== p.id
+    if (!aliasWanted && !idWanted) return
+    const name = displayName(p)
+    if (await renamePeer(p.id, aliasWanted ? draft : undefined, idWanted ? idT : undefined)) {
       pushToast(
         'success',
-        t('peers.renamed_toast', { name: displayName(p), alias: draft })
+        idWanted
+          ? t('peers.rekeyed_toast', { old: name, id: idT })
+          : t('peers.renamed_toast', { name, alias: draft })
       )
     }
   }
@@ -132,7 +140,8 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
           aria-label={p.connected ? t('peers.on') : t('peers.off')}
         />
         {isRenaming ? (
-          // 行内重命名：Enter 提交、Esc/空输入取消；有别名时附"清除别名"入口。
+          // 行内重命名：Enter 提交、Esc/空输入取消；有别名时附"清除别名"入口；
+          // 非自身 peer 额外给"新 ID"输入（管理端真改名，re-key 迁移全部状态）。
           <span className="flex min-w-0 flex-1 items-center gap-1" onClick={(e) => e.stopPropagation()}>
             <input
               autoFocus
@@ -143,8 +152,22 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
                 if (e.key === 'Escape') setRenamingId(null)
               }}
               placeholder={t('peers.rename_placeholder')}
-              className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
+              className="min-w-0 flex-[2] rounded border border-border bg-background px-1.5 py-0.5 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
             />
+            {!isSelf && (
+              <input
+                value={idDraft}
+                onChange={(e) => setIdDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submitRename(p)
+                  if (e.key === 'Escape') setRenamingId(null)
+                }}
+                placeholder={t('peers.rename_id_placeholder')}
+                title={t('peers.rename_id_hint')}
+                aria-label={t('peers.rename_id_placeholder')}
+                className="min-w-0 flex-1 rounded border border-border bg-background px-1.5 py-0.5 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
+              />
+            )}
             <button
               type="button"
               onClick={() => void submitRename(p)}
@@ -203,6 +226,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
                   e.stopPropagation()
                   setConfirmRemoveId(null)
                   setRenameDraft(p.alias ?? '')
+                  setIdDraft('')
                   setRenamingId(p.id)
                 }}
                 title={t('peers.rename')}

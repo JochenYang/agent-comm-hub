@@ -44,11 +44,12 @@ export interface RosterRecord {
   created_at: number
 }
 
-/** bridge_rename 结果：alias 清除时缺省。 */
+/** bridge_rename 结果：alias 清除时缺省；previousId 仅 id re-key 时存在。 */
 export interface RenameResult {
   ok: boolean
   peerId: string
   alias?: string
+  previousId?: string
 }
 
 /** bridge_unregister（带 peer = 管理端踢人）结果：目标不存在时 kicked=false。 */
@@ -199,8 +200,8 @@ export const tauri = {
     appReady: () => tauriInvoke<HubStatus>('app_ready'),
     quitApp: () => tauriInvoke<void>('quit_app'),
     bridgePeers: () => tauriInvoke<BridgePeersResult>('bridge_peers'),
-    bridgeRename: (peer: string | null, alias: string) =>
-      tauriInvoke<RenameResult>('bridge_rename', { peer: peer ?? null, alias }),
+    bridgeRename: (peer: string | null, alias: string | null, newPeerId?: string | null) =>
+      tauriInvoke<RenameResult>('bridge_rename', { peer: peer ?? null, alias: alias ?? null, newPeerId: newPeerId ?? null }),
     bridgeUnregisterPeer: (peer: string) =>
       tauriInvoke<UnregisterPeerResult>('bridge_unregister_peer', { peer }),
     rosterList: () => tauriInvoke<RosterRecord[]>('roster_list'),

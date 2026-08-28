@@ -31,8 +31,9 @@ interface PeersState {
   /** 上下线迁移事件（追加式，保留最近 20 条；seq 单调递增供 UI 去重）。 */
   activity: PeerActivity[]
   refresh: () => Promise<void>
-  /** 改别名；alias 传空串 = 清除。返回是否成功（失败已写 error + toast）。 */
-  renamePeer: (peer: string, alias: string) => Promise<boolean>
+  /** 重命名：alias 与 newId 至少给一个。alias 空串 = 清除；newId = 管理端
+   * 真改名（re-key，迁移会话/邮箱/历史），旧 id 的键在本 store 内失效。 */
+  renamePeer: (peer: string, alias?: string, newId?: string) => Promise<boolean>
   /** 踢人（管理端）。目标不存在时同样失败返回。 */
   removePeer: (peer: string) => Promise<boolean>
   /** 仅从本地名单忘掉一个 offline 已知 peer（不动 hub，roster_forget）。 */
@@ -111,12 +112,23 @@ export const usePeersStore = create<StoreShape>()((set, get) => ({
     }
   },
 
-  renamePeer: async (peer, alias) => {
+  renamePeer: async (peer, alias, newId) => {
     // 改自己：不传 peer（hub 语义 = 改自身别名）；改别人：管理端身份恒有权限，
     // 非管理端配置被 hub 拒绝时错误透传（toast 展示）。
     const target = peer === SELF_PEER_ID ? null : peer
     try {
-      await tauri.invoke.bridgeRename(target, alias)
+      await tauri.invoke.bridgeRename(target, alias ?? null, newId)
+      if (newId !== undefined && newId !== peer) {
+        // id 变了：live 与本地 roster 都按旧 id 键存，旧键整体过期移除，
+        // 新 id 的数据由随后的 refresh（实时快照 / SQLite 重建）补上。
+        set((s) => {
+          const live = { ...s.live }
+          const rosterLocal = { ...s.rosterLocal }
+          delete live[peer]
+          delete rosterLocal[peer]
+          return { live, rosterLocal, peers: mergePeers(live, rosterLocal) }
+        })
+      }
       void get().refresh()
       return true
     } catch (e) {

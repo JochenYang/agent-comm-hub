@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **True rename (re-key) in the roster panel** — the inline rename editor gains
+  an optional "new id" field (manager action): the hub atomically re-keys the
+  peer (mailbox, waiters, session bindings and history attribution move, so
+  queued messages and acks stay continuous); the local roster row of the old
+  id is removed and rebuilt under the new id.
 - **Agent roster management** — the peer list is now a full roster panel: peers
   render in online / offline groups with display name (`alias ?? id`, the id
   becomes a small subtitle when an alias is set), client-version chip, and the

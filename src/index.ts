@@ -10,8 +10,10 @@
  */
 
 import { createServer, type Server } from 'node:http'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { HerdrCtl } from './herdr-ctl.js'
-import { AgentHub, type HubOptions } from './hub.js'
+import { AgentHub, type HubOptions, type PeerProfile } from './hub.js'
 import { autoRegisterPeer, hubTools, livePeersFor, present, rosterFor } from './hub-tools.js'
 import { McpStreamableHttpServer, SessionRegistry } from './mcp-server.js'
 import type { BridgeMessage } from './protocol.js'
@@ -69,6 +71,10 @@ export interface HubConfig {
    * the default is the desktop/CLI archiver identity so the companion GUI
    * is the manager out of the box. */
   managerPeers?: 'all' | string[]
+  /** JSON file the peer roster (profiles: aliases, client info) is persisted
+   * to so identities survive hub restarts. Undefined (the DEFAULT_CONFIG) =
+   * off — the CLI turns it on by default; tests stay hermetic. */
+  stateFile?: string
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -104,6 +110,15 @@ export interface StartedHub {
   close(): void
 }
 
+/** Atomic roster write: UTF-8 without BOM, temp file + rename so a crash
+ * mid-write never corrupts the previous snapshot. */
+function writeRosterFile(file: string, profiles: PeerProfile[]): void {
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.tmp`
+  writeFileSync(tmp, JSON.stringify({ version: 1, savedAt: Date.now(), profiles }), 'utf8')
+  renameSync(tmp, file)
+}
+
 /** Start the hub: MCP endpoint on `host:port + path`, tools wired to a fresh AgentHub. */
 export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = console): StartedHub {
   // Drop undefined keys so CLI defaults never clobber DEFAULT_CONFIG values.
@@ -129,6 +144,29 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       data: { event: 'message', message: present(message) },
     })
   }
+  // Roster persistence: debounced atomic save on roster changes (stateFile
+  // off by default for programmatic use — the CLI opts in).
+  let saveTimer: NodeJS.Timeout | undefined
+  let rosterDirty = false
+  const flushRoster = (): void => {
+    if (resolved.stateFile === undefined || !rosterDirty) return
+    rosterDirty = false
+    try {
+      writeRosterFile(resolved.stateFile, hub.exportProfiles())
+    } catch (error) {
+      log.warn(`roster save failed: ${(error as Error).message}`)
+    }
+  }
+  const scheduleRosterSave = (): void => {
+    if (resolved.stateFile === undefined) return
+    rosterDirty = true
+    if (saveTimer !== undefined) return
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined
+      flushRoster()
+    }, 500)
+    saveTimer.unref?.()
+  }
   const hub = new AgentHub({
     maxQueue: resolved.maxQueue,
     historyLimit: resolved.historyLimit,
@@ -146,6 +184,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       } catch (error) {
         log.warn(`peers_changed notification failed: ${(error as Error).message}`)
       }
+      scheduleRosterSave()
     },
     onQueued: (message, target) => {
       try {
@@ -156,6 +195,19 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     },
   })
   const registry = new SessionRegistry()
+  // Restore persisted profiles (aliases survive hub restarts). A missing
+  // file is a normal first boot; anything else is reported but not fatal.
+  if (resolved.stateFile !== undefined) {
+    try {
+      const parsed = JSON.parse(readFileSync(resolved.stateFile, 'utf8')) as { profiles?: unknown }
+      const imported = hub.importProfiles(parsed.profiles)
+      if (imported > 0) log.info(`roster restored: ${imported} profile(s) from ${resolved.stateFile}`)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        log.warn(`roster load failed: ${(error as Error).message}`)
+      }
+    }
+  }
   const herdr = new HerdrCtl({
     bin: resolved.herdrBin,
     baseArgs: resolved.herdrBaseArgs,
@@ -198,6 +250,11 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     close: () => {
       hub.dispose()
       mcp.close()
+      if (saveTimer !== undefined) {
+        clearTimeout(saveTimer)
+        saveTimer = undefined
+      }
+      flushRoster()
       server.closeAllConnections?.()
       server.close()
     },

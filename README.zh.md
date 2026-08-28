@@ -206,7 +206,9 @@ agent-comm-hub service uninstall
 
 ### 花名册管理（别名、踢人）
 
-每个 peer 带一份**档案**：连接时上报的客户端名/版本，外加可选的**显示别名**（`bridge_rename`）。别名纯展示——只出现在 `bridge_peers` / `bridge_status` 和桌面端花名册里；路由、信箱、历史、ack 始终使用不可变的 peer id，因此改名不会丢消息、不迁移状态。给自己改别名人人可以；改**别人**的别名或踢人（`bridge_unregister { peer }`）需要**管理端**身份（`--manager-peers`，默认 `agent-hub-cli`，即桌面 GUI 的身份）。这是叠加在本机信任模型上的约定，不是鉴权。
+每个 peer 带一份**档案**：连接时上报的客户端名/版本，外加可选的**显示别名**（`bridge_rename`）。别名纯展示——只出现在 `bridge_peers` / `bridge_status` 和桌面端花名册里；路由、信箱、历史、ack 始终使用 peer id，因此改名不会丢消息、不迁移状态。管理端还能对已注册 peer 做**真改名**（`bridge_rename { peer, peerId }`）：信箱、等待器、session 绑定与历史归属原子迁移，排队消息与 ack 路由保持连续。给自己改别名人人可以；改**别人**的别名、踢人（`bridge_unregister { peer }`）、读别人的历史（`bridge_history { peer }` / `peer: "all"`）需要**管理端**身份（`--manager-peers`，默认 `agent-hub-cli`，即桌面 GUI 的身份）。这是叠加在本机信任模型上的约定，不是鉴权。
+
+花名册可落盘：`--state-file`（默认 `~/.agent-comm-hub/roster.json`，`off` 关闭），别名与客户端信息在 hub 重启后保留。
 
 花名册变化与排队消息会通过 SSE 通道以 `notifications/message` 事件推送（`data.event: "peers_changed"` 携带完整花名册，`data.event: "message"` 仅推送给收件人），GUI 与 skill 无需轮询即可感知。
 
@@ -274,7 +276,7 @@ const hub = startHub({ port: 18764 }, console) // 返回 { hub, registry, server
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit（strict）
-pnpm test             # 测试套件（162 项：61 冒烟 + 32 安装器 + 11 运维 + 35 herdr + 23 发现）
+pnpm test             # 测试套件（180 项：79 冒烟 + 32 安装器 + 11 运维 + 35 herdr + 23 发现）
 pnpm run build        # esbuild → lib/{cli,index,setup}.js（零依赖）
 pnpm pack             # 构建 + npm pack（发布产物）
 ```

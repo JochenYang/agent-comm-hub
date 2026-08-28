@@ -21,7 +21,7 @@ export interface StatusResult {
   running: boolean
   url: string
   version?: string
-  peers: Array<{ id: string; connected: boolean }>
+  peers: Array<{ id: string; connected: boolean; alias?: string }>
   error?: string
 }
 
@@ -72,7 +72,7 @@ export async function runStatus(options: StatusOptions = {}): Promise<StatusResu
     const version = ((init.result as { serverInfo?: { version?: string } })?.serverInfo?.version) ?? undefined
     const call = await rpc('tools/call', { name: 'bridge_peers', arguments: {} })
     const text = call.result?.content?.[0]?.text
-    const parsed = text ? JSON.parse(text) as { peers?: Array<{ id: string; connected: boolean }> } : { peers: [] }
+    const parsed = text ? JSON.parse(text) as { peers?: Array<{ id: string; connected: boolean; alias?: string }> } : { peers: [] }
     const peers = (parsed.peers ?? []).filter(peer => peer.id !== probeName)
     await rpc('tools/call', { name: 'bridge_unregister', arguments: {} }).catch(() => undefined)
     return { running: true, url, version, peers }

@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { BROADCAST, type BridgeMessage, type MessageKind, type WaitResult } from './protocol.js'
+import { BROADCAST, PEER_ID_PATTERN, type BridgeMessage, type MessageKind, type WaitResult } from './protocol.js'
 
 /** One registered long-poll waiter for a peer. */
 interface Waiter {
@@ -160,6 +160,37 @@ export class AgentHub {
     return this.profiles.get(peerId)
   }
 
+  /** Snapshot of every known profile (registered or not) for persistence. */
+  exportProfiles(): PeerProfile[] {
+    return [...this.profiles.values()].map(profile => ({ ...profile }))
+  }
+
+  /** Load persisted profiles at boot. Invalid entries are dropped; `null`-ish
+   * and non-finite fields are sanitized. Returns the imported count. Silent
+   * for roster observers — this runs before the server accepts requests. */
+  importProfiles(profiles: unknown): number {
+    if (!Array.isArray(profiles)) return 0
+    let count = 0
+    for (const raw of profiles) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const candidate = raw as Record<string, unknown>
+      const id = candidate.id
+      if (typeof id !== 'string' || !PEER_ID_PATTERN.test(id) || id === BROADCAST) continue
+      if (this.profiles.has(id)) continue
+      const profile: PeerProfile = {
+        id,
+        registeredAt: typeof candidate.registeredAt === 'number' && Number.isFinite(candidate.registeredAt) ? candidate.registeredAt : Date.now(),
+      }
+      if (typeof candidate.alias === 'string' && candidate.alias !== '') profile.alias = candidate.alias
+      if (typeof candidate.clientName === 'string' && candidate.clientName !== '') profile.clientName = candidate.clientName
+      if (typeof candidate.clientVersion === 'string' && candidate.clientVersion !== '') profile.clientVersion = candidate.clientVersion
+      this.profiles.set(id, profile)
+      count++
+    }
+    this.evictOverflowProfiles()
+    return count
+  }
+
   /** Set (or clear with `undefined`) the display alias of a registered peer.
    * Routing state is untouched — this only changes how the peer is shown. */
   setAlias(peerId: string, alias: string | undefined): void {
@@ -169,6 +200,51 @@ export class AgentHub {
       this.profiles.set(peerId, alias === undefined ? omit(profile, 'alias') : { ...profile, alias })
     }
     // An alias edit changes the visible roster, so roster observers re-fire.
+    this.options.onPeersChanged?.(this.peers())
+  }
+
+  /**
+   * Atomically re-key a registered peer: mailbox, waiters, last-seen,
+   * profile, session bindings (via the caller's registry), and history
+   * attribution move from `oldId` to `newId` in one step, so queued
+   * messages, pending waits, ack routing, and history continuity all
+   * survive the rename. All validation happens before the first mutation.
+   */
+  renamePeer(oldId: string, newId: string): void {
+    if (oldId === newId) return
+    if (!this.lastSeen.has(oldId)) throw new Error(`unknown peer: ${oldId}`)
+    if (newId === BROADCAST) throw new Error(`reserved peer id: ${newId}`)
+    if (!PEER_ID_PATTERN.test(newId)) throw new Error(`invalid peerId: ${newId} (expected [A-Za-z0-9._:-]{1,64})`)
+    if (this.lastSeen.has(newId)) throw new Error(`peer already registered: ${newId}`)
+    const queue = this.queues.get(oldId)
+    const waiters = this.waiters.get(oldId)
+    const seen = this.lastSeen.get(oldId) ?? Date.now()
+    const profile = this.profiles.get(oldId)
+    this.queues.delete(oldId)
+    this.waiters.delete(oldId)
+    this.lastSeen.delete(oldId)
+    this.profiles.delete(oldId)
+    if (queue !== undefined) this.queues.set(newId, queue)
+    if (waiters !== undefined) this.waiters.set(newId, waiters)
+    this.lastSeen.set(newId, seen)
+    if (profile !== undefined) {
+      profile.id = newId
+      this.profiles.set(newId, profile)
+    } else {
+      this.profiles.set(newId, { id: newId, registeredAt: Date.now() })
+    }
+    // Waiters on OTHER peers may filter by sender `from: oldId`.
+    for (const list of this.waiters.values()) {
+      for (const waiter of list) {
+        if (waiter.from === oldId) waiter.from = newId
+      }
+    }
+    // Rewrite attribution so history lookups and ack routing (which target
+    // `original.from`) follow the new id — no tombstone needed.
+    for (const message of this.historyRing) {
+      if (message.from === oldId) message.from = newId
+      if (message.to === oldId) message.to = newId
+    }
     this.options.onPeersChanged?.(this.peers())
   }
 

@@ -97,7 +97,11 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
   (bridge_rename of others, manager kick) is gated by `managerPeers`
   (default `['agent-hub-cli']`, the desktop GUI identity); the peer id stays
   the immutable routing key while the alias is a mutable display name held in
-  `AgentHub.profiles` (survives unregister/GC). Hub pushes SSE notifications:
+  `AgentHub.profiles` (survives unregister/GC). `bridge_rename { peerId }`
+  true-renames a registered peer (atomic re-key incl. history rewrite);
+  `bridge_register` self-rename uses the same lossless path when its session
+  is the only one attached. Other-peer history reads are manager-gated. Hub
+  pushes SSE notifications:
   `peers_changed` (full roster) to all streams, `message` (queued-mail hint)
   to the recipient's streams only.
 
@@ -108,7 +112,7 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs → 162 checks (61+32+11+35+23)
+                      #   + test/discover.mjs → 180 checks (79+32+11+35+23)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -119,12 +123,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 61/61 + 32/32 +
+  merging, the full `pnpm test` must stay green (verified: 79/79 + 32/32 +
   11/11 + 35/35 + 23/23 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (61 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (79 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, broadcast (no echo to sender), status/peers/history incl. the
@@ -133,7 +137,11 @@ pnpm pack             # build + npm pack (publishing artifact)
   same-name sharing, unregister suppresses), SSE liveness, idle GC,
   profiles/aliases/manager ops (roster metadata, manager rename + kick,
   non-manager denial, alias persistence/routing), SSE event push
-  (peers_changed on join/alias edit, recipient-scoped mail hint).
+  (peers_changed on join/alias edit, recipient-scoped mail hint), true
+  rename (manager re-key: queued mail / ack / history continuity, old id
+  unroutable, taken/reserved rejection; lossless self id-rename via
+  bridge_register), history access gate (non-manager denied other-peer and
+  peer="all" reads), roster persistence (stateFile write + restore).
 - `test/setup.mjs` (32 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
   idempotency, `remove` uninstall, DSH patch block insert/url-change/remove.

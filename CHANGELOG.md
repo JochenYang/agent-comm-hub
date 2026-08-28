@@ -24,8 +24,22 @@
   `data.event: "message"` hint to that peer's streams only. Consumers (the
   desktop GUI) can drop periodic polling; delivery itself is still via
   `bridge_wait` / `bridge_poll`.
+- **True rename (re-key)**: `bridge_rename` accepts `peerId` — a manager can
+  re-key a registered peer atomically: mailbox, waiters, session bindings,
+  and history attribution all move, so queued messages and ack routing stay
+  continuous and no tombstone is needed. Self id-renames via
+  `bridge_register` now use the same lossless path (previously they dropped
+  the mailbox and broke history/acks). Renaming onto a taken or reserved id
+  (`all`) is rejected.
+- **`bridge_history` access gate**: reading another peer's conversation (or
+  `peer: "all"`) now requires manager rights; every peer can still read its
+  own history.
+- **Roster persistence**: `--state-file` (default `~/.agent-comm-hub/
+  roster.json`, `off` to disable) persists peer profiles — aliases and
+  client info survive hub restarts.
+- `agent-comm-hub status` shows a peer's alias next to its id.
 - New CLI flag `--manager-peers <ids|all>` (default `agent-hub-cli`).
-- Test suite grows to 162 checks (61 smoke + 32 setup + 11 ops +
+- Test suite grows to 180 checks (79 smoke + 32 setup + 11 ops +
   35 herdr control + 23 discovery).
 
 ## 0.5.0 (2026-08-22)

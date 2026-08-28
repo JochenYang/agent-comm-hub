@@ -161,7 +161,10 @@
     "forget": "remove from local roster",
     "forgot_toast": "{{name}} removed from local roster",
     "joined_toast": "{{name}} joined",
-    "left_toast": "{{name}} went offline"
+    "left_toast": "{{name}} went offline",
+    "rename_id_placeholder": "new id (optional · manager)",
+    "rename_id_hint": "true rename: moves all sessions, mailboxes and history",
+    "rekeyed_toast": "renamed {{old}} to id {{id}}"
   },
   "detail": {
     "select_hint": "← select a message",

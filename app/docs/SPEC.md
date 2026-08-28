@@ -126,8 +126,10 @@ hub 在 app 的 SSE 长连接上推 JSON-RPC 通知：
 
 ### 工具签名增量（hub ≥ 0.6）
 
-- `bridge_rename` `{ alias: string, peer?: string }` → `{ ok: true, peerId, alias? }`：不传 `peer` 改自己别名；传 `peer` 管理端改别人（GUI 以 `agent-hub-cli` 连接，是 hub 默认管理端）。alias trim 后 1-64 字符、不含控制字符；**空串/纯空白 = 清除别名**（结果缺省 `alias`）。
+- `bridge_rename` `{ alias?: string, peerId?: string, peer?: string }` → `{ ok: true, peerId, previousId?, alias? }`：alias 与 peerId 至少给一个。alias：不传 `peer` 改自己别名；传 `peer` 管理端改别人（GUI 以 `agent-hub-cli` 连接，是 hub 默认管理端）。alias trim 后 1-64 字符、不含控制字符；**空串/纯空白 = 清除别名**（结果缺省 `alias`）。peerId：管理端**真改名（re-key）**——hub 原子迁移该 peer 的邮箱、等待器、session 绑定与历史归属，排队消息与 ack 路由保持连续；结果带 `previousId`（旧路由 id），app 侧据此前除旧 id 的本地 roster 行。目标必须是已注册 peer；目标 id 已被占用或为广播地址 `all` 时报错。
 - `bridge_unregister` 扩展参数 `{ peer?: string }`：不传 = 自己离开（原行为不变）；传 `peer` = 管理端踢人 → `{ ok: true, peerId, kicked, detachedSessions? }`（目标不存在时 `kicked: false, peerId: null`）。app 侧命令名 `bridge_unregister_peer`。
+- `bridge_history` 收口：读自己的历史人人可以；读**其他 peer** 的会话或 `peer: "all"` 需要管理端身份（GUI 的 `agent-hub-cli` 恒有权限；旧版 agent 以普通 peer 身份调用会被拒绝）。
+- hub 花名册落盘：CLI 启动默认 `--state-file ~/.agent-comm-hub/roster.json`（`off` 关闭），peer 档案（别名、客户端信息）跨 hub 重启保留；app 侧无需改动，SQLite peers 表仍为本地台账。
 
 **发消息**：用户在输入框打字 → 客户端校验（peer 存在 / 长度 / Markdown）→ invoke `bridge_chat` Rust command → Rust 调 mcp_client `tools/call` → hub 接收 → 同 session 间立即返回 receipt + 推 SSE 给目标 peer → 前端 store 收到 receipt 后把消息标记为 sent（optimistic）。
 
