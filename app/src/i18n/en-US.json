@@ -124,7 +124,8 @@
     "hub_current_version": "current version",
     "hub_latest_version": "latest version",
     "hub_outdated_hint": "a newer version is available",
-    "hub_up_to_date": "up to date"
+    "hub_up_to_date": "up to date",
+    "port": "default 18764"
   },
   "logs": {
     "title": "Hub stdout/stderr",

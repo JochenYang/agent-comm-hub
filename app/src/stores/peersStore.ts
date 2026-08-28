@@ -55,10 +55,15 @@ let activitySeq = 0
 /** 是否已收到过实时快照（P2-1：首份快照只建基线，见 applyLiveRoster）。 */
 let liveBaselineSeen = false
 
-/** 合并实时 ∪ 本地（实时优先），online 在前、其余按 id。 */
+/** 合并实时 ∪ 本地（实时优先），online 在前、其余按 id。
+ *  收到过实时快照后，仅存在于本地 roster 的 peer 一律按 offline 展示——
+ *  hub 快照里没有 = 不在线；SQLite 的 online 列只作冷启动基线（首帧前的
+ *  瞬间保留存储值），否则残留行（如换过 hub 端口的历史 peer）会永远"在线"。 */
 function mergePeers(live: Record<string, Peer>, rosterLocal: Record<string, Peer>): Peer[] {
   const byId = new Map<string, Peer>()
-  for (const p of Object.values(rosterLocal)) byId.set(p.id, p)
+  for (const p of Object.values(rosterLocal)) {
+    byId.set(p.id, liveBaselineSeen ? { ...p, connected: false } : p)
+  }
   for (const p of Object.values(live)) byId.set(p.id, p)
   return [...byId.values()].sort((a, b) => {
     if (a.connected !== b.connected) return a.connected ? -1 : 1

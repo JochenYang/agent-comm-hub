@@ -219,7 +219,9 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
               )}
             </span>
             {/* 行操作：重命名 + 移除（仅 online；hover/focus 显示）。 */}
-            <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+            {/* 行操作：重命名 + 移除/忘掉（hover 或键盘 focus 时显形；用 opacity
+                而非 display:none，保证按钮始终可 Tab、可被辅助技术访问）。 */}
+            <span className="flex shrink-0 items-center gap-0.5 opacity-0 pointer-events-none transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
               <button
                 type="button"
                 onClick={(e) => {

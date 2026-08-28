@@ -124,7 +124,8 @@
     "hub_current_version": "当前版本",
     "hub_latest_version": "最新版本",
     "hub_outdated_hint": "有新版本可用",
-    "hub_up_to_date": "已是最新"
+    "hub_up_to_date": "已是最新",
+    "port": "默认 18764"
   },
   "logs": {
     "title": "Hub stdout/stderr",
