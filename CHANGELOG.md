@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.0 (2026-08-30)
+
+- **Remote mode (server deployment)**: `--auth-tokens <file>` turns on bearer
+  authentication — every MCP request must carry `Authorization: Bearer
+  <token>`, and each token maps to a fixed peer id + role (`agent` |
+  `manager`). Identity comes from the token, not the client-reported name, so
+  a team where everyone runs "kimi-code" gets one peer per person instead of
+  one shared mailbox (which leaked messages across users — verified in a
+  two-machine experiment). Managers may also be authorized via token role.
+  Loopback desktop usage is unchanged: without the flag nothing is required
+  and nothing changes.
+- New `server/` directory: token-table template, deployment recipes for
+  内网 (LAN/VPN) and 公网 VPS (Caddy TLS reverse proxy with SSE pass-through),
+  and agent-side MCP config examples with the Authorization header.
+- Test suite grows to 196 checks (91 smoke + 36 setup + 11 ops +
+  35 herdr control + 23 discovery).
+
 ## 0.6.0 (2026-08-28)
 
 - **Peer profiles + display aliases**: the hub now keeps identity metadata per

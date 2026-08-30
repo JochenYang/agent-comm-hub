@@ -1,0 +1,7 @@
+# 公网 VPS 部署：hub 只监听 127.0.0.1，TLS/域名由 Caddy 终结（自动签发证书）。
+# 反代必须关闭缓冲，SSE 推送才能实时到达。
+agent.example.com {
+	reverse_proxy 127.0.0.1:18764 {
+		flush_interval -1
+	}
+}

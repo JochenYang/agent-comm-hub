@@ -49,11 +49,12 @@ export function sanitizeAlias(alias: string): string {
 }
 
 /**
- * Auto-register a session using its client-reported name (or the `agent`
- * fallback). Same-name connections ATTACH to the same peer (one stable
- * identity per agent regardless of how many sessions it opens), so there are
- * no `-2`/`-3` suffixes for identical client names. No-op when the session
- * is already bound or explicitly unregistered. Returns the peer id.
+ * Auto-register a session. In remote auth mode the session's TOKEN decides
+ * the peer id (each token maps to one identity — two people running the same
+ * client stay two peers instead of sharing a mailbox); loopback mode keeps
+ * deriving the id from the client-reported name. Same-id connections ATTACH
+ * to the same peer (N:1, one stable identity per agent). No-op when the
+ * session is already bound or explicitly unregistered. Returns the peer id.
  */
 export function autoRegisterPeer(
   hub: AgentHub,
@@ -66,7 +67,8 @@ export function autoRegisterPeer(
   const bound = registry.peerFor(sessionId)
   if (bound !== undefined) return bound
   if (registry.isSuppressed(sessionId)) return undefined
-  const peerId = sanitizePeerId(clientName ?? 'agent')
+  const tokenPeer = registry.tokenFor(sessionId)?.peer
+  const peerId = tokenPeer ?? sanitizePeerId(clientName ?? 'agent')
   if (!hub.has(peerId)) {
     hub.register(peerId, {
       ...(clientName !== undefined ? { name: clientName } : {}),
@@ -187,10 +189,13 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     return herdr
   }
 
-  /** Manager gate for roster administration (rename others / kick). Like the
-   * loopback trust model itself this is an convention, not authentication:
-   * anyone on the machine may claim a manager id. */
-  const requireManager = (peer: string, action: string): void => {
+  /** Manager gate for roster administration (rename others / kick / read
+   * other peers' history). Two paths grant it: a token with role 'manager'
+   * (remote auth mode — authenticated), or membership of `managerPeers`
+   * (loopback convention). Without remote auth this stays a convention,
+   * not authentication. */
+  const requireManager = (peer: string, action: string, sessionId?: string): void => {
+    if (registry.tokenFor(sessionId)?.role === 'manager') return
     const managers = options.managerPeers ?? 'all'
     if (managers !== 'all' && !managers.has(peer)) {
       throw new Error(`peer '${peer}' is not a hub manager — ${action} requires manager rights`)
@@ -228,6 +233,13 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
           throw new Error(`reserved peer id: ${peerId} (it is the broadcast address)`)
         }
         const alias = args.alias === undefined ? undefined : sanitizeAlias(String(args.alias))
+        const tokenPeer = registry.tokenFor(sessionId)?.peer
+        if (tokenPeer !== undefined && peerId !== tokenPeer) {
+          // Remote auth: the token owns this session's identity — a self
+          // id-change would break the operator's token→peer mapping. Ask a
+          // manager (bridge_rename) instead.
+          throw new Error(`your identity is bound to your access token ('${tokenPeer}') — ask a hub manager to rename you`)
+        }
         if (hub.has(peerId) && registry.peerFor(sessionId) !== peerId) {
           throw new Error(`peer already registered by another connection: ${peerId}`)
         }
@@ -278,7 +290,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         const caller = registry.peerFor(sessionId)
         if (caller === undefined) throw new Error('not registered — call bridge_register(peerId) first')
         const target = String(args.peer)
-        requireManager(caller, `kicking '${target}'`)
+        requireManager(caller, `kicking '${target}'`, sessionId)
         if (!hub.has(target)) {
           return { ok: true, peerId: null, kicked: false }
         }
@@ -295,14 +307,14 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         peerId: optStr('New routing id for `peer` — a true rename that moves all state (manager only). Target must be a registered peer.'),
         peer: optStr('Whose name/id to change; default yourself. Changing another peer requires manager rights.'),
       }),
-      handler: wrap(true, async (args, peer) => {
+      handler: wrap(true, async (args, peer, sessionId) => {
         const hasAlias = args.alias !== undefined
         const hasPeerId = args.peerId !== undefined
         if (!hasAlias && !hasPeerId) {
           throw new Error('nothing to rename: pass alias and/or peerId')
         }
         let target = args.peer === undefined ? peer : String(args.peer)
-        if (target !== peer) requireManager(peer, `renaming '${target}'`)
+        if (target !== peer) requireManager(peer, `renaming '${target}'`, sessionId)
         let previousId: string | undefined
         if (hasPeerId) {
           if (args.peer === undefined) {
@@ -403,11 +415,11 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       name: 'bridge_history',
       description: 'Recent messages involving you (newest first). Use to refresh context after a reconnect. Reading ANOTHER peer\'s conversation — or `peer: "all"` for the unfiltered tail — requires manager rights (hub managerPeers).',
       inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; "all" = every peer; default: yourself. Other peers / "all" require manager rights.'), limit: int('How many messages to return (default 20).') }),
-      handler: wrap(true, async (args, peer) => {
+      handler: wrap(true, async (args, peer, sessionId) => {
         const limit = Math.min(args.limit === undefined ? 20 : Number(args.limit), 1000)
         const target = args.peer === undefined ? peer : String(args.peer)
         if (target !== peer) {
-          requireManager(peer, `reading ${target === BROADCAST ? 'the full history' : `peer '${target}' history`} requires manager rights`)
+          requireManager(peer, `reading ${target === BROADCAST ? 'the full history' : `peer '${target}' history`} requires manager rights`, sessionId)
         }
         const messages = target === BROADCAST
           ? hub.historyAll(limit)

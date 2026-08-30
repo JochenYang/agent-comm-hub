@@ -1,0 +1,7 @@
+{
+  "tokens": [
+    { "token": "CHANGE-ME-generate-32-chars-random-A1b2C3d4", "peer": "zhangsan", "role": "agent", "owner": "张三" },
+    { "token": "CHANGE-ME-generate-32-chars-random-E5f6G7h8", "peer": "lisi", "role": "agent", "owner": "李四" },
+    { "token": "CHANGE-ME-generate-32-chars-random-I9j0K1l2", "peer": "ops-admin", "role": "manager", "owner": "运维/管理台" }
+  ]
+}

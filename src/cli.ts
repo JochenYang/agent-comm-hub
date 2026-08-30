@@ -25,7 +25,7 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
   const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
-  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file'])
+  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file', '--auth-tokens'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
@@ -93,6 +93,10 @@ Hub options:
                              this JSON file so identities survive restarts
                              (default ~/.agent-comm-hub/roster.json; "off"
                              keeps everything in memory)
+  --auth-tokens <file>       REMOTE MODE: require "Authorization: Bearer <token>"
+                             on every MCP request; each token maps to a fixed
+                             peer id + role (agent|manager). See server/README.md
+                             for the token table format and deployment recipes.
 
 Setup options:
   --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
@@ -230,6 +234,7 @@ try {
       : args['--state-file'] === 'off'
         ? undefined
         : String(args['--state-file']),
+    authTokens: args['--auth-tokens'] === undefined ? undefined : String(args['--auth-tokens']),
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

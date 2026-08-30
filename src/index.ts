@@ -9,16 +9,18 @@
  * Zero runtime dependencies: the MCP server is hand-rolled over `node:http`.
  */
 
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { HerdrCtl } from './herdr-ctl.js'
 import { AgentHub, type HubOptions, type PeerProfile } from './hub.js'
 import { autoRegisterPeer, hubTools, livePeersFor, present, rosterFor } from './hub-tools.js'
 import { McpStreamableHttpServer, SessionRegistry } from './mcp-server.js'
+import { bearerFromHeaders, loadTokenFile, tokenTable, type TokenIdentity, type TokenTable } from './auth.js'
 import type { BridgeMessage } from './protocol.js'
 
 export { HerdrCtl, type HerdrAgent, type HerdrPane, type HerdrRead, type HerdrSettled, AGENT_STATUSES } from './herdr-ctl.js'
+export { loadTokenFile, tokenTable, type TokenIdentity, type TokenRole, type TokenTable } from './auth.js'
 export { AgentHub, type HubOptions, type PeerProfile, type PeerState, type HubStatus } from './hub.js'
 export { McpStreamableHttpServer, SessionRegistry, type McpTool } from './mcp-server.js'
 export { hubTools, present, autoRegisterPeer, sanitizePeerId, sanitizeAlias, type PresentedMessage } from './hub-tools.js'
@@ -28,7 +30,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.6.0'
+export const SERVER_VERSION = '0.7.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -75,6 +77,11 @@ export interface HubConfig {
    * to so identities survive hub restarts. Undefined (the DEFAULT_CONFIG) =
    * off — the CLI turns it on by default; tests stay hermetic. */
   stateFile?: string
+  /** REMOTE MODE: bearer-token table file (see src/auth.ts). When set, every
+   * MCP request must carry `Authorization: Bearer <token>`; the token maps
+   * to a fixed peer id + role, so two users running the same client stay
+   * two peers. Undefined keeps the loopback-only no-auth desktop model. */
+  authTokens?: string
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -215,6 +222,14 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     socketPath: resolved.herdrSocketPath,
     sendRequest: resolved.herdrSendRequest,
   })
+  // Remote auth: token file -> per-request bearer lookup. The transport
+  // authenticates EVERY request; initialize additionally binds the session
+  // to the token identity, which then decides auto-registration (hub-tools).
+  let auth: ((req: IncomingMessage) => TokenIdentity | undefined) | undefined
+  if (resolved.authTokens !== undefined) {
+    const table: TokenTable = tokenTable(loadTokenFile(resolved.authTokens))
+    auth = req => table.authenticate(bearerFromHeaders(req.headers))
+  }
   mcp = new McpStreamableHttpServer(
     hubTools(hub, registry, {
       defaultWaitMs: resolved.defaultWaitMs,
@@ -230,11 +245,15 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       // Eager auto-registration at MCP handshake: connecting = joining.
       try {
         const peer = autoRegisterPeer(hub, registry, sessionId, clientName, clientVersion)
-        if (peer !== undefined) log.info(`peer joined: ${peer}`)
+        if (peer !== undefined) {
+          const owner = registry.tokenFor(sessionId)?.owner
+          log.info(`peer joined: ${peer}${owner !== undefined ? ` (owner: ${owner})` : ''}`)
+        }
       } catch (error) {
         log.warn(`auto-register failed: ${(error as Error).message}`)
       }
     },
+    auth,
   )
   const server = createServer()
   mcp.attach(server, resolved.path)

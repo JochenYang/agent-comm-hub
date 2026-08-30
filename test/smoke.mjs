@@ -10,7 +10,7 @@
 
 import { startHub } from './entry.mjs'
 import { tmpdir } from 'node:os'
-import { readFileSync, rmSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 
 const PORT = 18998
 const BASE = `http://127.0.0.1:${PORT}/mcp`
@@ -49,9 +49,10 @@ function assertLosslessJson(value, path = 'root') {
   throw new Error(`non-JSON value of type ${typeof value} at ${path}`)
 }
 
-/** One simulated agent: an MCP session with rpc helpers and a result parser. */
-function makeClient(name, base = BASE) {
-  const headers = {}
+/** One simulated agent: an MCP session with rpc helpers and a result parser.
+ * `token` enables remote-auth mode (Authorization: Bearer). */
+function makeClient(name, base = BASE, token) {
+  const headers = token === undefined ? {} : { Authorization: `Bearer ${token}` }
   let id = 0
   return {
     name,
@@ -495,6 +496,57 @@ try {
     hubB.close()
   }
   rmSync(stateFile, { force: true })
+
+  console.log('== remote auth: bearer tokens bind identity ==')
+  // Token table: 张三/李四 both run a client named "kimi-code" (the R0 串台
+  // scenario); tokens map them to DISTINCT peers, the manager token rules.
+  const tokenFile = `${tmpdir()}/hub-auth-test-${Date.now()}.json`
+  writeFileSync(tokenFile, JSON.stringify({ tokens: [
+    { token: 'zs-token-0123456789abcdef', peer: 'zhangsan', role: 'agent', owner: '张三' },
+    { token: 'ls-token-0123456789abcdef', peer: 'lisi', role: 'agent', owner: '李四' },
+    { token: 'admin-token-0123456789ab', peer: 'ops-admin', role: 'manager', owner: '运维' },
+  ] }), 'utf8')
+  const hubAuth = startHub({ port: 19006, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000, authTokens: tokenFile }, { info: () => {}, warn: () => {} })
+  try {
+    const authBase = 'http://127.0.0.1:19006/mcp'
+    const noAuth = await fetch(authBase, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) })
+    check('request without token rejected 401', noAuth.status === 401, String(noAuth.status))
+    const badAuth = await fetch(authBase, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer wrong-token-0123456789' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) })
+    check('request with unknown token rejected 401', badAuth.status === 401, String(badAuth.status))
+    const sseNoAuth = await fetch(authBase, { headers: { Accept: 'text/event-stream' } })
+    check('SSE without token rejected 401', sseNoAuth.status === 401, String(sseNoAuth.status))
+
+    const zs = makeClient('kimi-code', authBase, 'zs-token-0123456789abcdef')
+    const ls = makeClient('kimi-code', authBase, 'ls-token-0123456789abcdef')
+    const boss = makeClient('ops-console', authBase, 'admin-token-0123456789ab')
+    await Promise.all([zs.init(), ls.init(), boss.init()])
+    const rosterA = await boss.call('bridge_peers')
+    const zsRow = rosterA.peers.find(p => p.id === 'zhangsan')
+    check('token identity overrides the client-reported name', zsRow?.clientName === 'kimi-code', JSON.stringify(rosterA))
+    check('same-name clients land on distinct token peers', rosterA.peers.some(p => p.id === 'lisi') && rosterA.peers.some(p => p.id === 'ops-admin'), JSON.stringify(rosterA))
+
+    // The R0 leak, closed: 张三's message must NOT reach 李四's mailbox.
+    await zs.call('bridge_chat', { to: 'zhangsan', message: '张三的交接任务' })
+    const lsDrain = await ls.call('bridge_poll')
+    check('no cross-user mailbox leak between same-name clients', lsDrain.messages.length === 0, JSON.stringify(lsDrain))
+    const zsSelf = await zs.call('bridge_poll')
+    check('token peer keeps its own mailbox', zsSelf.messages.length === 1 && zsSelf.messages[0].content === '张三的交接任务', JSON.stringify(zsSelf))
+
+    const hijack = await zs.callRaw('bridge_register', { peerId: 'impersonated' })
+    check('token-bound session cannot claim another id', hijack.error !== undefined && /bound to your access token/.test(hijack.error), JSON.stringify(hijack))
+
+    const renamed = await boss.call('bridge_rename', { peer: 'zhangsan', alias: '张三（kimi）' })
+    check('manager-role token renames another peer', renamed.ok === true && renamed.alias === '张三（kimi）', JSON.stringify(renamed))
+    const denied = await ls.callRaw('bridge_rename', { peer: 'zhangsan', alias: 'nope' })
+    check('agent-role token rename of another peer denied', denied.error !== undefined && /manager/.test(denied.error), JSON.stringify(denied))
+
+    await zs.call('bridge_chat', { to: 'all', message: 'team broadcast' })
+    const lsBc = await ls.call('bridge_wait', { timeoutMs: 2000 })
+    check('broadcast reaches token peers', lsBc.type === 'message' && lsBc.message.content === 'team broadcast', JSON.stringify(lsBc))
+  } finally {
+    hubAuth.close()
+    rmSync(tokenFile, { force: true })
+  }
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1

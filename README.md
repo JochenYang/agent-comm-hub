@@ -46,6 +46,7 @@ Zero runtime dependencies: the MCP streamable-http server is hand-rolled over `n
 - **Structured conversations**: `chat` / `task` / `notice` / `ack` message kinds, acks auto-routed back to the original sender, `to: "all"` broadcast.
 - **Hard control via herdr** (optional): when the [herdr](https://herdr.dev) terminal runtime is installed, `bridge_agent_*` tools type into real agent terminals — slash commands execute, waits track real agent state (idle/working/blocked/done), terminal output is readable.
 - **Zero dependencies, one process**: `npx agent-comm-hub` — no database, no daemon, no external services.
+- **Team server (remote mode)**: `--auth-tokens` puts the hub on a LAN/VPS with per-user bearer tokens — one peer per person even when everyone runs the same client, manager roles included. See [`server/README.md`](server/README.md).
 
 ## Quickstart
 
@@ -419,7 +420,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (181 checks: 80 smoke + 32 setup + 11 ops + 35 herdr + 23 discover)
+pnpm test             # test suite (196 checks: 91 smoke + 36 setup + 11 ops + 35 herdr + 23 discover)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
 ```

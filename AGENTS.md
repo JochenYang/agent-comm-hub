@@ -54,6 +54,7 @@ src/
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, idle GC (transport-agnostic)
 ├── mcp-server.ts   # SessionRegistry (sessions + peer bindings) + McpStreamableHttpServer
 ├── hub-tools.ts    # the 22 bridge tools, auto-registration, peerId/alias sanitizing, profiles, result presentation
+├── auth.ts         # remote-mode bearer-token table (load/validate/lookup)
 ├── index.ts        # startHub() programmatic API, DEFAULT_CONFIG, exports
 ├── cli.ts          # agent-comm-hub CLI (hub start / setup / discover / status / service / update)
 ├── setup.ts        # `setup`: registry-driven incremental sync of MCP entry +
@@ -67,6 +68,8 @@ src/
 agents/             # per-agent config templates + SKILL.md + install-all.ps1 +
                     #   registry.json (declarative agent support — the single
                     #   source of truth for setup/discover)
+server/             # remote-deployment assets: token-table template, LAN/VPS
+                    #   recipes, Caddy TLS example (see server/README.md)
 test/               # smoke.mjs (multi-peer), setup.mjs (installer),
                     #   ops.mjs (status + service), herdr.mjs (control),
                     #   discover.mjs (discovery engine)
@@ -123,12 +126,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 80/80 + 36/36 +
+  merging, the full `pnpm test` must stay green (verified: 91/91 + 36/36 +
   11/11 + 35/35 + 23/23 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (80 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (91 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, broadcast (no echo to sender), status/peers/history incl. the
@@ -141,7 +144,10 @@ pnpm pack             # build + npm pack (publishing artifact)
   rename (manager re-key: queued mail / ack / history continuity, old id
   unroutable, taken/reserved rejection; lossless self id-rename via
   bridge_register), history access gate (non-manager denied other-peer and
-  peer="all" reads), roster persistence (stateFile write + restore).
+  peer="all" reads), roster persistence (stateFile write + restore),
+  remote auth (401 without/unknown token, token identity overrides the
+  client name, same-name users land on distinct peers with no mailbox
+  leak, token-bound rename rejection, manager-role token ops).
 - `test/setup.mjs` (36 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
   idempotency, `remove` uninstall, DSH patch block insert/url-change/remove,

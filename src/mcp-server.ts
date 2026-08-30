@@ -15,6 +15,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
+import type { TokenIdentity } from './auth.js'
 
 /** One tool exposed to MCP clients. */
 export interface McpTool {
@@ -126,6 +127,22 @@ export class SessionRegistry {
   /** Sessions with a live SSE stream (server→client channel). */
   private readonly liveStreams = new Set<string>()
 
+  /** Session → token identity (remote auth mode only; see src/auth.ts).
+   * The TOKEN, not the client-reported name, decides the peer id, so two
+   * users running the same client get distinct peers. */
+  readonly tokenBindings = new Map<string, TokenIdentity>()
+
+  /** Bind a session to its token identity (at initialize / SSE open). */
+  bindToken(sessionId: string, identity: TokenIdentity): void {
+    this.tokenBindings.set(sessionId, identity)
+  }
+
+  /** Token identity bound to a session, if remote auth is in use. */
+  tokenFor(sessionId: string | undefined): TokenIdentity | undefined {
+    if (sessionId === undefined) return undefined
+    return this.tokenBindings.get(sessionId)
+  }
+
   /** Mark a session's SSE stream open (server→client channel alive). */
   markSseOpen(sessionId: string): void {
     this.liveStreams.add(sessionId)
@@ -199,6 +216,10 @@ export class McpStreamableHttpServer {
     private readonly log: (message: string) => void = () => {},
     /** Called right after a session initializes (eager auto-registration hook). */
     private readonly onInitialize: (sessionId: string, clientName: string | undefined, clientVersion: string | undefined) => void = () => {},
+    /** Remote auth (src/auth.ts): resolve the bearer token of a request to a
+     * token identity; undefined = unauthorized. When absent (loopback mode)
+     * no auth check happens — the default desktop trust model. */
+    private readonly authenticate?: (req: IncomingMessage) => TokenIdentity | undefined,
   ) {}
 
   /** Attach request handling for `path` (e.g. `/mcp`) to an http server. */
@@ -255,7 +276,15 @@ export class McpStreamableHttpServer {
   }
 
   private handleGet(req: IncomingMessage, res: ServerResponse): void {
+    // Remote auth: an SSE stream is as sensitive as any tool call.
+    if (this.authenticate !== undefined && this.authenticate(req) === undefined) {
+      res.writeHead(401, { ...corsHeaders(), 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ error: 'unauthorized: missing or invalid bearer token' }))
+      return
+    }
     const sessionId = this.registry.ensureSession(this.registry.sessionIdFor(req))
+    const identity = this.authenticate?.(req)
+    if (identity !== undefined) this.registry.bindToken(sessionId, identity)
     res.writeHead(200, {
       ...corsHeaders(),
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -272,7 +301,29 @@ export class McpStreamableHttpServer {
     })
   }
 
+  /** Reject a request without a valid token (remote auth mode). */
+  private unauthorized(res: ServerResponse, id: number | string | null, why: string): void {
+    res.writeHead(401, { ...corsHeaders(), 'Content-Type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32001, message: `unauthorized: ${why}` } }))
+  }
+
   private async handlePost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Remote auth: every request (initialize included) must present a valid
+    // bearer token; an established session must keep presenting ITS token.
+    let authIdentity: TokenIdentity | undefined
+    if (this.authenticate !== undefined) {
+      authIdentity = this.authenticate(req)
+      if (authIdentity === undefined) {
+        this.unauthorized(res, null, 'missing or invalid bearer token')
+        return
+      }
+      const existingSession = this.registry.sessionIdFor(req)
+      const bound = existingSession === undefined ? undefined : this.registry.tokenFor(existingSession)
+      if (bound !== undefined && (bound.peer !== authIdentity.peer || bound.role !== authIdentity.role)) {
+        this.unauthorized(res, null, 'token does not match this session')
+        return
+      }
+    }
     let body: Buffer
     try {
       body = await readBody(req)
@@ -301,7 +352,7 @@ export class McpStreamableHttpServer {
     }
 
     try {
-      const { result, extraHeaders } = await this.dispatch(message, sessionId)
+      const { result, extraHeaders } = await this.dispatch(message, sessionId, authIdentity)
       res.writeHead(200, {
         ...corsHeaders(),
         'Content-Type': 'application/json; charset=utf-8',
@@ -318,6 +369,7 @@ export class McpStreamableHttpServer {
   private async dispatch(
     message: JsonRpcRequest,
     sessionId: string | undefined,
+    authIdentity?: TokenIdentity,
   ): Promise<{ result: unknown; extraHeaders?: Record<string, string> }> {
     const method = message.method ?? ''
     switch (method) {
@@ -328,6 +380,11 @@ export class McpStreamableHttpServer {
         const clientVersion = typeof clientInfo?.version === 'string' && clientInfo.version !== '' ? clientInfo.version : undefined
         if (clientName !== undefined) {
           this.registry.noteClient(newSessionId, clientName, clientVersion)
+        }
+        // Remote auth: the token identity (not the client name) owns this
+        // session from now on; auto-registration resolves through it.
+        if (authIdentity !== undefined) {
+          this.registry.bindToken(newSessionId, authIdentity)
         }
         // Eager auto-registration: connecting the MCP is enough to join.
         this.onInitialize(newSessionId, clientName, clientVersion)
