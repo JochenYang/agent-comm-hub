@@ -1,24 +1,26 @@
-//! T-1.5 SQLite 持久化层（M2 T-2.6 接入）
+//! T-1.5 SQLite persistence layer (wired up in M2 T-2.6)
 //!
-//! 同步 rusqlite API，store: Arc<Store> 在 AppState 里持有，commands 直接同步调 CRUD
-//! （CRUD 单次 <1ms，spawn_blocking 不必要）。
+//! Synchronous rusqlite API; the store: Arc<Store> is held in AppState and commands call the
+//! CRUD operations synchronously (each CRUD is <1ms, so spawn_blocking isn't needed).
 //!
-//! Schema（SPEC §5.3）：
+//! Schema (SPEC §5.3):
 //! - config(key, value, updated_at)
-//! - peers(peer_id, last_seen, online, client_name, created_at) + v2 追加 alias, client_version
-//! - messages(id, from_peer, to_peer, kind, content, ref_id, ts, involved_me) + ts DESC 索引 + involved_me 索引
+//! - peers(peer_id, last_seen, online, client_name, created_at) + v2 adds alias, client_version
+//! - messages(id, from_peer, to_peer, kind, content, ref_id, ts, involved_me) + ts DESC index + involved_me index
 //! - unread(peer_id, count, last_read_ts)
-//! - schema_version(version) — 迁移日志（每版本一行；当前版本 = MAX(version)，
-//!   读取端不得裸 LIMIT 1 —— 无序读多行会随机取旧版本导致迁移重放）
+//! - schema_version(version) — migration log (one row per version; current version = MAX(version),
+//!   reads must not use a bare LIMIT 1 — unordered reads over multiple rows can pick an old
+//!   version at random and replay migrations)
 //!
-//! 设计要点：
-//! - 同步 rusqlite API（连接走 std::sync::Mutex 串行化）
-//! - WAL 模式 + synchronous=NORMAL（写性能与崩溃安全折中）
-//! - FK 启用（虽然当前 schema 没用 FK，但保持默认安全）
-//! - 单一 migrate()：v1 = 全部表；后续版本追加 if current < N 分支
+//! Design notes:
+//! - Synchronous rusqlite API (connection serialized via std::sync::Mutex)
+//! - WAL mode + synchronous=NORMAL (a trade-off between write performance and crash safety)
+//! - FK enabled (though the current schema uses no FKs, keeping the default is safe)
+//! - A single migrate(): v1 = all tables; later versions append if current < N branches
 
-// 此模块所有 pub fn / struct 都通过 `tauri::generate_handler!` 字符串派发到 invoke_handler,
-// Rust 的 dead_code lint 看不到宏展开 —— 顶层关掉,避免 M3 接 peer / message 写入时反复报 warning。
+// Every pub fn / struct in this module is dispatched to invoke_handler via the string-based
+// `tauri::generate_handler!`, which the dead_code lint can't see through — so it's switched off
+// at the crate top level to avoid repeated warnings while M3 wires peer / message writes.
 #![allow(dead_code)]
 
 use std::path::Path;
@@ -49,9 +51,9 @@ pub struct PeerRecord {
     pub last_seen: i64,
     pub online: bool,
     pub client_name: Option<String>,
-    /// hub bridge_peers 回传的 alias?（缺省 = 无/未知，upsert 时保留旧值）。
+    /// alias returned by hub bridge_peers? (absent = none/unknown, keep the old value on upsert).
     pub alias: Option<String>,
-    /// hub 回传的 clientVersion?（缺省保留旧值，理由同 alias）。
+    /// clientVersion returned by the hub? (kept from the old value when absent, same reason as alias).
     pub client_version: Option<String>,
     pub created_at: i64,
 }
@@ -82,8 +84,8 @@ pub struct ConfigRecord {
     pub updated_at: i64,
 }
 
-/// SQLite 存储（线程安全，单连接）。
-/// M2 在 start_hub 路径里 open + manage；commands 走 spawn_blocking 调 CRUD。
+/// SQLite store (thread-safe, single connection).
+/// M2 opens + manages it in the start_hub path; commands call CRUD via spawn_blocking.
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
@@ -113,9 +115,11 @@ impl Store {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);",
         )?;
-        // 当前版本 = MAX(version)：schema_version 是迁移日志（每版本一行），
-        // 不能假设单行 —— LIMIT 1 无序读取会随机取到旧版本导致迁移重放。
-        // MAX 恒返回一行（空表为 NULL），闭包里显式取 Option 而非 .optional() 包装。
+        // Current version = MAX(version): schema_version is a migration log (one row per version),
+        // so it must not be assumed to be a single row — a bare LIMIT 1 unordered read could pick
+        // an old version at random and replay migrations.
+        // MAX always yields one row (NULL on an empty table); the closure explicitly reads an
+        // Option rather than wrapping in .optional().
         let current: Option<i64> = tx.query_row(
             "SELECT MAX(version) FROM schema_version",
             [],
@@ -161,12 +165,12 @@ impl Store {
             )?;
         }
         if current < 2 {
-            // v2：peers 表加 alias / client_version 列（花名册管理：hub 的
-            // bridge_peers / peers_changed 现在回传 alias?/clientName?/clientVersion?）。
-            // SQLite 的 ALTER TABLE ADD COLUMN 没有 IF NOT EXISTS —— 幂等性由
-            // schema_version 单调推进保证（v1 全新建库也会顺序走到这里）。
-            // 版本行用 INSERT OR REPLACE（日志语义：每版本一行，读取取 MAX）。
-            // 注意不能用裸 INSERT：若未来版本重放（部分失败恢复）会撞唯一键。
+            // v2: add alias / client_version columns to the peers table (roster management: the hub's
+            // bridge_peers / peers_changed now return alias?/clientName?/clientVersion?).
+            // SQLite's ALTER TABLE ADD COLUMN has no IF NOT EXISTS — idempotence is guaranteed by
+            // monotonic schema_version advancement (a freshly created v1 database also walks here in order).
+            // Version rows use INSERT OR REPLACE (log semantics: one row per version, reads take MAX).
+            // Note: can't use a bare INSERT — a future replay (partial-failure recovery) would hit a unique-key collision.
             tx.execute_batch(
                 r#"
                 ALTER TABLE peers ADD COLUMN alias TEXT;
@@ -205,11 +209,11 @@ impl Store {
         Ok(())
     }
 
-    /// 显式设置/清除别名（bridge_rename 成功后的权威同步）。
+    /// Explicitly set/clear an alias (authoritative sync after a successful bridge_rename).
     ///
-    /// 走 upsert_peer 的 COALESCE 语义无法清除别名 —— 快照里 alias 缺省有二义
-    /// （真没别名 vs 旧版 hub 根本不回传），rename 结果是唯一权威来源：
-    /// `alias` 为 `Some("")` / `None` 都落 NULL。
+    /// Going through upsert_peer's COALESCE semantics can't clear an alias — an absent alias in a
+    /// snapshot is ambiguous (truly no alias vs. older hub versions not returning it at all), so the
+    /// rename result is the only authoritative source: both `Some("")` and `None` store NULL.
     pub fn set_peer_alias(&self, peer_id: &str, alias: Option<&str>) -> Result<()> {
         let conn = self.conn.lock()?;
         conn.execute(
@@ -277,6 +281,33 @@ impl Store {
              ORDER BY ts DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![peer_id, limit], |row| {
+            Ok(MessageRecord {
+                id: row.get(0)?,
+                from_peer: row.get(1)?,
+                to_peer: row.get(2)?,
+                kind: row.get(3)?,
+                content: row.get(4)?,
+                ref_id: row.get(5)?,
+                ts: row.get(6)?,
+                involved_me: row.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Tail of the full archive (no identity filter): used by the relay-stream view /history. SQLite
+    /// stores all traffic (persisted as a side effect of refresh), but list_messages_for_peer only
+    /// returns rows involving you — a private conversation between two other peers can't be
+    /// retrieved through it.
+    pub fn list_all_messages(&self, limit: i64) -> Result<Vec<MessageRecord>> {
+        let conn = self.conn.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, from_peer, to_peer, kind, content, ref_id, ts, involved_me
+             FROM messages
+             ORDER BY ts DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
             Ok(MessageRecord {
                 id: row.get(0)?,
                 from_peer: row.get(1)?,
@@ -463,8 +494,9 @@ mod tests {
         assert_eq!(peers[0].client_name.as_deref(), Some("client-x"));
     }
 
-    /// 快照缺省（None）不抹掉已知 alias / client_version —— 旧版 hub 根本不回传
-    /// 这些字段，COALESCE 语义保证本地花名册不被被动快照清空。
+    /// A snapshot that lacks a field (None) doesn't wipe known alias / client_version — older hub
+    /// versions don't return these fields at all, and the COALESCE semantics ensure the local
+    /// roster isn't cleared by a passive snapshot.
     #[test]
     fn upsert_peer_coalesce_keeps_alias_when_absent() {
         let store = fresh();
@@ -495,7 +527,8 @@ mod tests {
         assert_eq!(peers[0].client_version.as_deref(), Some("9.9"));
     }
 
-    /// set_peer_alias 是清除别名的唯一路径：None / 空串都落 NULL（rename 权威同步）。
+    /// set_peer_alias is the only path that clears an alias: both None and an empty string store NULL
+    /// (authoritative sync after rename).
     #[test]
     fn set_peer_alias_sets_and_clears() {
         let store = fresh();
@@ -518,8 +551,8 @@ mod tests {
         assert_eq!(store.list_peers().unwrap()[0].alias, None);
     }
 
-    /// v2 迁移对旧库生效：schema_version 回拨到 1 后重新 migrate，alias /
-    /// client_version 列补齐且存量行保留。
+    /// The v2 migration applies to old databases: after rolling schema_version back to 1, re-running
+    /// migrate adds the alias / client_version columns and keeps existing rows.
     #[test]
     fn migrate_v2_adds_alias_columns() {
         let store = fresh();
@@ -536,8 +569,8 @@ mod tests {
             .unwrap();
         {
             let conn = store.conn.lock().unwrap();
-            // 模拟 v1 旧库：版本日志只剩 1，且无 v2 列（bundled SQLite ≥ 3.35
-            // 支持 DROP COLUMN）。
+            // Simulate a legacy v1 database: the version log only has 1 and there are no v2 columns
+            // (bundled SQLite ≥ 3.35 supports DROP COLUMN).
             conn.execute("DELETE FROM schema_version", []).unwrap();
             conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])
                 .unwrap();
@@ -553,8 +586,9 @@ mod tests {
         assert_eq!(peers[0].client_version, None);
     }
 
-    /// 迁移幂等（app 重启 reopen 同库的场景）：migrate 重复调用不重放、不报错。
-    /// schema_version 是迁移日志（v1、v2 各一行），当前版本 = MAX(version)。
+    /// Migration is idempotent (the app-restart reopen scenario): calling migrate repeatedly doesn't
+    /// replay or error. schema_version is a migration log (one row for v1, one for v2);
+    /// current version = MAX(version).
     #[test]
     fn migrate_is_idempotent_on_reopen() {
         let store = fresh();
@@ -590,7 +624,7 @@ mod tests {
         }
         let msgs = store.list_messages_for_peer("alice", 10).unwrap();
         assert_eq!(msgs.len(), 5);
-        // ORDER BY ts DESC，第一条 ts=1004
+        // ORDER BY ts DESC, the first row is ts=1004
         assert_eq!(msgs[0].ts, 1004);
         assert_eq!(store.count_messages().unwrap(), 5);
     }
@@ -606,7 +640,7 @@ mod tests {
         assert_eq!(u.iter().find(|r| r.peer_id == "a").unwrap().count, 2);
         assert_eq!(u.iter().find(|r| r.peer_id == "b").unwrap().count, 1);
 
-        // 清空 a 后，list_unread（过滤 count > 0）应不再返回 a；b 仍在。
+        // After clearing a, list_unread (filters count > 0) should no longer return a; b remains.
         store.clear_unread("a", 1000).unwrap();
         let u = store.list_unread().unwrap();
         assert!(

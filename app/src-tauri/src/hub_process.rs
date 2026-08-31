@@ -1,14 +1,15 @@
-//! T-1.3 — Hub 子进程管理
+//! T-1.3 — Hub subprocess management
 //!
-//! 职责：
-//! 1. spawn `agent-comm-hub` 子进程（带 --host/--port/--path/... 全部 12 项参数）
-//! 2. 收集 stdout / stderr → 环形缓冲（最近 500 行）
-//! 3. 端口就绪探测：每 100ms 试一次 TCP connect，10s 超时
-//! 4. 进程死亡自动更新状态
-//! 5. stop / restart 用 pid + 系统调用杀进程树（Windows taskkill / Unix kill -TERM→-KILL）
+//! Responsibilities:
+//! 1. spawn the `agent-comm-hub` subprocess (with all 12 --host/--port/--path/... args)
+//! 2. collect stdout / stderr → ring buffer (recent 500 lines)
+//! 3. port-ready probe: try a TCP connect every 100ms, 10s timeout
+//! 4. auto-update state when the process dies
+//! 5. stop / restart kill the process tree by pid + OS calls (Windows taskkill / Unix kill -TERM→-KILL)
 //!
-//! 状态机：Stopped → Starting → Running ⇄ Stopping → Stopped，异常路径 Failed。
-//! 状态变化通过 Tauri event `hub:state` 推前端；前端响应（托盘变灰 / banner）。
+//! State machine: Stopped → Starting → Running ⇄ Stopping → Stopped, with Failed on the error path.
+//! State changes are pushed to the frontend via the Tauri event `hub:state`; the frontend responds
+//! (tray greys out / banner).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -23,7 +24,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
-/// 环形日志缓冲（最近 N 行）。
+/// Ring log buffer (recent N lines).
 #[derive(Debug)]
 pub struct HubLogRing {
     capacity: usize,
@@ -74,14 +75,14 @@ pub struct HubStatus {
     pub last_error: Option<String>,
 }
 
-/// Hub 启动参数（与 src/cli.ts 的可配置项 1:1 对齐）。
+/// Hub launch config (1:1 aligned with the configurable options in src/cli.ts).
 ///
-/// 注意：`to_argv()` 必须输出空格分隔的 `--flag value` 形式 —— 主仓 `src/cli.ts`
-/// 的 `parseArgs` 走 `argv[i]` + `argv[i+1]` 模式读取值,`--flag=value` 会被
-/// `throw new Error("unknown flag: --flag=value")` 拒掉（实测）。
+/// Note: `to_argv()` must emit space-separated `--flag value` form — the main repo's
+/// `src/cli.ts` `parseArgs` reads values via `argv[i]` + `argv[i+1]`, and `--flag=value` gets
+/// rejected by `throw new Error("unknown flag: --flag=value")` (verified).
 #[derive(Debug, Clone)]
 pub struct HubConfig {
-    #[allow(dead_code)] // 4-tier `which_hub_launch()` 用自己的 PATH 解析;此字段保留给调用方手动指定。
+    #[allow(dead_code)] // the 4-tier `which_hub_launch()` does its own PATH resolution; this field is kept for callers to specify manually.
     pub bin: PathBuf,
     pub host: String,
     pub port: u16,
@@ -148,25 +149,25 @@ impl Default for HubConfig {
     }
 }
 
-/// 定位 agent-comm-hub 启动方式。
-/// 返回 (program, optional_script_path) —— spawn 时如果 script 存在，args = [script, ...hub_args]。
-/// 优先级：
-///   1. 同目录 agent-comm-hub(.exe)（开发场景，hub cli 跟 app exe 放一起）
-///   2. PATH 上的 agent-comm-hub（npm 全局安装的 .cmd / .exe）
-///   3. node + <主仓根>/lib/cli.js（开发场景，hub 主仓就在 app 上一层）
-///   4. 退回 npx agent-comm-hub（保底；用户全局没装时 npx 会下载）
+/// Resolve how to launch agent-comm-hub.
+/// Returns (program, optional_script_path) — when spawning, if script exists, args = [script, ...hub_args].
+/// Priority:
+///   1. same-directory agent-comm-hub(.exe) (dev scenario: the hub cli sits next to the app exe)
+///   2. agent-comm-hub on PATH (the npm-global .cmd / .exe)
+///   3. node + <main repo root>/lib/cli.js (dev scenario: the hub main repo is one level above app)
+///   4. fall back to npx agent-comm-hub (last resort; npx downloads it when the user hasn't installed globally)
 pub(crate) fn which_hub_launch() -> (PathBuf, Option<PathBuf>) {
     let exe_name = if cfg!(windows) { "agent-comm-hub.exe" } else { "agent-comm-hub" };
 
-    // 1. 同目录
+    // 1. same directory
     if let Ok(exe) = std::env::current_exe() {
         let sibling = exe.with_file_name(exe_name);
         if sibling.exists() {
             return (sibling, None);
         }
-        // 3. node + 主仓 lib/cli.js（debug 构建时 <exe> 在 src-tauri/target/<profile>/ ，
-        //    向上 5 级到主仓根 D:/codes/agent-comm-hub/；release 构建层级可能不同，
-        //    所以"找不到 lib/cli.js 就 fallback 到 tier-2"，不要硬报错）。
+        // 3. node + main repo's lib/cli.js (in a debug build <exe> is at src-tauri/target/<profile>/
+        //    and going up 5 levels reaches the main repo root D:/codes/agent-comm-hub/; a release
+        //    build's layout may differ, so "lib/cli.js not found" falls back to tier-2 rather than erroring).
         if let Some(node) = find_in_path(if cfg!(windows) { "node.exe" } else { "node" }) {
             for pops in 1..=6 {
                 let mut p = exe.clone();
@@ -183,22 +184,22 @@ pub(crate) fn which_hub_launch() -> (PathBuf, Option<PathBuf>) {
         }
     }
 
-    // 2. PATH 上的 agent-comm-hub
+    // 2. agent-comm-hub on PATH
     if let Some(found) = find_in_path(exe_name) {
         return (found, None);
     }
 
-    // 4. 退回 npx
+    // 4. fall back to npx
     let npx_name = if cfg!(windows) { "npx.cmd" } else { "npx" };
     if let Some(npx) = find_in_path(npx_name) {
-        return (npx, None); // spawn 时把 "agent-comm-hub" 加到 args 开头
+        return (npx, None); // prepend "agent-comm-hub" to args at spawn time
     }
 
-    // 全部失败：返回裸名 + None，让 spawn 报错（错误信息会清楚）
+    // Everything failed: return the bare name + None and let spawn error out (clear error message)
     (PathBuf::from("agent-comm-hub"), None)
 }
 
-/// 手写 PATH 查找（避免加 which crate 依赖）。
+/// Hand-rolled PATH lookup (to avoid adding a which crate dependency).
 fn find_in_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for entry in std::env::split_paths(&path_var) {
@@ -206,7 +207,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
-        // Windows 上 .cmd / .bat 后缀
+        // Windows: .cmd / .bat suffixes
         #[cfg(windows)]
         {
             for ext in [".cmd", ".bat", ".exe"] {
@@ -215,7 +216,7 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
                 if with_ext.is_file() {
                     return Some(with_ext);
                 }
-                // 直接拼接后缀
+                // append the suffix directly
                 let mut full = entry.join(name);
                 full.push(ext);
                 if full.is_file() {
@@ -227,9 +228,9 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// 构造 hub CLI 的 tokio Command（含 which_hub_launch 的 4 种启动形态解析）。
-/// `extra_args` 追加在 program/script 之后 —— start() 传 hub 启动参数，
-/// service 命令（commands.rs service_install/uninstall）传 ["service", action]。
+/// Build the tokio Command for the hub CLI (handling any of the 4 launch forms from which_hub_launch).
+/// `extra_args` are appended after program/script — start() passes the hub launch args, and the
+/// service commands (commands.rs service_install/uninstall) pass ["service", action].
 pub(crate) fn hub_cli_command(extra_args: &[&str]) -> tokio::process::Command {
     let (program, script) = which_hub_launch();
     let mut cmd = Command::new(&program);
@@ -238,15 +239,17 @@ pub(crate) fn hub_cli_command(extra_args: &[&str]) -> tokio::process::Command {
     } else if program.file_name().and_then(|n| n.to_str())
         == Some(if cfg!(windows) { "npx.cmd" } else { "npx" })
     {
-        // npx -y：跳过 "Ok to proceed?" 交互确认 —— 安装版环境 stdin 是 null，
-        // 交互会永久卡住导致 hub 起不来（用户实测 MCP not initialized）。
+        // npx -y: skip the "Ok to proceed?" interactive confirmation — in an installed build stdin is
+        // null, so the interaction would block forever and the hub would never start (user hit
+        // MCP not initialized).
         cmd.arg("-y");
         cmd.arg("agent-comm-hub");
     }
     cmd.args(extra_args);
-    // 安装版用户实测：spawn .cmd / node / npx 都会弹控制台窗口（设置页闪终端、
-    // hub 常驻空白终端）。CREATE_NO_WINDOW 完全抑制；start() 另外叠加
-    // CREATE_NEW_PROCESS_GROUP（0x0200）用于 taskkill 杀进程树。
+    // Installed-build users reported: spawning .cmd / node / npx all pop a console window (the
+    // settings page flashes a terminal, the hub lingers in a blank terminal). CREATE_NO_WINDOW
+    // suppresses it entirely; start() additionally adds CREATE_NEW_PROCESS_GROUP (0x0200) so
+    // taskkill can kill the whole process tree.
     #[cfg(windows)]
     {
         cmd.creation_flags(0x0800_0000);
@@ -254,22 +257,23 @@ pub(crate) fn hub_cli_command(extra_args: &[&str]) -> tokio::process::Command {
     cmd
 }
 
-/// Hub 进程控制器。M1 提供 start / stop / restart / status / snapshot_logs。
-/// M2 在此基础上接入 sqlite_store 持久化；M3 加 herdr_bin 字段暴露设置面板。
+/// Hub process controller. M1 provides start / stop / restart / status / snapshot_logs.
+/// M2 adds sqlite_store persistence on top; M3 adds the herdr_bin field exposed in the settings panel.
 pub struct HubProcess {
-    /// 启动配置。用同步 RwLock 而非直接持有值：设置面板保存后可以在重启前
-    /// 原子替换（见 set_config），让"保存并重启"真正按新配置拉起 hub。
+    /// Launch config. Uses a sync RwLock instead of holding a plain value: after settings-panel
+    /// saves the config can be atomically replaced before a restart (see set_config), so
+    /// "save and restart" truly launches the hub with the new config.
     config: std::sync::RwLock<HubConfig>,
     log_ring: Arc<RwLock<HubLogRing>>,
     state: Arc<RwLock<(HubState, Option<String>)>>, // (state, last_error)
     pid: Arc<RwLock<Option<u32>>>,
     started_at: Arc<RwLock<Option<u64>>>,
-    /// 由 `attach_app` 在 Tauri setup 阶段注入；用于 emit `hub:state` 事件。
+    /// Injected by `attach_app` during Tauri setup; used to emit the `hub:state` event.
     app_handle: Arc<RwLock<Option<AppHandle>>>,
-    /// 由 setup 注入；每次 emit_state 时同步调用，传入当前 HubState。
-    /// 用 Option<RwLock<...>> + 闭包同步到 tray 图标。
+    /// Injected by setup; called on every emit_state, syncs a closure to the tray icon.
+    /// Uses Option<RwLock<...>> to carry a closure.
     tray_setter: Arc<RwLock<Option<Box<dyn Fn(HubState) + Send + Sync>>>>,
-    /// external 复用模式下，探测到外部 hub 消失后是否已自动重启过（防循环）。
+    /// Under external-reuse mode, whether we've already auto-restarted after detecting the external hub went away (guards against loops).
     auto_restarted: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -287,17 +291,17 @@ impl HubProcess {
         })
     }
 
-    /// 在 Tauri setup 阶段调用一次；idempotent。
+    /// Called once during Tauri setup; idempotent.
     pub async fn attach_app(self: &Arc<Self>, app: AppHandle) {
         *self.app_handle.write().await = Some(app);
     }
 
-    /// 取出 AppHandle 用于 emit 事件；Tauri setup 未完成时返回 None。
+    /// Fetch the AppHandle for emitting events; returns None before Tauri setup completes.
     pub async fn app_handle(&self) -> Option<AppHandle> {
         self.app_handle.read().await.clone()
     }
 
-    /// 注入 tray setter：emit_state 时同步调，用于切换 tray 图标。
+    /// Inject a tray setter: called on emit_state to switch the tray icon.
     pub async fn attach_tray_setter<F>(self: &Arc<Self>, setter: F)
     where
         F: Fn(HubState) + Send + Sync + 'static,
@@ -305,12 +309,12 @@ impl HubProcess {
         *self.tray_setter.write().await = Some(Box::new(setter));
     }
 
-    #[allow(dead_code)] // M2 T-2.5 配置面板读取
+    #[allow(dead_code)] // read by the M2 T-2.5 config panel
     pub fn config(&self) -> HubConfig {
         self.config.read().expect("config lock").clone()
     }
 
-    /// 替换启动配置（"保存并重启"前调用）；对运行中的子进程无影响。
+    /// Replace the launch config (called before "save and restart"); has no effect on a running subprocess.
     pub fn set_config(&self, config: HubConfig) {
         *self.config.write().expect("config lock") = config;
     }
@@ -337,7 +341,7 @@ impl HubProcess {
         self.log_ring.read().await.snapshot()
     }
 
-    /// 启动 hub 子进程；端口就绪后置 Running；任何失败置 Failed 并清理。
+    /// Start the hub subprocess; set Running once the port is ready; any failure sets Failed and cleans up.
     pub async fn start(self: &Arc<Self>) -> Result<(), String> {
         {
             let (state, _) = *self.state.read().await;
@@ -351,9 +355,10 @@ impl HubProcess {
         }
         self.emit_state().await;
 
-        // 端口已被占用：外部 hub（或另一个 app 实例）已在跑 —— 不 spawn 重复进程，
-        // 直接复用（SPEC 关键数据流："检查端口是否已在响应，是则跳过 spawn"）。
-        // 只探测一次（300ms 预算），避免把"上次启动未完成"误判为已占用。
+        // The port is already taken: an external hub (or another app instance) is running — don't spawn
+        // a duplicate with the same process, reuse it directly (SPEC key data flow: "check whether
+        // the port is already responding, and if so skip spawning").
+        // Probe only once (300ms budget) to avoid mistaking an "unfinished previous start" for occupied.
         let cfg = self.config.read().expect("config lock").clone();
         if wait_for_port_ready(&cfg.host, cfg.port, Duration::from_millis(300)).await
         {
@@ -372,9 +377,10 @@ impl HubProcess {
             }
             self.emit_state().await;
 
-            // 外部 hub 存活探测：每 5s TCP connect 一次，失败说明外部 hub 已退出
-            // （可能被用户手动杀掉 / 持有方关闭）。此时先自动重启一次（spawn 自己
-            // 的 hub，用户无感恢复），失败才置 Stopped；auto_restarted 原子位防循环。
+            // External hub liveness probe: a TCP connect every 5s; on failure the external hub has exited
+            // (possibly killed manually / closed by its owner). Auto-restart once at that point (spawn
+            // our own hub for a seamless recovery) before falling back to Stopped; the auto_restarted
+            // atomic bit guards against loops.
             let host = cfg.host.clone();
             let port = cfg.port;
             let state_ref = self.state.clone();
@@ -394,13 +400,13 @@ impl HubProcess {
                         line: "external hub went away — attempting to spawn our own".into(),
                         ts: now_ms(),
                     });
-                    // 先拉回 Stopped 再自动重启：start() 会拒绝 Running/Starting 状态
-                    // （用户实测 "auto-restart failed: hub is already in Running state"）。
+                    // Pull it back to Stopped before auto-restarting: start() rejects the Running/Starting states
+                    // (user hit "auto-restart failed: hub is already in Running state").
                     *started_ref.write().await = None;
                     *state_ref.write().await = (HubState::Stopped, None);
                     if !auto_restarted.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        // start() 的 future 不满足 tokio::spawn 的 Send 约束，改用
-                        // std 线程 + Runtime::block_on（block_on 不要求 Send）。
+                        // start()'s future doesn't satisfy tokio::spawn's Send bound, so use a std thread +
+                        // Runtime::block_on (block_on doesn't require Send).
                         let handle = tokio::runtime::Handle::current();
                         let hub = hub_self.clone();
                         std::thread::spawn(move || match handle.block_on(hub.start()) {
@@ -412,10 +418,10 @@ impl HubProcess {
                                 ring.blocking_write().push(LogLine { stream: "stdout", line: text, ts });
                             }
                         });
-                        // 等 2s 让 start() 完成端口探测/spawn，再判断最终状态
+                        // wait 2s for start() to finish the port probe/spawn, then judge the final state
                         tokio::time::sleep(Duration::from_secs(2)).await;
                         if matches!(*state_ref.read().await, (HubState::Running, _)) {
-                            break; // 自己的 hub 起来了（child-wait 管生命周期）
+                            break; // our own hub is up (child-wait owns the lifecycle)
                         }
                     }
                     log_ring.write().await.push(LogLine {
@@ -432,17 +438,17 @@ impl HubProcess {
             return Ok(());
         }
 
-        // spawn 用快照：config 可能在 start 期间被 set_config 替换（重启前应用
-        // 保存的设置），本这次启动保持一次读取的一致性。
+        // Snapshots for spawn: config could be replaced by set_config during start (applying saved
+        // settings before a restart); this launch keeps internally consistent with one read.
         let argv = self.config.read().expect("config lock").to_argv();
         let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let mut cmd = hub_cli_command(&arg_refs);
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
-        // Windows：CREATE_NEW_PROCESS_GROUP（0x0200，便于 stop 时 taskkill /T 杀整树）
-        // | CREATE_NO_WINDOW（0x08000000，hub_cli_command 已设，这里保持叠加不清掉）。
-        // tokio::process::Command 自带 creation_flags（无需 std::os::windows::process::CommandExt）。
+        // Windows: CREATE_NEW_PROCESS_GROUP (0x0200, so stop can taskkill /T the whole tree)
+        // | CREATE_NO_WINDOW (0x08000000, already set in hub_cli_command; kept stacked here so it isn't cleared).
+        // tokio::process::Command has its own creation_flags (no std::os::windows::process::CommandExt needed).
         #[cfg(windows)]
         {
             cmd.creation_flags(0x0000_0200 | 0x0800_0000);
@@ -457,7 +463,7 @@ impl HubProcess {
         let pid = child.id();
         *self.pid.write().await = pid;
 
-        // stdout / stderr → log ring（M1 占位：tasukete，T-1.4 再加过滤）
+        // stdout / stderr → log ring (M1 placeholder: tasukete, T-1.4 adds filtering)
         if let Some(stdout) = child.stdout.take() {
             let ring = self.log_ring.clone();
             tokio::spawn(async move {
@@ -485,12 +491,12 @@ impl HubProcess {
             });
         }
 
-        // 端口就绪探测（10s 预算，每 100ms 一次）
+        // Port-ready probe (10s budget, once every 100ms)
         let url = format!("http://{}:{}{}", cfg.host, cfg.port, cfg.path);
         let ready = wait_for_port_ready(&cfg.host, cfg.port, Duration::from_secs(10)).await;
 
         if !ready {
-            // 探测失败：杀掉 spawn 出来的子进程
+            // Probe failed: kill the spawned subprocess
             let _ = child.kill().await;
             let _ = child.wait().await;
             *self.pid.write().await = None;
@@ -503,11 +509,11 @@ impl HubProcess {
             let mut s = self.state.write().await;
             *s = (HubState::Running, None);
         }
-        // 自己的 hub 真实起来了：重置自动重启位（下次外部场景仍可自动恢复）
+        // Our own hub genuinely came up: reset the auto-restart bit (the next external scenario can still auto-recover)
         self.auto_restarted.store(false, std::sync::atomic::Ordering::SeqCst);
         self.emit_state().await;
 
-        // 异步等子进程退出，自动恢复 Stopped（外部不再持 child handle）
+        // Wait asynchronously for the subprocess to exit, auto-restoring Stopped (no external side holds the child handle)
         let state_ref = self.state.clone();
         let pid_ref = self.pid.clone();
         let started_ref = self.started_at.clone();
@@ -534,13 +540,13 @@ impl HubProcess {
         Ok(())
     }
 
-    /// 用 pid 杀进程树（Windows taskkill /F /T，Unix SIGTERM → 500ms → SIGKILL）。
+    /// Kill the process tree by pid (Windows taskkill /F /T, Unix SIGTERM → 500ms → SIGKILL).
     pub async fn stop(&self) -> Result<(), String> {
         let pid = match *self.pid.read().await {
             Some(p) => p,
             None => {
-                // 区分"外部 hub 复用模式"（Running 但 pid=None）与"真·未在运行"，
-                // 给前端可读的错误而不是误导性的"hub 未在运行"。
+                // Distinguish "external hub reuse mode" (Running but pid=None) from "genuinely not running",
+                // giving the frontend a readable error rather than a misleading "hub is not running".
                 if matches!(self.state.read().await.0, HubState::Running) {
                     return Err(
                         "hub is managed by an external process (not spawned by this app); stop the external hub process directly"
@@ -598,8 +604,8 @@ async fn wait_for_port_ready(host: &str, port: u16, timeout: Duration) -> bool {
     false
 }
 
-/// 单次 TCP 可达性探测（2s 内 connect 成功即 true）。tokio connect 可能挂很久，
-/// 所以包一层 timeout。
+/// Single TCP reachability probe (connect succeeding within 2s → true). tokio connect can block
+/// for a long time, so wrap it in a timeout.
 async fn tcp_reachable(host: &str, port: u16) -> bool {
     tokio::time::timeout(
         Duration::from_secs(2),
@@ -621,14 +627,14 @@ async fn kill_process_tree(pid: u32) -> Result<(), String> {
     }
     #[cfg(unix)]
     {
-        // 先 SIGTERM 让 hub 优雅退出
+        // First SIGTERM for a graceful hub exit
         let _ = Command::new("kill")
             .arg("-TERM")
             .arg(pid.to_string())
             .output()
             .await;
         sleep(Duration::from_millis(500)).await;
-        // 兜底 SIGKILL
+        // fall back to SIGKILL
         let _ = Command::new("kill")
             .arg("-KILL")
             .arg(pid.to_string())
@@ -667,7 +673,7 @@ mod tests {
         };
         let argv = cfg.to_argv();
         let joined = argv.join(" ");
-        // 空格分隔形式（与主仓 src/cli.ts 的 parseArgs 期望对齐；不能用 --flag=value）。
+        // Space-separated form (aligned with what the main repo's src/cli.ts parseArgs expects; --flag=value must not be used).
         assert!(joined.contains("--host 127.0.0.1"));
         assert!(joined.contains("--port 18764"));
         assert!(joined.contains("--path /mcp"));

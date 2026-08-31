@@ -1,18 +1,18 @@
-//! T-2.8 — herdr control adapter (Rust 版，对齐 src/herdr-ctl.ts 设计)
+//! T-2.8 — herdr control adapter (Rust version, aligned with the src/herdr-ctl.ts design)
 //!
-//! 职责：与本地 herdr 服务通信（通过 herdr CLI + JSON envelope）。
-//! 11 个工具对应 hub 的 bridge_agent_* 和 bridge_pane_*。
+//! Responsibilities: communicate with the local herdr service (via the herdr CLI + JSON envelope).
+//! The 11 tools map to the hub's bridge_agent_* and bridge_pane_* tools.
 //!
-//! 设计要点（与主仓一致）：
-//! - execFile herdr CLI（args 透传，无 shell），结果解析 `{id, result}` 或 `{id, error}` envelope
-//! - 默认 herdr 二进制走 PATH，可用 `--herdr-bin` 指定
-//! - 默认超时 30s，可按调用覆盖
-//! - M2 简化版：不实现 socket API 直连（herdr CLI 已经覆盖主路径），不实现 smart channel fallback
-//!   （frontend 一次性调单个工具，避免双通道决策）
+//! Design points (consistent with the host repo):
+//! - execFile the herdr CLI (args passed through verbatim, no shell), parse the `{id, result}` / `{id, error}` envelope
+//! - the herdr binary defaults to PATH; can be overridden with `--herdr-bin`
+//! - default timeout 30s, overridable per call
+//! - M2 simplified version: no direct socket API (`herdr CLI` already covers the main path),
+//!   no smart channel fallback (the frontend calls a single tool at a time to avoid dual-channel decisions)
 //!
-//! M2 前端用法：每个 herdr tool 一个 tauri command；UI 调用具体工具。
+//! M2 frontend usage: one tauri command per herdr tool; the UI calls the concrete tool.
 
-#![allow(dead_code)] // M2 T-2.9 接入后移除
+#![allow(dead_code)] // removed once wired up in M2 T-2.9
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -103,7 +103,7 @@ pub struct HerdrSettled {
     pub waited_ms: Option<u64>,
 }
 
-/// herdr CLI 调用器。启动时实例化一次，全局共享。
+/// herdr CLI caller. Instantiated once at startup and shared globally.
 pub struct HerdrCtl {
     bin: PathBuf,
     default_timeout: Duration,
@@ -119,13 +119,14 @@ impl HerdrCtl {
         self
     }
 
-    /// 检查 herdr 是否可用（PATH + 版本探测）。herdr 未安装时返回 false 而非抛错。
+    /// Check whether herdr is available (PATH + version probe). Returns false instead of an
+    /// error when herdr is not installed.
     pub async fn is_available(&self) -> bool {
         let result = self.run_raw(&["--version"], Duration::from_secs(2)).await;
         result.is_ok()
     }
 
-    // ---- agent-level (走 herdr agent <sub>) ----
+    // ---- agent-level (route through herdr agent <sub>) ----
 
     /// `herdr agent list`
     pub async fn agent_list(&self) -> Result<Vec<HerdrAgent>> {
@@ -227,7 +228,7 @@ impl HerdrCtl {
         Ok(parse_settle(&v, target))
     }
 
-    // ---- pane-level (走 herdr pane <sub>) ----
+    // ---- pane-level (route through herdr pane <sub>) ----
 
     /// `herdr pane list`
     pub async fn pane_list(&self) -> Result<Vec<HerdrPane>> {
@@ -271,7 +272,8 @@ impl HerdrCtl {
     }
 
     /// `herdr pane wait-for-output <target> --match type=value [--timeout MS]`
-    /// 返回 Ok(None) 表示超时未匹配（herdr CLI 把 timeout 当 error envelope；本实现视超时为非错）。
+    /// Return Ok(None) when the timeout elapsed without a match (the herdr CLI treats timeout as
+    /// an error envelope; this implementation regards a timeout as a non-error).
     pub async fn pane_wait_for_output(
         &self,
         target: &str,
@@ -310,9 +312,9 @@ impl HerdrCtl {
         }
     }
 
-    // ---- 内部：跑 herdr CLI 并解析 envelope ----
+    // ---- internal: run the herdr CLI and parse the envelope ----
 
-    /// 跑 herdr CLI 拿 stdout（任意字符串）。
+    /// Run the herdr CLI and capture stdout (arbitrary string).
     async fn run_raw(&self, args: &[&str], budget: Duration) -> Result<String> {
         let mut cmd = Command::new(&self.bin);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
@@ -328,7 +330,7 @@ impl HerdrCtl {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// 跑 herdr CLI 并解析 JSON envelope `{id, result}` 或 `{id, error}`。
+    /// Run the herdr CLI and parse the JSON envelope `{id, result}` or `{id, error}`.
     async fn run_json(&self, args: &[&str], budget: Duration) -> Result<serde_json::Value> {
         let raw = self.run_raw(args, budget).await?;
         let v: serde_json::Value = serde_json::from_str(&raw)
@@ -342,16 +344,16 @@ impl HerdrCtl {
     }
 }
 
-/// 从 herdr agent prompt/wait 的 JSON 响应中解析 settle。
+/// Parse settle from the JSON response of `herdr agent prompt` / `wait`.
 fn parse_settle(v: &serde_json::Value, pane_id: &str) -> Option<HerdrSettled> {
-    // herdr 返回 {"settled": {paneId, status, waitedMs}} 或 null
+    // herdr returns {"settled": {paneId, status, waitedMs}} or null
     if let Some(settled) = v.get("settled") {
         if settled.is_null() {
             return None;
         }
         return serde_json::from_value(settled.clone()).ok();
     }
-    // fallback：直接读 status
+    // fallback: read status directly
     if let Some(status) = v.get("status").and_then(|s| s.as_str()) {
         return Some(HerdrSettled {
             pane_id: pane_id.to_string(),
