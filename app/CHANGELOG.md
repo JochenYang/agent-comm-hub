@@ -5,6 +5,21 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-09-01
+
+### Added
+
+- **Bilingual zh/en interface** with a top-right language toggle — browser
+  language auto-selects by default, and the choice is remembered in
+  `localStorage`.
+- **Realtime relay stream view**: watch the hub's live SSE relay stream, and
+  pull the full message history from the archive.
+- Peer rows can be removed/deleted (with confirmation) to drop stale entries.
+
+### Changed
+
+- Remaining source comments translated to English for consistency.
+
 ## [1.1.0] — 2026-08-28
 
 ### Fixed
