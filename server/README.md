@@ -18,25 +18,37 @@ token / 桌面 GUI）统一改名区分、交接任务、全员广播。
 安全底线：**没有 token 表就不要开 `--host 0.0.0.0`**。hub 无 token 模式是
 "仅本机"信任模型，对局域网/公网等于不设防（任何人可连入、冒充 manager）。
 
-## 1. 生成 token 表
+## 1. 签发 token（`agent-comm-hub auth`）
+
+一条命令生成随机 token、写入表并**打印一次**（表文件是明文凭证库，注意
+`chmod 600`、仅运维账号可读）：
 
 ```bash
-cp tokens.example.json tokens.json
-# 每枚 token 生成 32+ 位随机串（Node ≥22 自带，无需依赖）：
-node -e "console.log(crypto.randomBytes(24).toString('base64url'))"
+agent-comm-hub auth add zhangsan --owner 张三                     # 普通成员
+agent-comm-hub auth add lisi --role manager --owner 李四          # 管理员
+agent-comm-hub auth add wangwu --token <手动指定随机串>            # 自带 token
+agent-comm-hub auth list --reveal                                 # 查看（默认打码）
+agent-comm-hub auth remove zhangsan                               # 吊销
+agent-comm-hub auth gen                                           # 只生成一枚随机串
 ```
 
-编辑 `tokens.json`：一人一条 `{ token, peer, role, owner? }`：
-
-- `peer`：路由 id（`[A-Za-z0-9._:-]{1,64}`），**token 与 peer 一一绑定**——
-  这就是"多人同叫 kimi-code 也能区分"的机制：张三/李四的 token 分别映射到
-  `zhangsan` / `lisi`，同名 client 各得各的信箱。
+- token：24 字节随机数 base64url（32 字符），`auth add` 自动生成；`--token`
+  可自带。也可在管理台（HTTPS）的“成员与令牌”面板里 签发/吊销，免去登录
+  服务器敲命令。
+- **`--allow-join`（可选，内网/局域网推荐；公网务必关闭）**：允许无 token
+  的 agent 直接加入。每个匿名接入生成唯一的 `join-<ip>` peer id + 记录来源
+  IP（两次同机/同名 kimi-code 是不同 id，互不串台、互不可读），管理台出现
+  “待认领”视图：看 IP 改名为张三(kimi)、或给他签发正式 token 转正。默认关闭。
+- `peer`：路由 id，**token 与 peer 一一绑定**——这就是"多人同叫 kimi-code
+  也能区分"的机制：张三/李四的 token 分别映射到 `zhangsan` / `lisi`，同名
+  client 各得各的信箱。
 - `role`：`agent`（普通成员）或 `manager`（可改名/踢人/读全量历史；管理台
   或管理员本人用）。
 - `owner`：可选展示标签（花名册/日志里标注"这是谁的 agent"）。
-
-加载即校验：格式错误、token/peer 重复、peer 非法都会**启动失败**（fail-closed，
-不会带病上线）。改表后重启 hub 生效。
+- **热更新**：hub 运行中改表约 2 秒生效，无需重启；文件缺失/非法会被启动
+  与重载双重校验拒绝（fail-closed）。
+- 默认表路径 `~/.agent-comm-hub/tokens.json`，用 `--file` 指向别的位置时
+  记得让 `--auth-tokens` 也指同一个文件。
 
 ## 2. 启动
 
@@ -74,7 +86,10 @@ MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorizat
 
 ## 4. 管理台
 
-管理台（网页版规划中）当前可用两种等价方式：
+网页版管理台已内置：`/admin`（与 MCP 同一端口，需带 manager token 访问，本机可
+免 token）。面板提供成员与令牌管理（签发/吊销/查看，与 CLI `auth` 等价）、
+花名册（每成员 client 名/版本/来源 IP，可改名/踢人/认领 `join-*` 匿名身份）、
+群组面板与事件日志。此外仍支持：
 
 - **桌面 GUI**：以 `agent-hub-cli` 连入（本机 hub 场景）；远程场景下让它指向
   服务器地址并携带 manager token 即可（连接设置里可配 header——1.1.x 起）。
@@ -84,8 +99,9 @@ MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorizat
 ## 5. 已知边界（诚实清单）
 
 - token 走 HTTP header：个别极简 MCP 客户端若不支持自定义 header，接不进远程
-  模式（本地模式不受影响）；R0 需实测各家支持度。
-- token 表改动需重启 hub 生效（热更新在 roadmap）。
-- hub 进程内消息/花名册仍在内存（roster.json 已落档案）；完整持久化（消息
-  历史、离线信箱落 SQLite）是下一个里程碑。
-- 群聊：`to: "all"` 全员广播已可用；真频道（部分成员群）在 roadmap。
+  模式（本地模式不受影响）；需要按各家 agent 实测支持度。
+- 消息历史/离线信箱/花名册/群组持久化到 SQLite（`--db`，CLI 默认开启）；
+  0.6 的 roster.json 在首启时一次性迁移后仅作镜像。
+- 群聊：全员广播用 `to: "all"`；部分成员群用 `bridge_group_*`。群成员在创建
+  时指定，之后可随时用 `bridge_group_add_member` / `bridge_group_remove_member`
+  增删（创建者或 manager 可操作；创建者本人不能被移出）。

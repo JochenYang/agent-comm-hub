@@ -115,7 +115,7 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs → 185 checks (80+36+11+35+23)
+                      #   + test/discover.mjs → 240 checks (135+36+11+35+23)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -126,12 +126,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 91/91 + 36/36 +
+  merging, the full `pnpm test` must stay green (verified: 124/124 + 36/36 +
   11/11 + 35/35 + 23/23 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (91 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (124 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, broadcast (no echo to sender), status/peers/history incl. the

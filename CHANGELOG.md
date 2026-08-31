@@ -14,6 +14,21 @@
 - New `server/` directory: token-table template, deployment recipes for
   内网 (LAN/VPN) and 公网 VPS (Caddy TLS reverse proxy with SSE pass-through),
   and agent-side MCP config examples with the Authorization header.
+- **`--allow-join` (LAN/VPN onboarding)**: agents without a token may join;
+  each walk-in gets a SESSION-UNIQUE temporary peer id (`join-<name>-<hex>`,
+  never mergeable with another walk-in — the same-name shared-mailbox leak
+  cannot recur) plus its source IP, shown in the roster. The admin renames
+  (认领) them or issues a token to 转正. Keep OFF on the public internet.
+- **Token management in the web admin**: `/admin/api/tokens` (manager-gated)
+  lets the operator issue/revoke/mask tokens from the page — no SSH needed;
+  freshly issued tokens authenticate immediately (in-process reload, no
+  2s watcher wait). `agent-comm-hub auth` remains the CLI equivalent.
+- Test suite grows to 240 checks (135 smoke + 36 setup + 11 ops +
+  35 herdr control + 23 discovery).
+- **Group membership is now dynamic**: `bridge_group_add_member` /
+  `bridge_group_remove_member` let the group creator or a manager pull peers
+  in and kick them out after a channel exists (creator cannot be removed);
+  membership edits persist to SQLite and survive restarts.
 - Test suite grows to 196 checks (91 smoke + 36 setup + 11 ops +
   35 herdr control + 23 discovery).
 
