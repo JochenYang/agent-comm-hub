@@ -1,8 +1,8 @@
-// i18n: 中文 (zh-CN) 默认, 英文 (en-US) 备选;
-// 通过 localStorage 'lang' 持久化用户的语言选择 (默认 zh-CN);
-// 后端错误信息一律给 en (跟 stderr 一致), 不走前端 i18n。
+// i18n: Chinese (zh-CN) default, English (en-US) fallback;
+// persists the user's language choice via localStorage 'lang' (default zh-CN);
+// backend error messages are always English (matching stderr), not routed through frontend i18n.
 //
-// 用法:
+// Usage:
 //   import { useTranslation } from '@/i18n'
 //   const { t, lang, setLang } = useTranslation()
 //   <span>{t('common.peers')}</span>
@@ -48,14 +48,14 @@ export function initI18n(): void {
       resources,
       lng: detectInitialLang(),
       fallbackLng: DEFAULT_LANG,
-      interpolation: { escapeValue: false }, // React 已经 escape
+      interpolation: { escapeValue: false }, // React already escapes
       returnNull: false
     })
 }
 
 /**
- * 包装 react-i18next 的 useTranslation,附带 lang / setLang 助手。
- * 组件里 setLang 会立刻写 localStorage + 切 i18next 语言 → 触发重渲染。
+ * Wraps react-i18next's useTranslation with lang / setLang helpers.
+ * setLang in a component immediately writes localStorage + switches the i18next language → triggers re-render.
  */
 export function useTranslation(): {
   t: (key: string, options?: Record<string, unknown>) => string

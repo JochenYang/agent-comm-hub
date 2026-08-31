@@ -1,13 +1,14 @@
-// Markdown 渲染：react-markdown + remark-gfm (GFM 表格 / strikethrough) +
-// rehype-highlight (代码块 hljs 着色) + rehype-sanitize (XSS 白名单)。
+// Markdown rendering: react-markdown + remark-gfm (GFM tables / strikethrough) +
+// rehype-highlight (hljs syntax coloring for code blocks) + rehype-sanitize (XSS allowlist).
 //
-// 颜色风格：用 highlight.js 的 `github-dark` 主题 + 全局 CSS override 把它
-// 调成跟 Zinc+Cyan 主题一致的 devtool 色板（见 tailwind.css 的 .hljs-* override）。
+// Color scheme: uses highlight.js's `github-dark` theme + global CSS overrides to match it
+// to the Zinc+Cyan devtools palette (see the .hljs-* overrides in tailwind.css).
 //
-// 风格规则（design-taste-frontend）：
-// - prose 与产品调性冲突，所以不引入 @tailwindcss/typography；只在这一层写
-//   最小的 Tailwind utility class 把段落/列表/code 约束在 devtool mono 风里。
-// - 不允许改全局 font；只允许调整 markdown 容器内部的元素。
+// Style rules (design-taste-frontend):
+// - prose conflicts with the product tone, so @tailwindcss/typography is not introduced; only a
+//   minimal set of Tailwind utility classes is written here to constrain paragraphs/lists/code
+//   in the devtools mono style.
+// - The global font must not be changed; only elements inside the markdown container may be adjusted.
 
 import { type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -21,7 +22,7 @@ interface Props {
   className?: string
 }
 
-// 复用 rehype-sanitize 默认 schema,但允许 `class` 属性(hljs 需要它上色)
+// Reuse rehype-sanitize's default schema but allow the `class` attribute (hljs needs it to color code)
 const schema = {
   ...defaultSchema,
   attributes: {
@@ -32,8 +33,8 @@ const schema = {
 }
 
 /**
- * 渲染一段 markdown 文本为 devtool 风格的 React 树。
- * 严格白名单防 XSS,代码块走 hljs 着色。
+ * Renders a markdown text as a devtools-styled React tree.
+ * Strict allowlist guards against XSS; code blocks are hljs-colored.
  */
 export function Markdown({ text, className }: Props): ReactNode {
   return (

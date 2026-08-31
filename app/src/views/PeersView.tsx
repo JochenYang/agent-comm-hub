@@ -8,26 +8,26 @@ import type { Peer } from '@/lib/tauri'
 import { useTranslation } from '@/i18n'
 
 interface Props {
-  /** 当前 UI 自己注册的 peer id（高亮显示）。 */
+  /** The peer id the current UI registered (highlighted). */
   selfPeerId?: string
 }
 
-/** Peer 花名册管理面板（devtool 紧凑）。
- *  在线/离线两组展示；点击 peer 切换消息流会话（PRD US-2）；行内操作：
- *  重命名（bridge_rename，空输入 = 取消，另有"清除别名"）与移除（管理端踢人）。 */
+/** Peer roster management panel (compact devtool).
+ *   Shows online/offline groups; clicking a peer switches the message-stream conversation (PRD US-2); in-row actions:
+ *  rename (bridge_rename, empty input = cancel, plus a "clear alias") and remove (manager kick). */
 export function PeersView({ selfPeerId }: Props): React.JSX.Element {
   const { t } = useTranslation()
   const { peers, loading, error, refresh, renamePeer, removePeer, forgetPeer } = usePeersStore()
   const { unreadMap, activePeer, setActivePeer } = useMessagesStore()
-  // 错误条只在 hub 运行中才显示：hub 停止时轮询失败（"MCP 未初始化"）是正常态，
-  // 不应作为红色错误一直挂着（用户反馈启动后一直弹）。
+  // Error bar only shows while the hub is running: a polling failure while stopped ("MCP not initialized") is normal,
+  // and shouldn't hang around as a red error (users reported it popping constantly after startup).
   const hubState = useHubStore((s) => s.status?.state)
   const showError = error !== null && (hubState === 'running' || hubState === 'starting')
 
-  // 行内编辑/确认状态：同一时刻最多一个 peer 处于重命名或确认移除。
+  // Inline edit/confirm state: at most one peer is renaming or confirming removal at a time.
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
-  // 新路由 id（可选，管理端）：非空且不同于现 id 时提交真改名（re-key）。
+  // New routing id (optional, admin only): when non-empty and different from the current id, submit a true rename (re-key).
   const [idDraft, setIdDraft] = useState('')
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
 
@@ -40,7 +40,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
     const draft = renameDraft.trim()
     const idT = idDraft.trim()
     setRenamingId(null)
-    // 别名/新 id 都没有实际变化 = 取消（清除别名走显式入口，避免误清）。
+    // No actual change to alias/new id = cancel (clearing the alias goes through the explicit entry to avoid accidental clearing).
     const aliasWanted = draft !== '' && draft !== (p.alias ?? '')
     const idWanted = idT !== '' && idT !== p.id
     if (!aliasWanted && !idWanted) return
@@ -69,7 +69,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
     }
   }
 
-  // 仅本地名单移除（offline 已知 peer 无 hub 侧对应物，不动 hub）。
+  // Local-list-only removal (a known offline peer has no counterpart on the hub side, so the hub is untouched).
   const doForget = async (p: Peer): Promise<void> => {
     if (await forgetPeer(p.id)) {
       pushToast('success', t('peers.forgot_toast', { name: displayName(p) }))
@@ -117,8 +117,8 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
           if (!isRenaming) setActivePeer(isActive ? null : p.id)
         }}
         onKeyDown={(e) => {
-          // 键盘可达性（WCAG 2.1 AA）：Enter / Space 等价点击切换会话；
-          // 行内重命名时输入框自己处理按键，这里不抢。
+          // Keyboard accessibility (WCAG 2.1 AA): Enter / Space behave like a click to switch conversations;
+          // during inline rename the input handles its own keys, so this doesn't intercept them.
           if (isRenaming) return
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
@@ -140,8 +140,8 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
           aria-label={p.connected ? t('peers.on') : t('peers.off')}
         />
         {isRenaming ? (
-          // 行内重命名：Enter 提交、Esc/空输入取消；有别名时附"清除别名"入口；
-          // 非自身 peer 额外给"新 ID"输入（管理端真改名，re-key 迁移全部状态）。
+          // Inline rename: Enter submits, Esc/empty input cancels; when an alias exists, a "clear alias" entry is added;
+          // non-self peers additionally get a "new ID" input (admin true rename, re-keying migrates all state).
           <span className="flex min-w-0 flex-1 items-center gap-1" onClick={(e) => e.stopPropagation()}>
             <input
               autoFocus
@@ -211,16 +211,15 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
                   </span>
                 )}
               </span>
-              {/* alias 存在时 id 作为副标题小字（真实 peer id 不被花名遮住）。 */}
+              {/* When an alias exists, show the id as a small subtitle (the real peer id isn't hidden by the friendly name). */}
               {p.alias !== undefined && (
                 <span className="block truncate font-mono text-[10px] text-muted-foreground/70">
                   {p.id}
                 </span>
               )}
             </span>
-            {/* 行操作：重命名 + 移除（仅 online；hover/focus 显示）。 */}
-            {/* 行操作：重命名 + 移除/忘掉（hover 或键盘 focus 时显形；用 opacity
-                而非 display:none，保证按钮始终可 Tab、可被辅助技术访问）。 */}
+            {/* Row actions: rename + remove/forget (made visible on hover or keyboard focus; using opacity
+                instead of display:none so the buttons always stay Tab-able and accessible to assistive tech). */}
             <span className="flex shrink-0 items-center gap-0.5 opacity-0 pointer-events-none transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
               <button
                 type="button"
@@ -250,7 +249,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
                   <UserMinus className="h-3 w-3" />
                 </button>
               )}
-              {/* offline 已知 peer：只从本地名单移除（不动 hub），否则本地花名册只增不减。 */}
+              {/* Offline known peer: only removed from the local list (the hub is untouched), otherwise the local roster only grows. */}
               {!isSelf && !p.connected && (
                 <button
                   type="button"

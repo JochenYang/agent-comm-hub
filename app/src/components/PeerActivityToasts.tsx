@@ -5,15 +5,15 @@ import { pushToast } from '@/stores/toastStore'
 import { ToastViewport } from '@/components/ui/toast'
 
 /**
- * 上下线提示桥：订阅 peersStore 的 activity 迁移序列 → toast（自动消失）。
- * seq 单调递增，重渲染/重挂载只消费新事件，不重复弹旧提示。
+ * Online/offline toast bridge: subscribes to the peersStore activity transition sequence → toast (auto-dismiss).
+ * seq is monotonic, so a re-render / remount only consumes new events without replaying old notices.
  */
 export function PeerActivityToasts(): React.JSX.Element {
   const { t } = useTranslation()
   const lastSeq = useRef(0)
 
   useEffect(() => {
-    // t 随语言切换变化，订阅回调里实时取；zustand subscribe 返回退订函数。
+    // t changes with language switches, so read it live in the subscription callback; zustand subscribe returns an unsubscribe function.
     const unsub = usePeersStore.subscribe((s) => {
       for (const ev of s.activity) {
         if (ev.seq <= lastSeq.current) continue

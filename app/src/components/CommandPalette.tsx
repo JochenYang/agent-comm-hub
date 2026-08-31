@@ -1,6 +1,6 @@
-// 命令面板：以 `/` 前缀在输入框触发，或全局 Ctrl+K 唤起。
-// 提供 /peers /broadcast /history /help /clear 命令。
-// 设计风格：mono / 紧凑 / devtool；锁死 6px radius。
+// Command palette: triggered by a `/` prefix in the input, or globally via Ctrl+K.
+// Provides the /peers /broadcast /history /help /clear commands.
+// Design style: mono / compact / devtool; locked 6px radius.
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from '@/i18n'
@@ -23,10 +23,10 @@ export type CommandResult =
   | { kind: 'noop' }
 
 /**
- * 命令面板渲染器。
- * - open=false: 不渲染 DOM（focus 退回前一个输入）
- * - open=true: 全屏 fixed overlay + 中心卡片 + 输入框 + 命令建议列表
- * - Esc 关闭，Enter 执行高亮项或当前输入
+ * Command palette renderer.
+ * - open=false: renders no DOM (focus returns to the previous input)
+ * - open=true: fullscreen fixed overlay + centered card + input + command suggestion list
+ * - Esc closes, Enter executes the highlighted item or the current input
  */
 export function CommandPalette({
   open,
@@ -40,7 +40,7 @@ export function CommandPalette({
   const [cursor, setCursor] = useState<number>(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // 打开时聚焦 + 同步 initialQuery
+  // When open: focus + sync initialQuery
   useEffect(() => {
     if (open) {
       setQuery(initialQuery ?? '')
@@ -85,9 +85,9 @@ export function CommandPalette({
     ]
     const q = query.trim().toLowerCase()
     if (q === '') return all
-    // 同时支持两类匹配：
-    //   "/peers codex" (补全)     -> 渲染建议 list_peers
-    //   "/broadcast 你好"          -> 渲染建议 broadcast + 把 "你好" 当 args
+    // Supports both matching styles:
+    //   "/peers codex" (autocomplete)     -> renders the list_peers suggestion
+    //   "/broadcast hello"                -> renders the broadcast suggestion + treats "hello" as args
     if (q.startsWith('/')) {
       const stripped = q.slice(1)
       const spaceIdx = stripped.indexOf(' ')
@@ -185,7 +185,7 @@ export function CommandPalette({
         <div className="border-t border-border px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
           ↑ ↓ navigate · ↵ run · esc close
         </div>
-        {/* peers 列表不直接渲染在 panel 里（避免面板内容爆炸），但 props 已暴露给将来扩展 */}
+        {/* The peers list is not rendered directly in the panel (to avoid panel-content explosion), but props are exposed for future extension */}
         {peers.length === 0 ? null : <div data-peers-count={peers.length} hidden />}
       </div>
     </div>
@@ -199,7 +199,7 @@ interface CommandSuggestion {
   build: (args: string[]) => CommandResult
 }
 
-/** 命令帮助文案（嵌入 README / 关于页用） */
+/** Command help copy (embedded in README / About page) */
 export const COMMAND_HELP_LINES = (t: (k: string) => string): string[] => [
   t('commands.help_intro'),
   t('commands.help_peers'),
@@ -210,8 +210,8 @@ export const COMMAND_HELP_LINES = (t: (k: string) => string): string[] => [
 ]
 
 /**
- * 通用工具：把 "/" 开头的用户输入解析成命令; 若不以 "/" 开头则返回 noop。
- * 供 MessagesView 在 form submit 之前快速判断。
+ * Generic helper: parses a "/"-prefixed user input into a command; returns noop if it does not start with "/".
+ * Lets MessagesView quickly decide before form submit.
  */
 export async function tryExecuteServerSide(
   raw: string,
@@ -228,7 +228,7 @@ export async function tryExecuteServerSide(
     const result = await tauri.invoke.bridgePeers()
     console.info('[bridge_peers]', result?.peers ?? [])
   } else if (cmd === 'broadcast' && rest !== '') {
-    // 后端没有 broadcast 桥；前端 loop 调 bridge_chat 给每个 online peer。
+    // The backend has no broadcast bridge; the frontend loops calling bridge_chat to each online peer.
     const list = (await tauri.invoke.bridgePeers())?.peers ?? []
     const peers = list.filter((p) => p.connected)
     await Promise.all(
@@ -247,5 +247,5 @@ export async function tryExecuteServerSide(
   return { consumed: true }
 }
 
-// React.FormEvent 重导出，方便外部 form 处理
+// Re-export React.FormEvent for external form handling
 export type { FormEvent }

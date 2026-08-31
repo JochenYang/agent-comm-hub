@@ -33,10 +33,10 @@ export default function App(): React.JSX.Element {
   const theme = useThemeStore()
   const { t } = useTranslation()
   const [tab, setTab] = useState<Tab>('main')
-  // 无边框窗口：最大化状态图标切换（监听窗口 resize）
+  // Frameless window: toggle the maximize icon (listen to window resize)
   const win = getCurrentWindow()
   const [maximized, setMaximized] = useState(false)
-  // 关闭确认 modal：最小化到托盘 / 退出程序 / 取消
+  // Close-confirm modal: minimize to tray / quit app / cancel
   const [showCloseModal, setShowCloseModal] = useState(false)
 
   useEffect(() => {
@@ -52,7 +52,7 @@ export default function App(): React.JSX.Element {
     }
   }, [win])
 
-  // 关闭请求拦截：无论点自绘 ✕ 还是 Alt+F4，都弹三选一 modal（不直接关窗口）。
+  // Close-request interception: whether clicking the drawn ✕ or Alt+F4, always pop the three-choice modal (never close the window directly).
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void win
@@ -72,17 +72,17 @@ export default function App(): React.JSX.Element {
     void tauri.invoke.appReady().catch(() => undefined)
   }, [])
 
-  // 全局快捷键：
-  //   Ctrl/Cmd+K          → 命令面板（仅 main tab 触发）
-  //   Ctrl/Cmd+,          → 跳到 settings tab
-  //   Ctrl/Cmd+Alt+M/T/S  → 跳到 main / terminal / settings
-  //   Esc                  → 返回 main tab（仅在 terminal/settings 时)
+  // Global shortcuts:
+  //   Ctrl/Cmd+K          → command palette (main tab only)
+  //   Ctrl/Cmd+,          → jump to settings tab
+  //   Ctrl/Cmd+Alt+M/T/S  → jump to main / terminal / settings
+  //   Esc                  → return to main tab (only when on terminal/settings)
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const meta = e.metaKey || e.ctrlKey
       if (meta && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        // 派一个 custom event 让 MessagesView 接收;MessagesView 自己也监听 input。
+        // Dispatch a custom event for MessagesView to receive; MessagesView also listens on its own input.
         window.dispatchEvent(new CustomEvent('ach:open-palette'))
         setTab('main')
       } else if (meta && e.key === ',') {
@@ -98,7 +98,7 @@ export default function App(): React.JSX.Element {
         e.preventDefault()
         setTab('settings')
       } else if (meta && e.key.toLowerCase() === 'w') {
-        // PRD §5.2: Ctrl+W 关闭当前 tab（terminal/settings → 回 main；main 忽略）
+        // PRD §5.2: Ctrl+W closes the current tab (terminal/settings → back to main; main ignored)
         e.preventDefault()
         if (tab !== 'main') setTab('main')
       } else if (e.key === 'Escape' && tab !== 'main') {
@@ -111,24 +111,25 @@ export default function App(): React.JSX.Element {
 
   const state = hub.status?.state ?? 'stopped'
   const tone = STATUS_TONE[state] ?? STATUS_TONE.stopped
-  // 控制按钮状态联动：Running 时禁用"启动"、启用"停止/重启"；Starting/Stopping 全部禁用。
+  // Control-button state linkage: disable "start" when Running, enable "stop/restart"; all disabled during Starting/Stopping.
   const isRunning = state === 'running'
   const isBusy = state === 'starting' || state === 'stopping' || hub.loading
-  // macOS 无边框窗口的惯例是左上角系统红绿灯（traffic lights）：左侧留出红绿灯位、
-  // 右侧不渲染自绘窗口按钮（Windows/Linux 才用右上角 — □ ×）。
+  // macOS frameless-window convention is system traffic lights in the top-left: reserve that space on the left,
+  // and don't render the drawn window buttons on the right (Windows/Linux use top-right — □ ×).
   const isMac = /Mac/i.test(navigator.userAgent)
 
   return (
     <div className="flex h-screen w-screen flex-col bg-background text-foreground">
-      {/* Top bar — 自定义标题栏（无系统边框）：左拖拽区(品牌+状态) → 控制按钮 → tabs → 主题/窗口控制 */}
-      {/* 无边框窗口标题栏：drag-region 用 "deep" 值 —— 子树内任意位置按下即可拖拽，
-          Tauri 核心自动屏蔽 button/a/input 等交互元素（裸属性只认元素本身，子元素
-          会吞掉 mousedown，导致整条标题栏几乎拖不动）。双击非交互区 = 切换最大化。 */}
+      {/* Top bar — custom title bar (no system frame): left drag area (brand + status) → control buttons → tabs → theme/window controls */}
+      {/* Frameless-window title bar: drag-region uses the "deep" value — pressing anywhere in the subtree drags the window;
+          Tauri core automatically shields interactive elements like button/a/input (a bare attribute only applies to the element
+          itself, letting child elements swallow mousedown so the whole title bar barely drags). Double-click on a non-interactive
+          area toggles maximize. */}
       <header
         data-tauri-drag-region="deep"
         className="flex shrink-0 select-none items-stretch border-b border-border bg-background/80 backdrop-blur"
       >
-        {/* 品牌 + 状态徽章（可拖拽；由 header 的 drag region 统一处理） */}
+        {/* Brand + status badge (draggable; handled uniformly by the header drag region) */}
         <div className={`flex items-center gap-3 py-2 ${isMac ? 'pl-[78px]' : 'pl-4'}`}>
           <img
             src="/logo.png"
@@ -215,7 +216,7 @@ export default function App(): React.JSX.Element {
           </div>
         </div>
 
-        {/* 主题切换（原"自身"位置）：dark → light → system 循环 */}
+        {/* Theme toggle (the former "self" position): dark → light → system cycle */}
         <div className="flex items-center border-l border-border px-2">
           <button
             type="button"
@@ -233,7 +234,7 @@ export default function App(): React.JSX.Element {
           </button>
         </div>
 
-        {/* 窗口控制（无边框窗口自绘，dsh-desktop 风格；macOS 用系统红绿灯不渲染） */}
+        {/* Window controls (self-drawn frameless window, dsh-desktop style; macOS uses system traffic lights so none are rendered) */}
         {!isMac && (
           <div className="flex items-stretch">
             <button
@@ -282,8 +283,9 @@ export default function App(): React.JSX.Element {
                   <PeersView selfPeerId={SELF_PEER_ID} />
                 </ErrorBoundary>
               </div>
-              {/* 未选中消息时右栏不渲染（用户反馈空态冗余"卡在界面上"），
-                  消息区自动占满剩余宽度；选中消息才展开三栏详情。 */}
+              {/* Right column is not rendered when no message is selected (user feedback: the empty state felt redundant and
+                  "stuck on screen"); the message area automatically fills the remaining width. Only when a message is selected
+                  does the three-column detail expand. */}
               <div className={`min-h-0 ${selectedId !== null ? 'col-span-5' : 'col-span-9'}`}>
                 <ErrorBoundary label="messages crashed">
                   <MessagesView />
@@ -306,10 +308,10 @@ export default function App(): React.JSX.Element {
         )}
       </main>
 
-      {/* toast 视口 + 上下线提示（全局，右下角自动消失） */}
+      {/* Toast viewport + online/offline hints (global, bottom-right, auto-dismiss) */}
       <PeerActivityToasts />
 
-      {/* 关闭确认 modal：最小化到托盘 / 退出程序 / 取消 */}
+      {/* Close-confirm modal: minimize to tray / quit app / cancel */}
       {showCloseModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"

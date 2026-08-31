@@ -5,73 +5,86 @@ import { SELF_PEER_ID } from '@/lib/self'
 import { pushToast } from '@/stores/toastStore'
 
 /**
- * 花名册 store —— zustand 全局单例。
+ * Roster store — zustand global singleton.
  *
- * 数据来源优先级：
- *   1. 实时：hub SSE `hub:peers`（peers_changed 推完整花名册）——主通道；
- *   2. 补偿：bridge_peers 轮询（10s，SSE 事件丢失/断连窗口的兜底）；
- *   3. 恢复：roster_list（SQLite 全部已知 peer，含 offline，恢复重启前名单）。
- * 同一 id 实时数据优先；排序 online 在前、其余按 id。
- * online 状态迁移以 PeerActivity 追加记录，展示（toast 去重/防抖）由 UI 决定。
+ * Data-source priority:
+ *   1. Real-time: hub SSE `hub:peers` (peers_changed pushes the full roster) — the primary channel;
+ *   2. Compensation: bridge_peers polling (10s, fallback for lost SSE events / disconnect windows);
+ *   3. Restore: roster_list (all SQLite-known peers, incl. offline, restoring the list from before a restart).
+ * Real-time data wins for the same id; online peers sort first, the rest by id.
+ * Online-state transitions are recorded as appended PeerActivity entries; display (toast dedup/throttle) is decided by the UI.
  */
 
 export interface PeerActivity {
   seq: number
   peerId: string
-  /** true = 上线，false = 下线。 */
+  /** true = came online, false = went offline. */
   online: boolean
   ts: number
 }
 
 interface PeersState {
-  /** 合并后的完整花名册（实时 ∪ 本地 roster，已排序）。 */
+  /** Merged full roster (real-time ∪ local roster, already sorted). */
   peers: Peer[]
   loading: boolean
   error: string | null
-  /** 上下线迁移事件（追加式，保留最近 20 条；seq 单调递增供 UI 去重）。 */
+  /** Online/offline transition events (append-only, keeps the latest 20; seq is monotonic for UI dedup). */
   activity: PeerActivity[]
   refresh: () => Promise<void>
-  /** 重命名：alias 与 newId 至少给一个。alias 空串 = 清除；newId = 管理端
-   * 真改名（re-key，迁移会话/邮箱/历史），旧 id 的键在本 store 内失效。 */
+  /** Rename: at least one of alias or newId must be given. Empty alias = clear; newId = an admin
+   * true rename (re-key, migrating conversation/mailbox/history), invalidating the old id's keys in this store. */
   renamePeer: (peer: string, alias?: string, newId?: string) => Promise<boolean>
-  /** 踢人（管理端）。目标不存在时同样失败返回。 */
+  /** Kick (admin). Also returns failure when the target doesn't exist. */
   removePeer: (peer: string) => Promise<boolean>
-  /** 仅从本地名单忘掉一个 offline 已知 peer（不动 hub，roster_forget）。 */
+  /** Forget an offline known peer from the local list only (the hub is untouched; roster_forget). */
   forgetPeer: (peer: string) => Promise<boolean>
 }
 
-/** 实时快照轮询间隔 —— 主通道是 SSE 推送（hub:peers），轮询只作断连补偿。 */
+/** Real-time snapshot poll interval — the primary channel is SSE push (hub:peers); polling is only a disconnect fallback. */
 const POLL_INTERVAL_MS = 10_000
 const ACTIVITY_KEEP = 20
 
 interface StoreShape extends PeersState {
-  /** 最近一次实时快照（id → peer），实时数据优先于本地 roster。 */
+  /** The latest real-time snapshot (id → peer), real-time data takes priority over the local roster. */
   live: Record<string, Peer>
-  /** SQLite roster_list 恢复的已知 peer（offline 也保留）。 */
+  /** SQLite roster_list-restored known peers (offline kept too). */
   rosterLocal: Record<string, Peer>
+  /** Peer ids suppressed within this session after a kick/forget, preventing a snapshot from merging the "deleted"
+   *  peer back in (an online auto re-registration / residual rosterLocal row would otherwise resurrect it).
+   *  Exists only for this app run; after a restart, everything reloads from the hub's truth. */
+  kickedSuppress: Set<string>
 }
 
 let activitySeq = 0
-/** 是否已收到过实时快照（P2-1：首份快照只建基线，见 applyLiveRoster）。 */
+/** Whether a real-time snapshot has been received yet (P2-1: the first snapshot only sets a baseline, see applyLiveRoster). */
 let liveBaselineSeen = false
 
-/** 合并实时 ∪ 本地（实时优先），online 在前、其余按 id。
- *  收到过实时快照后，仅存在于本地 roster 的 peer 一律按 offline 展示——
- *  hub 快照里没有 = 不在线；SQLite 的 online 列只作冷启动基线（首帧前的
- *  瞬间保留存储值），否则残留行（如换过 hub 端口的历史 peer）会永远"在线"。 */
-function mergePeers(live: Record<string, Peer>, rosterLocal: Record<string, Peer>): Peer[] {
+/** Merge real-time ∪ local (real-time wins), online first, then by id.
+ *  After a real-time snapshot has been received, peers that only exist in the local roster always display as offline —
+ *  absent from the hub snapshot = not online; the SQLite online column only serves as a cold-start baseline (preserving
+ *  the stored value for the instant before the first frame), otherwise stale rows (e.g. historical peers after a hub port
+ *  change) would stay "online" forever. */
+function mergePeers(
+  live: Record<string, Peer>,
+  rosterLocal: Record<string, Peer>,
+  kickedSuppress: ReadonlySet<string>,
+): Peer[] {
   const byId = new Map<string, Peer>()
   for (const p of Object.values(rosterLocal)) {
+    if (kickedSuppress.has(p.id)) continue
     byId.set(p.id, liveBaselineSeen ? { ...p, connected: false } : p)
   }
-  for (const p of Object.values(live)) byId.set(p.id, p)
+  for (const p of Object.values(live)) {
+    if (kickedSuppress.has(p.id)) continue
+    byId.set(p.id, p)
+  }
   return [...byId.values()].sort((a, b) => {
     if (a.connected !== b.connected) return a.connected ? -1 : 1
     return a.id.localeCompare(b.id)
   })
 }
 
-/** hub 增量字段防御：缺省即无（不写入 undefined，保持对象形状稳定）。 */
+/** Hub incremental-field guard: absent means none (never writes undefined, keeping object shape stable). */
 function sanitizePeer(raw: Peer): Peer {
   const p: Peer = { id: raw.id, connected: raw.connected === true }
   if (typeof raw.alias === 'string' && raw.alias !== '') p.alias = raw.alias
@@ -85,7 +98,7 @@ function sanitizePeer(raw: Peer): Peer {
   return p
 }
 
-/** SQLite roster 行 → Peer（roster_list 恢复用）。 */
+/** SQLite roster row → Peer (for roster_list restore). */
 function rosterRecordToPeer(r: RosterRecord): Peer {
   const p: Peer = { id: r.peer_id, connected: r.online }
   if (r.alias) p.alias = r.alias
@@ -102,13 +115,14 @@ export const usePeersStore = create<StoreShape>()((set, get) => ({
   activity: [],
   live: {},
   rosterLocal: {},
+  kickedSuppress: new Set(),
 
   refresh: async () => {
     set({ loading: true, error: null })
     try {
       const result = await tauri.invoke.bridgePeers()
-      // 防御：Rust 侧已解包 MCP 信封，但任何未来回归都不应把 peers 置成
-      // undefined 而让 PeersView 在 `peers.length` 处崩溃（历史教训）。
+      // Guard: the Rust side already unwraps the MCP envelope, but any future regression must not set peers to
+      // undefined and crash PeersView at `peers.length` (a historical lesson).
       applyLiveRoster(Array.isArray(result?.peers) ? result.peers : [])
     } catch (e) {
       set({ error: serializeError(e) })
@@ -118,20 +132,20 @@ export const usePeersStore = create<StoreShape>()((set, get) => ({
   },
 
   renamePeer: async (peer, alias, newId) => {
-    // 改自己：不传 peer（hub 语义 = 改自身别名）；改别人：管理端身份恒有权限，
-    // 非管理端配置被 hub 拒绝时错误透传（toast 展示）。
+    // Editing self: don't pass a peer (hub semantics = edit own alias); editing others: the admin identity always has
+    // permission, and errors pass through transparently when the hub rejects a non-admin config (shown via toast).
     const target = peer === SELF_PEER_ID ? null : peer
     try {
       await tauri.invoke.bridgeRename(target, alias ?? null, newId)
       if (newId !== undefined && newId !== peer) {
-        // id 变了：live 与本地 roster 都按旧 id 键存，旧键整体过期移除，
-        // 新 id 的数据由随后的 refresh（实时快照 / SQLite 重建）补上。
+        // The id changed: both live and local roster are keyed by the old id, so the old key is removed entirely;
+        // the new id's data is backfilled by the subsequent refresh (real-time snapshot / SQLite rebuild).
         set((s) => {
           const live = { ...s.live }
           const rosterLocal = { ...s.rosterLocal }
           delete live[peer]
           delete rosterLocal[peer]
-          return { live, rosterLocal, peers: mergePeers(live, rosterLocal) }
+          return { live, rosterLocal, peers: mergePeers(live, rosterLocal, s.kickedSuppress) }
         })
       }
       void get().refresh()
@@ -148,19 +162,24 @@ export const usePeersStore = create<StoreShape>()((set, get) => ({
     try {
       const res = await tauri.invoke.bridgeUnregisterPeer(peer)
       if (res?.kicked === false) {
-        // hub 明确回答目标不存在（kicked:false, peerId:null）。
+        // The hub explicitly answered the target doesn't exist (kicked:false, peerId:null).
         set({ error: `bridge: peer ${peer} not found` })
         pushToast('error', `bridge: peer ${peer} not found`)
         return false
       }
-      // 立即从 live 与本地 roster 同时移除（P1-2：只删 live 会被 mergePeers 从
-      // rosterLocal 并回，被踢的已知 peer 本会话内永远留在 offline·known 组）。
+      // Immediately remove from both live and local roster (P1-2: deleting only live lets mergePeers merge it back from
+      // rosterLocal, so a kicked known peer would stay in the offline·known group all session).
+      // Then record the id in kickedSuppress: if the kicked agent auto re-registers, a poll/SSE snapshot would merge it
+      // back in ("deleted yet resurrected"); once suppressed it won't show this session, and after a restart it reloads
+      // from the hub snapshot (the hub side has truly removed that peer).
       set((s) => {
         const live = { ...s.live }
         const rosterLocal = { ...s.rosterLocal }
         delete live[peer]
         delete rosterLocal[peer]
-        return { live, rosterLocal, peers: mergePeers(live, rosterLocal) }
+        const kickedSuppress = new Set(s.kickedSuppress)
+        kickedSuppress.add(peer)
+        return { live, rosterLocal, kickedSuppress, peers: mergePeers(live, rosterLocal, kickedSuppress) }
       })
       void get().refresh()
       return true
@@ -178,7 +197,11 @@ export const usePeersStore = create<StoreShape>()((set, get) => ({
       set((s) => {
         const rosterLocal = { ...s.rosterLocal }
         delete rosterLocal[peer]
-        return { rosterLocal, peers: mergePeers(s.live, rosterLocal) }
+        // Same as kickedSuppress: a local-only forget only applies to offline known peers; if it's still online on the hub,
+        // a snapshot would merge it back, so it's likewise suppressed from display this session.
+        const kickedSuppress = new Set(s.kickedSuppress)
+        kickedSuppress.add(peer)
+        return { rosterLocal, kickedSuppress, peers: mergePeers(s.live, rosterLocal, kickedSuppress) }
       })
       return true
     } catch (e) {
@@ -190,8 +213,8 @@ export const usePeersStore = create<StoreShape>()((set, get) => ({
   }
 }))
 
-/** 应用一份实时花名册：更新 live 映射、检测 online 迁移、重算合并列表。
- *  refresh 轮询与 hub:peers SSE 监听共用（迁移检测口径一致）。 */
+/** Apply a real-time roster: update the live map, detect online transitions, and recompute the merged list.
+ *  Shared by the refresh poll and the hub:peers SSE listener (same transition-detection semantics). */
 function applyLiveRoster(rawList: unknown): void {
   if (!Array.isArray(rawList)) return
   const live: Record<string, Peer> = {}
@@ -200,27 +223,27 @@ function applyLiveRoster(rawList: unknown): void {
     live[raw.id] = sanitizePeer(raw)
   }
   usePeersStore.setState((s) => {
-    // P2-1：首份实时快照只建立基线、不产生上下线事件。SQLite 里 stale
-    // online=true 的行会在冷启动首个快照处集体翻转成 offline，照常检测迁移
-    // 会每个 peer 弹一条"已离线"。之后的快照才做迁移检测。
+    // P2-1: the first real-time snapshot only builds a baseline and produces no online/offline events. SQLite stale
+    // online=true rows all flip to offline at the first cold-start snapshot; if transitions were detected as usual,
+    // every peer would toast a "went offline". Transition detection starts with the following snapshots.
     if (!liveBaselineSeen) {
       liveBaselineSeen = true
-      return { live, peers: mergePeers(live, s.rosterLocal) }
+      return { live, peers: mergePeers(live, s.rosterLocal, s.kickedSuppress) }
     }
-    const prevOnline = new Map(mergePeers(s.live, s.rosterLocal).map((p) => [p.id, p.connected]))
+    const prevOnline = new Map(mergePeers(s.live, s.rosterLocal, s.kickedSuppress).map((p) => [p.id, p.connected]))
     const now = Date.now()
     const events: PeerActivity[] = []
     for (const p of Object.values(live)) {
       const before = prevOnline.get(p.id)
-      // 只有此前出现过（含本地 roster 恢复的 offline 行）且状态翻转才算迁移；
-      // 首次出现的 peer 不提示（冷启动全量快照不打一轮招呼）。
+      // Only a peer that appeared before (incl. offline rows restored from the local roster) and flipped state counts as a
+      // transition; a peer appearing for the first time gets no notice (a cold-start full snapshot isn't a greeting round).
       if (before !== undefined && before !== p.connected) {
         events.push({ seq: ++activitySeq, peerId: p.id, online: p.connected, ts: now })
       }
     }
     return {
       live,
-      peers: mergePeers(live, s.rosterLocal),
+      peers: mergePeers(live, s.rosterLocal, s.kickedSuppress),
       ...(events.length > 0
         ? { activity: [...s.activity, ...events].slice(-ACTIVITY_KEEP) }
         : {})
@@ -228,7 +251,7 @@ function applyLiveRoster(rawList: unknown): void {
   })
 }
 
-/** SQLite 已知 peer 并入 rosterLocal（只补缺，不覆盖已有实时数据）。 */
+/** Merge SQLite-known peers into rosterLocal (only fills gaps, never overwrites existing real-time data). */
 function applyLocalRoster(rows: unknown): void {
   if (!Array.isArray(rows)) return
   usePeersStore.setState((s) => {
@@ -237,25 +260,25 @@ function applyLocalRoster(rows: unknown): void {
       if (typeof r?.peer_id !== 'string' || r.peer_id === '') continue
       rosterLocal[r.peer_id] = rosterRecordToPeer(r)
     }
-    return { rosterLocal, peers: mergePeers(s.live, rosterLocal) }
+    return { rosterLocal, peers: mergePeers(s.live, rosterLocal, s.kickedSuppress) }
   })
 }
 
-// ---- 模块级后台任务（启动一次，全 app 共享）----
+// ---- Module-level background tasks (started once, shared across the whole app) ----
 
-// 实时主通道：hub SSE peers_changed → hub:peers（payload 即完整花名册）。
+// Real-time primary channel: hub SSE peers_changed → hub:peers (payload is the full roster).
 void tauri.event.onHubPeers((peers) => {
   applyLiveRoster(peers)
 })
 
-// 启动恢复：SQLite 已知 peer（含 offline）先并入 —— 重启前的名单立即可见，
-// 之后到达的实时快照按 id 覆盖（online 状态以 hub 为准）。
+// Startup restore: merge SQLite-known peers (incl. offline) first — the list from before a restart is immediately
+// visible, and later real-time snapshots override per id (online state follows the hub).
 void tauri.invoke
   .rosterList()
   .then(applyLocalRoster)
-  .catch(() => undefined) // hub 未起 / store 不可用：保持空名单
+  .catch(() => undefined) // hub not running / store unavailable: keep an empty list
 
-// 补偿轮询（10s；主通道是 SSE 推送，这里只兜底事件丢失 / SSE 断连重连窗口）。
+// Compensation poll (10s; the primary channel is SSE push, this only covers lost events / SSE reconnect windows).
 void usePeersStore.getState().refresh()
 window.setInterval(() => {
   void usePeersStore.getState().refresh()

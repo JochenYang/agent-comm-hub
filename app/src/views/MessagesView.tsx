@@ -1,10 +1,10 @@
-// 会话视图：消息流 + 发送。chat 消息走 <Markdown> 渲染；支持多 peer 同时发送
-// （to 主收件人 + cc chips，批量 fan-out）；拖拽 .txt 文件作为附件拼进正文
-// （5MB 上限，非文本拒绝）；消息列表用 @tanstack/react-virtual 虚拟滚动 +
-// measureElement 动态测量；输入框支持命令面板（/ 触发）与快捷键
-// （Ctrl+Enter 发送、/ 唤起面板、Esc 关面板）。
+// Conversation view: message stream + send. chat messages render via <Markdown>; supports sending to multiple peers
+// at once (to primary recipient + cc chips, batched fan-out); dragging a .txt file appends it as an attachment
+// (5MB cap, non-text rejected); the message list uses @tanstack/react-virtual virtual scrolling +
+// measureElement dynamic measurement; the input supports the command palette (/ trigger) and shortcuts
+// (Ctrl+Enter to send, / to open the palette, Esc to close it).
 //
-// 设计风格：mono / 紧凑 / devtool；锁死 6px radius；新加元素不引入第二色板。
+// Design style: mono / compact / devtool; locked 6px radius; new elements don't introduce a second palette.
 
 import { useState, useRef, useEffect, useMemo, type FormEvent, type DragEvent } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -32,7 +32,7 @@ interface Attachment {
   text: string
 }
 
-/** 读 .txt 文本附件（FileReader.readAsText），大文件拒绝 */
+/** Read a .txt text attachment (FileReader.readAsText); reject oversized files */
 async function readTextFile(file: File): Promise<Attachment | { err: string }> {
   if (file.size > MAX_ATTACHMENT_BYTES) return { err: 'attachment_too_large' }
   if (file.type !== '' && !file.type.startsWith('text/')) return { err: 'attachment_not_text' }
@@ -40,8 +40,8 @@ async function readTextFile(file: File): Promise<Attachment | { err: string }> {
   return { name: file.name, size: file.size, text }
 }
 
-/** 把 "/xxx" 输入解析成 CommandResult（与 CommandPalette 的 build 逻辑对齐）。
- * 非命令返回 null；未知命令 / 缺参返回 noop（调用方提示）。 */
+/** Parse a "/xxx" input into a CommandResult (aligned with CommandPalette's build logic).
+ * Returns null for non-commands; unknown / missing-arg commands return noop (the caller hints). */
 function parseCommand(raw: string): CommandResult | null {
   const q = raw.trim()
   if (!q.startsWith('/')) return null
@@ -57,7 +57,7 @@ function parseCommand(raw: string): CommandResult | null {
   return { kind: 'noop' }
 }
 
-/** 把多个附件拼成单条 chat 消息正文 —— 文本放最前，附件追加在末尾 */
+/** Join multiple attachments into a single chat message body — text first, attachments appended at the end */
 function attachmentsToBody(text: string, atts: Attachment[]): string {
   if (atts.length === 0) return text
   const blocks = atts.map((a) => `[attachment:${a.name} (${a.size}B)]\n${a.text}`)
@@ -72,6 +72,8 @@ export function MessagesView(): React.JSX.Element {
     error,
     activePeer,
     setActivePeer,
+    relayAll,
+    setRelayAll,
     sendChat,
     selectedId,
     selectMessage,
@@ -79,7 +81,7 @@ export function MessagesView(): React.JSX.Element {
     restoreLocal
   } = useMessagesStore()
   const { t } = useTranslation()
-  // 错误标签只在 hub 运行中显示（停止时轮询失败是正常态，不弹红色错误）
+  // Error label only shows while the hub is running (a polling failure while stopped is normal, not a red error)
   const hubState = useHubStore((s) => s.status?.state)
   const showError = error !== null && (hubState === 'running' || hubState === 'starting')
 
@@ -91,13 +93,13 @@ export function MessagesView(): React.JSX.Element {
   const [dropActive, setDropActive] = useState<boolean>(false)
   const [paletteOpen, setPaletteOpen] = useState<boolean>(false)
   const [paletteQuery, setPaletteQuery] = useState<string>('')
-  /** 操作反馈条：发送结果 / 命令执行结果（此前 /peers 只写 console，用户无感知）。 */
+  /** Action feedback bar: send results / command execution results (previously /peers only wrote to console, invisible to the user). */
   const [feedback, setFeedback] = useState<string | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // 监听 App 的 ach:open-palette 自定义事件（Ctrl+K 也能打开面板）
+  // Listen for App's ach:open-palette custom event (Ctrl+K also opens the palette)
   useEffect(() => {
     const onPalette = (): void => {
       setPaletteOpen(true)
@@ -107,14 +109,14 @@ export function MessagesView(): React.JSX.Element {
     return () => window.removeEventListener('ach:open-palette', onPalette)
   }, [])
 
-  // 默认选第一个不是自身的 peer
+  // Default to the first peer that isn't self
   useEffect(() => {
     if (recipient !== '') return
     const first = peers.find((p) => p.id !== SELF_PEER_ID)
     if (first) setRecipient(first.id)
   }, [peers, recipient])
 
-  // 排序后的消息列表（react-virtual 需稳定引用）
+  // Sorted message list (react-virtual needs a stable reference)
   const sorted = useMemo(() => [...messages].sort((a, b) => a.ts - b.ts), [messages])
 
   const virtualizer = useVirtualizer({
@@ -123,9 +125,10 @@ export function MessagesView(): React.JSX.Element {
     estimateSize: () => 60,
     overscan: 12,
     measureElement: (el) => el.getBoundingClientRect().height,
-    // 尺寸缓存按消息 id（而非默认的数组索引）做键：/history 合并存档、切换会话
-    // 等会让同一索引先后对应不同消息，而 DOM 按 m.id 复用、ref 不会重新触发
-    // 测量 —— 按索引缓存会把旧尺寸套在位移后的内容上，卡片重叠且不自愈。
+    // Size cache keyed by message id (rather than the default array index): /history merging archives, switching
+    // conversations, etc. make the same index map to different messages over time, while the DOM is reused by m.id and
+    // the ref doesn't re-trigger measuring — an index-keyed cache would apply stale sizes to shifted content and
+    // cards would overlap without self-healing.
     getItemKey: (index) => sorted[index]?.id ?? `idx-${index}`
   })
 
@@ -138,8 +141,8 @@ export function MessagesView(): React.JSX.Element {
     if (e !== undefined) e.preventDefault()
     const trimmedText = text.trim()
     if (sending) return
-    // 命令路径：`/` 开头的输入在提交前拦截（快速输入/直接回车时面板没弹），
-    // 与面板执行走同一套 handleCommand，绝不把 `/clear` 之类当消息发出去。
+    // Command path: a `/`-prefixed input is intercepted before submit (fast typing / direct Enter may not pop the palette),
+    // running through the same handleCommand as the palette so commands like `/clear` are never sent as messages.
     const cmd = parseCommand(trimmedText)
     if (cmd !== null) {
       if (cmd.kind === 'noop') {
@@ -179,7 +182,7 @@ export function MessagesView(): React.JSX.Element {
     }
   }
 
-  /** `/` 开头的输入：当文本以 `/` 开始且只有这一个字符时,弹命令面板；带参数则自动执行 */
+  /** `/`-prefixed input: when the text starts with `/` and is only that one character, pop the command palette; with args it auto-executes */
   const handleInputChange = (next: string): void => {
     setText(next)
     if (next === '/') {
@@ -202,16 +205,16 @@ export function MessagesView(): React.JSX.Element {
           : t('messages.send_failed')
       )
     } else if (result.kind === 'history') {
-      // 拉取完整历史：hub 内存（refresh）+ SQLite 存档（restoreLocal）合并。
-      // hub 重启后内存历史已清空，只 refresh 拉不到存档 —— 这正是
-      // `/history` 命令的职责（用户预期"拉数据库之前的历史"）。
-      // 存档查询跟随当前会话（restoreLocal 不带 peer 只查自己身份，
-      // 会话视图里的互聊历史会查不到）。
+      // Fetch full history: hub memory (refresh) + SQLite archive (restoreLocal), merged.
+      // After a hub restart the in-memory history is cleared, so refresh alone won't pull archives — that's exactly
+      // the /history command's job (the user expects to "pull history before the database").
+      // Archive queries follow the current view: relayAll flow (no conversation) pulls everything — SQLite stores
+      // all traffic, but querying by peer would filter out others' inter-chats; the conversation view queries by conversation peer.
       await refresh()
-      await restoreLocal(result.limit, activePeer ?? undefined)
+      await restoreLocal(result.limit, relayAll ? 'all' : (activePeer ?? undefined))
       setFeedback(t('messages.history_ok'))
     } else if (result.kind === 'list_peers') {
-      // 结果可见化：不再只写 console（用户此前反馈"命令无效"）
+      // Make the result visible: no longer just written to console (users previously reported "command invalid")
       const list = peers
       if (list.length === 0) {
         setFeedback(t('messages.no_peers_hint'))
@@ -226,12 +229,12 @@ export function MessagesView(): React.JSX.Element {
       setAttachments([])
       setFeedback(t('messages.cleared'))
     } else if (result.kind === 'help') {
-      // 帮助文本显示到反馈条（此前 help 执行后无任何分支 → "无效"）
+      // Help text shows in the feedback bar (previously help executed with no branch → "invalid")
       setFeedback(COMMAND_HELP_LINES(t).join('\n'))
     }
   }
 
-  /** `Ctrl+Enter` 强制发送; `/` 唤起面板 */
+  /** `Ctrl+Enter` forces send; `/` opens the palette */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
@@ -243,7 +246,7 @@ export function MessagesView(): React.JSX.Element {
     }
   }
 
-  // 拖拽文件 drop handlers
+  // Drag-and-drop file drop handlers
   const onDragOver = (e: DragEvent<HTMLFormElement>): void => {
     e.preventDefault()
     if (!dropActive) setDropActive(true)
@@ -273,20 +276,36 @@ export function MessagesView(): React.JSX.Element {
   return (
     <div className="flex h-full flex-col rounded-md border border-border bg-card">
       <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
-        <h3 className="font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-          {activePeer !== null ? (
-            <>
-              {t('messages.conv')}{' '}
-              <span className="ml-1 normal-case tracking-normal text-primary">
-                {activePeer}
-              </span>
-            </>
-          ) : (
-            t('common.messages')
-          )}{' '}
-          <span className="ml-1 font-mono normal-case tracking-normal text-foreground/70">
-            {sorted.length}
+        <h3 className="flex min-w-0 items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          <span className="truncate">
+            {activePeer !== null ? (
+              <>
+                {t('messages.conv')}{' '}
+                <span className="ml-1 normal-case tracking-normal text-primary">
+                  {activePeer}
+                </span>
+              </>
+            ) : (
+              t('common.messages')
+            )}{' '}
+            <span className="ml-1 font-mono normal-case tracking-normal text-foreground/70">
+              {sorted.length}
+            </span>
           </span>
+          {/* Relay-flow view toggle: lets the admin view all hub relaying (zhangsan↔lisi, group broadcasts)
+              rather than just its own; unread derivation is skipped when enabled (see messagesStore). */}
+          <button
+            type="button"
+            onClick={() => setRelayAll(!relayAll)}
+            title={relayAll ? t('messages.disable_relay') : t('messages.enable_relay')}
+            className={`shrink-0 rounded-md border px-1.5 py-px normal-case text-[10px] tracking-normal transition-colors ${
+              relayAll
+                ? 'border-primary/50 bg-primary/15 text-primary'
+                : 'border-border text-muted-foreground hover:border-primary/40 hover:text-foreground'
+            }`}
+          >
+            {relayAll ? t('messages.relay_on') : t('messages.relay_off')}
+          </button>
         </h3>
         {activePeer !== null && (
           <button
@@ -375,7 +394,7 @@ export function MessagesView(): React.JSX.Element {
         </div>
       )}
 
-      {/* 操作反馈条：发送结果 / 命令结果（help 等命令为多行文本） */}
+      {/* Action feedback bar: send results / command results (help and other commands are multi-line text) */}
       {feedback !== null && (
         <div className="flex shrink-0 items-start justify-between gap-2 border-t border-border bg-background/60 px-3 py-1">
           <span className="max-h-32 min-w-0 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground/80">
@@ -569,7 +588,7 @@ function MessageItem({
   )
 }
 
-/** 让 messages body 在表单 submit 路径外可被 CmdPalette 等单独调 */
+/** Lets the messages body be called outside the form submit path (e.g. individually by CmdPalette) */
 export async function handleExternalSubmit(raw: string, clear: () => void): Promise<void> {
   await tryExecuteServerSide(raw, clear)
 }

@@ -1,7 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 interface Props {
-  /** 降级 UI 的说明文案（默认 "view crashed"）。 */
+  /** Explanation text for the fallback UI (default "view crashed"). */
   label?: string
   children: ReactNode
 }
@@ -11,9 +11,9 @@ interface State {
 }
 
 /**
- * 视图级错误边界：单个 view 崩溃时降级显示，而不是让 React 卸载整棵
- * 组件树（此前 PeersView 的 `peers.length` 崩溃会白屏整个应用）。
- * 崩溃后按任意处重试会重新挂载子树。
+ * View-level error boundary: when a single view crashes, show a fallback instead of letting
+ * React unmount the whole component tree (previously a `peers.length` crash in PeersView
+ * would blank the entire app). Retrying anywhere after a crash remounts the subtree.
  */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null }

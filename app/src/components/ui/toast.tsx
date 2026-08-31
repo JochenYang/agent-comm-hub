@@ -1,7 +1,7 @@
 import { X } from 'lucide-react'
 import { useToastStore, type ToastKind } from '@/stores/toastStore'
 
-/** toast 右下角堆叠视口：挂在 App 根部一次即可（内容来自 toastStore）。 */
+/** Toast stacked viewport at bottom-right: mount once at the App root (content comes from toastStore). */
 const KIND_TONE: Record<ToastKind, string> = {
   info: 'border-info/40 bg-info/10 text-info',
   success: 'border-success/40 bg-success/10 text-success',

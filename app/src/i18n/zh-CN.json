@@ -71,7 +71,11 @@
     "broadcast_ok": "已广播给 {{n}} 个 peer",
     "history_ok": "历史已刷新",
     "no_peers_hint": "暂无 peer",
-    "cleared": "输入已清空"
+    "cleared": "输入已清空",
+    "relay_off": "中转",
+    "relay_on": "中转中",
+    "enable_relay": "查看 hub 全部中转流水（张三↔李四、群广播等）",
+    "disable_relay": "回到自己的消息流"
   },
   "settings": {
     "language": "界面语言",

@@ -1,5 +1,5 @@
-// 前端 → 后端 typed wrapper（薄封装 @tauri-apps/api）。
-// 后续所有 invoke 都走这里，避免裸字符串在组件里散落。
+// Frontend → backend typed wrapper (thin wrapper around @tauri-apps/api).
+// All future invokes go through here to avoid bare strings scattered across components.
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 import { listen as tauriListen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -26,14 +26,14 @@ export interface LogLine {
 export interface Peer {
   id: string
   connected: boolean
-  /** hub bridge_peers / peers_changed 回传的可选字段（缺省 = 无）。 */
+  /** Optional field returned by hub bridge_peers / peers_changed (absent = none). */
   alias?: string
   clientName?: string
   clientVersion?: string
   lastSeenMs?: number
 }
 
-/** roster_list 返回的 SQLite peer 行（含 offline 已知 peer，用于恢复重启前花名册）。 */
+/** SQLite peer row returned by roster_list (includes offline known peers, used to restore the roster from before a restart). */
 export interface RosterRecord {
   peer_id: string
   last_seen: number
@@ -44,7 +44,7 @@ export interface RosterRecord {
   created_at: number
 }
 
-/** bridge_rename 结果：alias 清除时缺省；previousId 仅 id re-key 时存在。 */
+/** bridge_rename result: alias is absent when cleared; previousId exists only on an id re-key. */
 export interface RenameResult {
   ok: boolean
   peerId: string
@@ -52,7 +52,7 @@ export interface RenameResult {
   previousId?: string
 }
 
-/** bridge_unregister（带 peer = 管理端踢人）结果：目标不存在时 kicked=false。 */
+/** bridge_unregister (with peer = manager kick) result: kicked=false when the target does not exist. */
 export interface UnregisterPeerResult {
   ok: boolean
   peerId: string | null
@@ -64,7 +64,7 @@ export interface BridgePeersResult {
   peers: Peer[]
 }
 
-/** 与 hub src/protocol.ts 的 BridgeMessage 对齐（前端展示用）。 */
+/** Aligned with BridgeMessage in hub src/protocol.ts (for frontend display). */
 export interface PresentedMessage {
   id: string
   from: string
@@ -90,7 +90,7 @@ export interface BridgeHistoryResult {
   messages: PresentedMessage[]
 }
 
-/** history_local 返回的 SQLite 记录（content 是完整消息 JSON 字符串）。 */
+/** SQLite record returned by history_local (content is the full message JSON string). */
 export interface LocalMessageRecord {
   id: string
   from: string
@@ -101,7 +101,7 @@ export interface LocalMessageRecord {
   ts: number
 }
 
-/** bridge_wait 的返回：命中消息或超时。 */
+/** bridge_wait result: a matched message or a timeout. */
 export interface WaitResult {
   type: 'message' | 'timeout'
   message?: PresentedMessage
@@ -123,7 +123,7 @@ export interface UnreadRecord {
   last_read_ts: number | null
 }
 
-// herdr types（与 Rust herdr_client 镜像）
+// herdr types (mirroring the Rust herdr_client)
 
 export type HerdrAgentStatus =
   | 'idle'
@@ -319,10 +319,10 @@ export const tauri = {
   event: {
     onHubState: (handler: (status: HubStatus) => void): Promise<UnlistenFn> =>
       tauriListen<HubStatus>('hub:state', (e) => handler(e.payload)),
-    /** hub SSE 推送的消息（Rust 侧转发 notifications/message → Tauri `hub:message`）。 */
+    /** Hub SSE-pushed message (the Rust side forwards notifications/message → Tauri `hub:message`). */
     onHubMessage: (handler: (msg: PresentedMessage) => void): Promise<UnlistenFn> =>
       tauriListen<PresentedMessage>('hub:message', (e) => handler(e.payload)),
-    /** hub SSE peers_changed → Tauri `hub:peers`：payload 是完整花名册（Peer 数组）。 */
+    /** Hub SSE peers_changed → Tauri `hub:peers`: payload is the full roster (Peer array). */
     onHubPeers: (handler: (peers: Peer[]) => void): Promise<UnlistenFn> =>
       tauriListen<Peer[]>('hub:peers', (e) => handler(Array.isArray(e.payload) ? e.payload : []))
   }

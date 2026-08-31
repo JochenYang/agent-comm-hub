@@ -6,7 +6,7 @@ import { Markdown } from '@/lib/markdown'
 import { useTranslation } from '@/i18n'
 
 interface Props {
-  /** 当前 UI 的 peer id。 */
+  /** The current UI's peer id. */
   selfPeerId?: string
 }
 
@@ -17,7 +17,7 @@ const ACK_TONE: Record<AckContent['status'], string> = {
   failed: 'bg-destructive/15 text-destructive ring-destructive/30'
 }
 
-/** 详情栏：紧凑 mono 风格，task / ack / chat 分别渲染。 */
+/** Detail column: compact mono style, renders task / ack / chat separately. */
 export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Element {
   const { t } = useTranslation()
   const { messages, selectedId, selectMessage, sendAck, markPeerRead } = useMessagesStore()
@@ -30,7 +30,7 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
     return messages.find((m) => m.id === selectedId) ?? null
   }, [messages, selectedId])
 
-  // ack 状态机时间线：该 task 的 ref 链上所有 ack（双方发的），按时间推进。
+  // Ack state-machine timeline: all acks on this task's ref chain (sent by either side), advanced by timestamp.
   const ackTimeline = useMemo<PresentedMessage[]>(() => {
     if (selected === null || selected.kind !== 'task') return []
     return messages
@@ -45,8 +45,8 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
   }, [selected, selfPeerId, markPeerRead])
 
   if (selected === null) {
-    // 空态只保留面板框架（与其他两栏一致的标题栏），内容区留白 ——
-    // 不再放居中提示（用户反馈冗余），选中消息后直接填充。
+    // Empty state keeps only the panel frame (a title bar consistent with the other two columns), leaving the content area blank —
+    // no centered hint (user feedback said it was redundant); content fills in once a message is selected.
     return (
       <div className="flex h-full flex-col rounded-md border border-border bg-card">
         <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
@@ -207,7 +207,7 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
           </div>
         )}
 
-        {/* raw JSON 视图（SPEC §2：原始 JSON + 结构化字段） */}
+        {/* Raw JSON view (SPEC §2: raw JSON + structured fields) */}
         <div className="mt-4 border-t border-border pt-2">
           <button
             type="button"

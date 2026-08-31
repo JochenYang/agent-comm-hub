@@ -3,11 +3,11 @@ import { tauri, type LogLine } from '@/lib/tauri'
 import { useTranslation } from '@/i18n'
 
 interface Props {
-  /** 刷新间隔（ms），默认 500。 */
+  /** Refresh interval (ms), default 500. */
   intervalMs?: number
-  /** 最大可见行数（超出滚动）。 */
+  /** Max visible rows (beyond which it scrolls). */
   maxHeight?: string
-  /** 内嵌模式（放大弹窗里的实例）：隐藏放大按钮，避免嵌套弹窗。 */
+  /** Embedded mode (instance inside the expanded popup): hides the expand button to avoid nested popups. */
   embedded?: boolean
 }
 
@@ -17,7 +17,7 @@ function fmtTs(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-/** 实时日志面板（devtool 终端风：等宽 + 行号 + 时间戳 + stderr 过滤 + 暂停 + 放大弹窗）。 */
+/** Real-time log panel (devtool terminal style: monospace + line numbers + timestamps + stderr filter + pause + expand popup). */
 export function LogsView({ intervalMs = 500, maxHeight = '16rem', embedded = false }: Props): React.JSX.Element {
   const { t } = useTranslation()
   const [lines, setLines] = useState<LogLine[]>([])
@@ -35,7 +35,7 @@ export function LogsView({ intervalMs = 500, maxHeight = '16rem', embedded = fal
         const snap = await tauri.invoke.hubGetLogs()
         if (active) setLines(snap)
       } catch {
-        // 静默吞掉瞬时 IPC 错误
+        // Silently swallow transient IPC errors
       }
     }
     void tick()
@@ -46,7 +46,7 @@ export function LogsView({ intervalMs = 500, maxHeight = '16rem', embedded = fal
     }
   }, [intervalMs, paused])
 
-  // Esc 关闭放大弹窗
+  // Esc closes the expanded popup
   useEffect(() => {
     if (!expanded) return
     const onKey = (e: KeyboardEvent): void => {
@@ -64,7 +64,7 @@ export function LogsView({ intervalMs = 500, maxHeight = '16rem', embedded = fal
   const onScroll = (): void => {
     const el = ref.current
     if (el === null) return
-    // 用户往上滚就停自动跟随；贴底就恢复
+    // Stop auto-follow when the user scrolls up; resume when at the bottom
     setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 24)
   }
 
@@ -151,7 +151,7 @@ export function LogsView({ intervalMs = 500, maxHeight = '16rem', embedded = fal
         </div>
       </div>
 
-      {/* 放大弹窗：全屏遮罩 + 大面板，内嵌一个独立 LogsView 实例（共享 log ring）。 */}
+      {/* Expanded popup: fullscreen overlay + large panel, embedding an independent LogsView instance (sharing the log ring). */}
       {expanded && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm"

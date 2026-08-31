@@ -7,10 +7,10 @@ type Channel = 'agent' | 'pane'
 const THROTTLE_MS = 200
 
 /**
- * herdr 终端视图
- * - 顶部：herdr 可用性检测 + agent/pane tab
- * - 左栏：列表（每 3s refresh）
- * - 右栏：选中目标 + 操作按钮（prompt / read / send-keys）+ 输出区域（节流 200ms 刷新）
+ * herdr terminal view
+ * - Top: herdr availability check + agent/pane tab
+ * - Left column: list (refreshes every 3s)
+ * - Right column: selected target + action buttons (prompt / read / send-keys) + output area (throttled to 200ms refresh)
  */
 export function TerminalView(): React.JSX.Element {
   const { t } = useTranslation()
@@ -25,7 +25,7 @@ export function TerminalView(): React.JSX.Element {
   const lastReadRef = useRef<{ text: string; ts: number } | null>(null)
   const throttleTimerRef = useRef<number | null>(null)
 
-  // 启动时探测 herdr
+  // Probe herdr availability on mount
   useEffect(() => {
     void (async () => {
       try {
@@ -38,7 +38,7 @@ export function TerminalView(): React.JSX.Element {
     })()
   }, [])
 
-  // 列表轮询
+  // List polling
   useEffect(() => {
     let active = true
     const tick = async (): Promise<void> => {
@@ -62,7 +62,7 @@ export function TerminalView(): React.JSX.Element {
     }
   }, [channel])
 
-  // 节流 200ms 调 read
+  // Read calls throttled to 200ms
   const throttledRead = useCallback(
     (target: string) => {
       const last = lastReadRef.current
@@ -75,7 +75,7 @@ export function TerminalView(): React.JSX.Element {
             channel === 'agent'
               ? await tauri.invoke.herdrAgentRead(target, 50)
               : await tauri.invoke.herdrPaneRead(target, 50)
-          // 节流：最后一次写 setReadOutput 赢
+          // Throttle: the last write to setReadOutput wins
           if (throttleTimerRef.current !== null) {
             window.clearTimeout(throttleTimerRef.current)
           }
@@ -100,7 +100,7 @@ export function TerminalView(): React.JSX.Element {
     }
   }, [])
 
-  // 选中时立即拉一次 read
+  // Pull a read once when a target is selected
   useEffect(() => {
     if (selectedId !== null) throttledRead(selectedId)
   }, [selectedId, throttledRead])
@@ -114,7 +114,7 @@ export function TerminalView(): React.JSX.Element {
         await tauri.invoke.herdrPaneSendText(selectedId, text)
         await tauri.invoke.herdrPaneSendKeys(selectedId, ['Enter'])
       }
-      // 操作完成后立即刷新输出
+      // Refresh output immediately after an operation completes
       throttledRead(selectedId)
     } catch (e) {
       setReadError(serializeError(e))

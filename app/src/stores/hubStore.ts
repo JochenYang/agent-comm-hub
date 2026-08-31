@@ -3,8 +3,8 @@ import { tauri, type HubStatus, type HubState } from '@/lib/tauri'
 import { serializeError } from '@/lib/serializeError'
 
 /**
- * Hub 进程状态 store —— zustand 全局单例（事件订阅 + 命令代理）。
- * hub:state 事件监听在模块级启动一次；App / 托盘等所有组件共享同一状态。
+ * Hub process status store — zustand global singleton (event subscription + command proxy).
+ * The hub:state event listener is started once at module level; all components (App / tray, etc.) share the same state.
  */
 
 interface HubState_ {
@@ -26,7 +26,7 @@ export const useHubStore = create<HubState_>()((set) => ({
     try {
       set({ status: await tauri.invoke.hubStart() })
     } catch (e) {
-      // Tauri invoke 错误是 {ok:false,error} 对象；直接 String() 会得到 [object Object]。
+      // Tauri invoke errors are {ok:false,error} objects; String() alone yields [object Object].
       set({ error: serializeError(e) })
     } finally {
       set({ loading: false })
@@ -56,7 +56,7 @@ export const useHubStore = create<HubState_>()((set) => ({
   }
 }))
 
-// 模块级监听 hub:state（一次；组件不再各自 subscribe）
+// Listen for hub:state at module level (once; components no longer subscribe individually)
 void tauri.event.onHubState((status) => {
   useHubStore.setState({ status })
 })

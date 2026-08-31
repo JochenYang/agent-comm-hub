@@ -4,7 +4,7 @@ import { serializeError } from '@/lib/serializeError'
 import { Button } from '@/components/ui/button'
 import { SUPPORTED_LANGS, useTranslation } from '@/i18n'
 
-/** FIELDS key → i18n settings.* key 的映射（i18n 里 hub_host/hub_port/hub_path 带 hub_ 前缀）。 */
+/** Mapping from FIELDS key → i18n settings.* key (hub_host/hub_port/hub_path in i18n carry the hub_ prefix). */
 const LABEL_KEY: Record<string, string> = {
   host: 'hub_host',
   port: 'hub_port',
@@ -37,7 +37,7 @@ const FIELDS: Array<{
 ]
 
 /**
- * 配置面板：12 项 hub 启动参数 + SQLite 持久化 + 应用并重启。
+ * Config panel: 12 hub startup params + SQLite persistence + apply & restart.
  */
 export function SettingsView(): React.JSX.Element {
   const { t, lang, setLang } = useTranslation()
@@ -49,10 +49,10 @@ export function SettingsView(): React.JSX.Element {
   const [serviceBusy, setServiceBusy] = useState<boolean>(false)
   const [serviceOutput, setServiceOutput] = useState<string | null>(null)
   const [serviceError, setServiceError] = useState<string | null>(null)
-  // hub CLI 工具（版本 / 检查更新 / 更新 / 安装 / setup 配置 agents）
+  // hub CLI tools (version / check update / update / install / setup to configure agents)
   const [hubToolBusy, setHubToolBusy] = useState<boolean>(false)
   const [cliVersion, setCliVersion] = useState<string | null>(null)
-  /** CLI 是否可用（--version 成功）；false = 未安装，显示安装入口。 */
+  /** Whether the CLI is available (--version succeeds); false = not installed, show the install entry. */
   const [cliInstalled, setCliInstalled] = useState<boolean>(true)
   const [updateInfo, setUpdateInfo] = useState<{ latest: string; outdated: boolean } | null>(null)
   const [hubToolError, setHubToolError] = useState<string | null>(null)
@@ -63,7 +63,7 @@ export function SettingsView(): React.JSX.Element {
       setLoading(true)
       try {
         const raw = await tauri.invoke.configGet()
-        // HubConfigValues 是 Rust 返回 JSON object（snake_case keys）。
+        // HubConfigValues is the JSON object returned by Rust (snake_case keys).
         setValues({
           host: String(raw.host ?? '127.0.0.1'),
           port: Number(raw.port ?? 18764),
@@ -83,7 +83,7 @@ export function SettingsView(): React.JSX.Element {
         setLoading(false)
       }
     })()
-    // 进入设置页时自动读取本地 hub CLI 版本
+    // Auto-read the local hub CLI version when entering the settings page
     void loadCliVersion()
   }, [])
 
@@ -99,7 +99,7 @@ export function SettingsView(): React.JSX.Element {
     try {
       await tauri.invoke.configSet(values as unknown as Record<string, unknown>)
       setSavedAt(Date.now())
-      // 应用并重启
+      // Apply and restart
       await tauri.invoke.hubRestartWithSavedConfig()
     } catch (e) {
       setError(serializeError(e))
@@ -125,7 +125,7 @@ export function SettingsView(): React.JSX.Element {
     }
   }
 
-  /** 读取本地 hub CLI 版本（启动时自动 + 手动刷新）。失败 = 未安装。 */
+  /** Read the local hub CLI version (auto at startup + manual refresh). Failure = not installed. */
   const loadCliVersion = async (): Promise<void> => {
     setHubToolBusy(true)
     setHubToolError(null)
@@ -142,7 +142,7 @@ export function SettingsView(): React.JSX.Element {
     }
   }
 
-  /** 安装 hub CLI：npm install -g agent-comm-hub。 */
+  /** Install the hub CLI: npm install -g agent-comm-hub. */
   const installHubCli = async (): Promise<void> => {
     setHubToolBusy(true)
     setHubToolError(null)
@@ -150,7 +150,7 @@ export function SettingsView(): React.JSX.Element {
     try {
       const res = await tauri.invoke.hubCliInstall()
       setHubToolOutput(res.output === '' ? 'install: ok' : res.output)
-      // 安装成功后重新检测版本
+      // Re-detect the version after a successful install
       await loadCliVersion()
     } catch (e) {
       setHubToolError(serializeError(e))
@@ -159,7 +159,7 @@ export function SettingsView(): React.JSX.Element {
     }
   }
 
-  /** 配置本地 agents：agent-comm-hub setup（检测 + 安装 SKILL + 写 MCP 配置）。 */
+  /** Configure local agents: agent-comm-hub setup (detect + install SKILL + write MCP config). */
   const runSetup = async (): Promise<void> => {
     setHubToolBusy(true)
     setHubToolError(null)
@@ -174,7 +174,7 @@ export function SettingsView(): React.JSX.Element {
     }
   }
 
-  /** 检查更新：npm view agent-comm-hub version vs 本地 CLI 版本。 */
+  /** Check for updates: npm view agent-comm-hub version vs the local CLI version. */
   const checkUpdate = async (): Promise<void> => {
     setHubToolBusy(true)
     setHubToolError(null)
@@ -191,7 +191,7 @@ export function SettingsView(): React.JSX.Element {
     }
   }
 
-  /** 更新 hub：agent-comm-hub update（npm 重装全局包，输出展示）。 */
+  /** Update the hub: agent-comm-hub update (npm reinstall of the global package, output shown). */
   const runUpdate = async (): Promise<void> => {
     setHubToolBusy(true)
     setHubToolError(null)
@@ -199,7 +199,7 @@ export function SettingsView(): React.JSX.Element {
     try {
       const res = await tauri.invoke.hubCliUpdate()
       setHubToolOutput(res.output === '' ? 'update: ok' : res.output)
-      // 更新后刷新版本显示
+      // Refresh the version display after updating
       void loadCliVersion()
     } catch (e) {
       setHubToolError(serializeError(e))
@@ -220,7 +220,7 @@ export function SettingsView(): React.JSX.Element {
     <div className="rounded-md border bg-card">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2">
         <h3 className="text-sm font-semibold text-foreground">{t('settings.title')}</h3>
-        {/* 语言切换（SPEC AC-11：切换立即生效 + localStorage 持久化） */}
+        {/* Language switch (SPEC AC-11: applies immediately on switch + persists via localStorage) */}
         <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground">{t('settings.language')}:</span>
           <div className="flex overflow-hidden rounded-md border border-border">
@@ -279,7 +279,7 @@ export function SettingsView(): React.JSX.Element {
         </Button>
       </div>
 
-      {/* 开机自启（PRD F-13 / SPEC AC-9） */}
+      {/* Auto-start (PRD F-13 / SPEC AC-9) */}
       <div className="border-t border-border px-4 py-3">
         <div className="flex items-center justify-between">
           <div>
@@ -321,7 +321,7 @@ export function SettingsView(): React.JSX.Element {
         )}
       </div>
 
-      {/* Hub 工具：安装 / 版本 / 检查更新 / 更新 / 配置 agents（agent-comm-hub CLI 管理） */}
+      {/* Hub tools: install / version / check update / update / configure agents (managed via the agent-comm-hub CLI) */}
       <div className="border-t border-border px-4 py-3">
         <div className="flex items-center justify-between">
           <div>
@@ -414,7 +414,7 @@ export function SettingsView(): React.JSX.Element {
         )}
       </div>
 
-      {/* 底部：应用版本 */}
+      {/* Footer: app version */}
       <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-2">
         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground/70">
           agent-comm-hub-app v{__APP_VERSION__}

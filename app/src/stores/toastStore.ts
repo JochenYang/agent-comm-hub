@@ -1,10 +1,10 @@
 import { create } from 'zustand'
 
 /**
- * 轻量 toast 堆叠提示（右下角，自动消失）—— app 内没有现成通知系统时按
- * SPEC 的最小方案自建；只依赖 zustand，不引新包。
- * 调用方（peersStore 的上下线迁移 / PeersView 的管理动作）只管 pushToast，
- * 展示与消失由 ToastViewport（components/ui/toast.tsx）负责。
+ * Lightweight stacked toast hint (bottom-right, auto-dismiss) — built minimally per
+ * SPEC when the app has no existing notification system; only depends on zustand, no new packages.
+ * Callers (peersStore online/offline transitions / PeersView admin actions) only call pushToast;
+ * display and dismissal are handled by ToastViewport (components/ui/toast.tsx).
  */
 
 export type ToastKind = 'info' | 'success' | 'error'
@@ -32,7 +32,7 @@ export const useToastStore = create<ToastState>()((set) => ({
   pushToast: (kind, message) => {
     const id = nextId++
     set((s) => ({ toasts: [...s.toasts, { id, kind, message }].slice(-MAX_TOASTS) }))
-    // 自动消失：到点后仅在 toast 仍存在时移除（手动关掉的不重复 set）。
+    // Auto-dismiss: only remove if the toast still exists when the timer fires (a manually closed one is not re-set).
     window.setTimeout(() => {
       useToastStore.setState((s) =>
         s.toasts.some((t) => t.id === id)
@@ -46,7 +46,7 @@ export const useToastStore = create<ToastState>()((set) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
 }))
 
-/** 命令式入口：非组件模块（store / 后台任务）也能推 toast。 */
+/** Imperative entry point: lets non-component modules (stores / background tasks) push toasts too. */
 export function pushToast(kind: ToastKind, message: string): void {
   useToastStore.getState().pushToast(kind, message)
 }

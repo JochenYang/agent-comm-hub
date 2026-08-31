@@ -1,7 +1,7 @@
-/** 把任意 catch 到的值序列化成可读字符串（避免 [object Object]）。
- * Tauri invoke 的错误是 `{ ok: false, error: string }` 序列化对象；
- * 直接 String(e) 只会得到 "[object Object]"（历史踩坑：hubStore 停止按钮）。
- * 各 store / 视图统一从这里取，不再各自复制。 */
+/** Serialize any caught value into a readable string (avoiding [object Object]).
+ * Tauri invoke errors are `{ ok: false, error: string }` serialized objects;
+ * String(e) alone only yields "[object Object]" (historical pitfall: hubStore stop button).
+ * All stores / views take it from here uniformly rather than duplicating it. */
 export function serializeError(e: unknown): string {
   if (e instanceof Error) return e.message
   if (typeof e === 'string') return e

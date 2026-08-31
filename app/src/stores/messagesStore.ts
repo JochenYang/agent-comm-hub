@@ -11,10 +11,10 @@ import { serializeError } from '@/lib/serializeError'
 import { SELF_PEER_ID } from '@/lib/self'
 
 /**
- * 消息 store —— zustand 全局单例（SPEC §5.2 设计；此前的手写 hook 每个组件
- * 独立 useState 实例，selectedId / activePeer 跨组件完全不共享：MessagesView
- * 选中消息后 App/DetailView 读不到 → 右栏不渲染；点 peer 切会话也不生效）。
- * 轮询 / bridge_wait 循环 / SSE 监听都在模块级启动一次，所有组件共享同一份状态。
+ * Message store — zustand global singleton (SPEC §5.2 design; the earlier hand-written hook gave each component its own
+ * useState instance, so selectedId / activePeer were never shared across components: after MessagesView selected a message,
+ * App/DetailView couldn't read it → the right column wouldn't render; clicking a peer to switch conversations also did nothing).
+ * Polling / the bridge_wait loop / the SSE listener all start once at module level, and all components share the same state.
  */
 
 interface MessagesState {
@@ -23,9 +23,13 @@ interface MessagesState {
   error: string | null
   selectedId: string | null
   selectMessage: (id: string | null) => void
-  /** 当前查看的 peer 会话（PRD US-2）；null = 自己的消息流。 */
+  /** The peer conversation currently viewed (PRD US-2); null = own message stream. */
   activePeer: string | null
   setActivePeer: (peerId: string | null) => void
+  /** Relay-flow view (admin): when true, no filtering — shows every message on the hub
+   * (zhangsan↔lisi, group broadcasts, etc.), fed by the hub's relay push + a 3s full poll. */
+  relayAll: boolean
+  setRelayAll: (on: boolean) => void
   refresh: () => Promise<void>
   sendChat: (to: string, message: string) => Promise<boolean>
   sendTask: (
@@ -41,23 +45,25 @@ interface MessagesState {
   ) => Promise<boolean>
   markPeerRead: (peerId: string, ts: number) => void
   unreadCountFor: (peerId: string) => number
-  /** 所有 peer 的未读计数（peerId → count）。 */
+  /** Unread count for every peer (peerId → count). */
   unreadMap: Readonly<Record<string, number>>
-  /** 用户最后一次"看到" peer 消息的 ts（peerId → ts）。 */
+  /** The ts at which the user last "saw" a peer's messages (peerId → ts). */
   lastReadTs: Record<string, number>
-  /** 内部桥接：模块级 wait 循环 / SSE 监听追加消息用（去重 + 会话过滤）。 */
+  /** Internal bridge: the module-level wait loop / SSE listener appends messages through this (dedup + conversation filter). */
   pushMessageSafe: (msg: PresentedMessage) => void
-  /** 从 SQLite 拉取本地存档历史并合并（启动恢复 / `/history` 命令共用）。 */
+  /** Pulls local archive history from SQLite and merges it in (startup restore / shared by the `/history` command). */
   restoreLocal: (limit?: number, peer?: string) => Promise<void>
 }
 
 const POLL_INTERVAL_MS = 3_000
 const HISTORY_LIMIT = 100
 
-/** 是否属于当前视图。拉取已是全量 ring 尾部（peer="all"，见 refresh），过滤
- * 全部在客户端做：无会话 = 只看与自己相关 + 广播（镜像 hub 的 history 过滤
- * 语义）；有会话 = 该 peer 的收发 + 广播。 */
-function belongsToView(activePeer: string | null, msg: { from: string; to: string }): boolean {
+/** Whether a message belongs to the current view. The pull is already the full ring tail (peer="all", see refresh); filtering
+ * all happens client-side: relayAll = relay-flow view, no message is filtered; otherwise the default filters:
+ * no conversation = only messages involving self + broadcasts (mirroring the hub's history filtering semantics); a conversation =
+ * that peer's send/receive + broadcasts. */
+function belongsToView(relayAll: boolean, activePeer: string | null, msg: { from: string; to: string }): boolean {
+  if (relayAll) return true
   if (activePeer === null) {
     return msg.from === SELF_PEER_ID || msg.to === SELF_PEER_ID || msg.to === 'all'
   }
@@ -65,17 +71,17 @@ function belongsToView(activePeer: string | null, msg: { from: string; to: strin
 }
 
 export const useMessagesStore = create<MessagesState>()((set, get) => {
-  /** 追加一条消息（去重 + 会话过滤）。 */
+  /** Append a message (dedup + conversation filter). */
   const pushMessage = (msg: PresentedMessage): void => {
     set((s) => {
       if (s.messages.some((m) => m.id === msg.id)) return s
-      if (!belongsToView(s.activePeer, msg)) return s
+      if (!belongsToView(get().relayAll, s.activePeer, msg)) return s
       return { messages: [...s.messages, msg] }
     })
   }
 
-  /** 乐观追加：hub 的 history ring 只在 waiter 命中时记录，刚发的消息不进 history，
-   *  用 receipt 立即本地追加（后续 refresh 合并去重）。 */
+  /** Optimistic append: the hub's history ring only records on waiter hits, so a freshly sent message isn't in
+   *  history yet — use the receipt to append locally right away (later refresh dedups the merge). */
   const appendLocal = (receipt: ChatReceipt | null | undefined, content: unknown): void => {
     if (receipt === null || receipt === undefined || receipt.ok !== true || receipt.id === '') return
     pushMessage({
@@ -96,9 +102,12 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
     selectMessage: (id) => set({ selectedId: id }),
     activePeer: null,
     setActivePeer: (peerId) => {
-      // 切会话同步清选中：旧选中消息大概率不在新会话列表里（用户反馈右栏"卡住"）。
+      // Clearing selection when switching conversations: the previously selected message is likely not in the new conversation's
+      // list (user feedback: the right column felt "stuck").
       set({ activePeer: peerId, selectedId: null })
     },
+    relayAll: false,
+    setRelayAll: (on) => set({ relayAll: on }),
     lastReadTs: {},
     pushMessageSafe: (msg) => pushMessage(msg),
 
@@ -109,30 +118,33 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
         if (records.length === 0) return
         const restored = records.map(recordToMessage)
         set((s) => {
+          // Also filter by the current view: the full archive pulled by the relay view (incl. others' private chats) must not
+          // remain in the normal message stream; belongsToView recomputes when switching back to the conversation view.
+          const inView = (m: PresentedMessage): boolean => belongsToView(get().relayAll, s.activePeer, m)
           const merged = [
-            ...restored,
-            ...s.messages.filter((m) => !restored.some((r) => r.id === m.id))
+            ...restored.filter(inView),
+            ...s.messages.filter((m) => !restored.some((r) => r.id === m.id) && inView(m))
           ]
           return { messages: merged }
         })
       } catch {
-        // hub 未起 / 无历史：保持现状
+        // Hub not running / no history: keep the current state
       }
     },
 
     refresh: async () => {
       set({ loading: true, error: null })
       try {
-        // 拉 peer="all"（未过滤 ring 尾部）而不是只拉当前会话：一次轮询同时
-        // 服务两个目的 —— 视图（下方按会话过滤）+ SQLite 归档（Rust 侧把返回
-        // 的每条消息旁路落盘，peer-to-peer 流量因此可恢复）。此前只拉自己的
-        // 流，其他 agent 互聊的消息永远不会进 SQLite。ring 上限 1000、每次拉
-        // 200 条，正常对话密度下足以覆盖轮询间隔内的增量。
+        // Pull peer="all" (the unfiltered ring tail) rather than only the current conversation: a single poll serves
+        // two purposes at once — the view (filtered by conversation below) + SQLite archiving (the Rust side writes
+        // each returned message to disk as a side effect, so peer-to-peer traffic becomes recoverable). Previously only
+        // its own stream was pulled, so other agents' inter-chats never made it into SQLite. Ring cap is 1000, pulling
+        // 200 per call, which covers the delta between polls at a normal conversation density.
         const result = await tauri.invoke.bridgeHistory('all', 200)
         const base = Array.isArray(result?.messages) ? result.messages : []
-        // 合并而非替换：乐观追加的本地消息不在 history 里，全量替换会冲掉刚发的。
+        // Merge rather than replace: optimistically appended local messages aren't in history, so a full replace would wipe out what was just sent.
         set((s) => {
-          const inView = (m: PresentedMessage): boolean => belongsToView(s.activePeer, m)
+          const inView = (m: PresentedMessage): boolean => belongsToView(get().relayAll, s.activePeer, m)
           const extra = s.messages.filter((m) => !base.some((b) => b.id === m.id) && inView(m))
           return { messages: [...extra, ...base.filter(inView)] }
         })
@@ -208,25 +220,29 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
   }
 })
 
-// ---- 派生 unreadMap：消息/已读变化时重算 ----
+// ---- Derived unreadMap: recomputed when messages/unread changes ----
 useMessagesStore.subscribe((s) => {
   const out: Record<string, number> = {}
-  for (const m of s.messages) {
-    const peer = m.from
-    if (peer === SELF_PEER_ID) continue
-    if (m.ts > (s.lastReadTs[peer] ?? 0)) out[peer] = (out[peer] ?? 0) + 1
+  // In the relay-flow view every peer's messages enter the pool — those aren't "unread sent to me"; counting them as usual
+  // would pollute the dimension into a full screen of badges; no unread is derived in this view.
+  if (!s.relayAll) {
+    for (const m of s.messages) {
+      const peer = m.from
+      if (peer === SELF_PEER_ID) continue
+      if (m.ts > (s.lastReadTs[peer] ?? 0)) out[peer] = (out[peer] ?? 0) + 1
+    }
   }
-  // 值变化才 set，避免无限循环（unreadMap 不在 state 里持久化，仅派生快照）
+  // Only set when the value changes, to avoid an infinite loop (unreadMap isn't persisted in state, just a derived snapshot)
   const prev = useMessagesStore.getState().unreadMap
   const changed = Object.keys(out).length !== Object.keys(prev).length ||
     Object.entries(out).some(([k, v]) => prev[k] !== v)
   if (changed) useMessagesStore.setState({ unreadMap: out })
 })
 
-// ---- 模块级后台任务（启动一次，全 app 共享）----
+// ---- Module-level background tasks (started once, shared across the whole app) ----
 
-/** SQLite 记录 → PresentedMessage：content 是完整消息 JSON（写入时 v.to_string()），
- *  解析出真实 content / id / from / to / kind / ref / ts。 */
+/** SQLite record → PresentedMessage: content is the full message JSON (written via v.to_string()),
+ *  from which the real content / id / from / to / kind / ref / ts are parsed. */
 function recordToMessage(r: LocalMessageRecord): PresentedMessage {
   let content: unknown = r.content
   let id = r.id
@@ -247,7 +263,7 @@ function recordToMessage(r: LocalMessageRecord): PresentedMessage {
       if (typeof full.ts === 'number') ts = full.ts
     }
   } catch {
-    // 非 JSON content：按原样保留
+    // Non-JSON content: keep it as-is
   }
   return {
     id,
@@ -260,19 +276,19 @@ function recordToMessage(r: LocalMessageRecord): PresentedMessage {
   }
 }
 
-// 启动恢复：按产品决策（jochen）启动时不自动加载 SQLite 存档 —— 消息流从
-// 当前 hub 的实时/内存消息开始（清爽）；想看历史用 `/history [N]` 手动拉取
-// （restoreLocal 保留在 store 里，/history 命令调用）。数据库仍持续落盘。
+// Startup restore: per the product decision (jochen), SQLite archives are not auto-loaded at startup — the message stream
+// starts from the hub's current real-time/in-memory messages (clean); to see history, pull it manually with `/history [N]`
+// (restoreLocal stays in the store, called by the /history command). The database still keeps being written continuously.
 
 
-// 3s 轮询历史（兜底；wait 循环是主通道）
+// Poll history every 3s (fallback; the wait loop is the primary channel)
 void useMessagesStore.getState().refresh()
 window.setInterval(() => {
   void useMessagesStore.getState().refresh()
 }, POLL_INTERVAL_MS)
 
-// 持续 bridge_wait 长轮询：hub 不推 SSE 消息且 history 只在 waiter/poll 命中时
-// 记录 —— 不 wait 就收不到其他 peer 的回复。25s 预算，命中/超时即续。
+// Continuous bridge_wait long-polling: the hub doesn't push SSE messages and history is only recorded on waiter/poll hits —
+// without waiting, other peers' replies are never received. 25s budget; renew on hit or timeout.
 void (async function waitLoop(): Promise<void> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -282,13 +298,13 @@ void (async function waitLoop(): Promise<void> {
         useMessagesStore.getState().pushMessageSafe(res.message)
       }
     } catch {
-      // hub 断连 / 懒重连窗口：歇 2s 再续（require_mcp 会重建连接）
+      // Hub disconnected / lazy reconnect window: rest 2s before retrying (require_mcp rebuilds the connection)
       await new Promise((r) => setTimeout(r, 2_000))
     }
   }
 })()
 
-// SSE 增量推送监听（hub 未来支持 notifications/message 时生效；当前是空转）
+// SSE incremental-push listener (takes effect when the hub supports notifications/message; currently idle)
 void tauri.event.onHubMessage((msg) => {
   useMessagesStore.getState().pushMessageSafe(msg)
 })

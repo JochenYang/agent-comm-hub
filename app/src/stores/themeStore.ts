@@ -1,9 +1,9 @@
 import { create } from 'zustand'
 
 /**
- * 主题 store —— 三态：dark / light / system（跟随系统 prefers-color-scheme）。
- * 实际生效主题由 JS 解析（system → matchMedia），写入 <html data-theme>，
- * CSS 只有 dark/light 两组变量，避免媒体查询与 data-theme 的叠加复杂度。
+ * Theme store — three modes: dark / light / system (follows system prefers-color-scheme).
+ * The effective theme is resolved in JS (system → matchMedia), written to <html data-theme>,
+ * CSS only carries dark/light variable sets to avoid the complexity of combining media queries with data-theme.
  */
 
 export type ThemeMode = 'dark' | 'light' | 'system'
@@ -28,7 +28,7 @@ interface ThemeState {
   mode: ThemeMode
   resolved: ResolvedTheme
   setMode: (next: ThemeMode) => void
-  /** 循环切换：dark → light → system → dark（顶栏按钮用）。 */
+  /** Cycle toggle: dark → light → system → dark (used by the top-bar button). */
   cycle: () => void
 }
 
@@ -52,12 +52,12 @@ export const useThemeStore = create<ThemeState>()((set, get) => ({
   }
 }))
 
-// 初始化：把解析后的主题写到 <html>（App 渲染前生效，避免闪白/闪黑）
+// Init: write the resolved theme to <html> (takes effect before App renders, avoiding white/flash)
 if (typeof document !== 'undefined') {
   document.documentElement.dataset.theme = resolve(initialMode)
 }
 
-// system 模式下监听系统主题变化（如白天切黑夜），自动跟随
+// In system mode, listen for system theme changes (e.g. switching day/night) and follow automatically
 if (typeof window !== 'undefined') {
   window.matchMedia(MEDIA).addEventListener('change', (e) => {
     const s = useThemeStore.getState()
@@ -69,7 +69,7 @@ if (typeof window !== 'undefined') {
   })
 }
 
-/** 只写 DOM（不碰 store 状态）——供 matchMedia 回调用。 */
+/** Only writes the DOM (does not touch store state) — used by the matchMedia callback. */
 function setThemeDom(t: ResolvedTheme): void {
   document.documentElement.dataset.theme = t
 }

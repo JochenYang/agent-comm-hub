@@ -71,7 +71,11 @@
     "broadcast_ok": "broadcast to {{n}} peers",
     "history_ok": "history refreshed",
     "no_peers_hint": "no peers",
-    "cleared": "input cleared"
+    "cleared": "input cleared",
+    "relay_off": "relay",
+    "relay_on": "relay on",
+    "enable_relay": "watch all hub relay traffic (peer-to-peer, group broadcasts)",
+    "disable_relay": "back to my message stream"
   },
   "settings": {
     "language": "UI language",

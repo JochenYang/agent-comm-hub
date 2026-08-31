@@ -1,20 +1,20 @@
-/* Tailwind + 设计 token + 字体 base 合并文件
+/* Tailwind + design tokens + font base merged into one file
  *
- * PostCSS 处理单文件时，跨文件的 @layer base 会因找不到 @tailwind base 而报错。
- * 把 :root vars + @layer base overrides 都合并到这里。
+ * When PostCSS processes a single file, cross-file @layer base fails because @tailwind base is not found.
+ * So :root vars + @layer base overrides are all merged here.
  *
- * 设计方向：devtool / terminal 风（off-black + cyan accent + JetBrains Mono）
- * 校验（/color skill）：
+ * Design direction: devtool / terminal style (off-black + cyan accent + JetBrains Mono)
+ * Validation (via /color skill):
  *   primary(cyan-500) on background(zinc-950) = ~7:1 (AAA)
  *   body-text(zinc-100) on card(zinc-900)    = ~13:1 (AAA)
  *   destructive(red-500) on background       = ~5:1 (AA)
- * CVD-safe: success=emerald + error=red；不依赖颜色单一区分。
- * 无 chromostereopsis（红/蓝不同屏）。 */
+ * CVD-safe: success=emerald + error=red; never rely on color alone.
+ * No chromostereopsis (red/blue not on the same screen). */
 
-/* Geist Sans + Geist Mono via Google Fonts CDN（开发期方案；发布前应换 self-host）。
+/* Geist Sans + Geist Mono via Google Fonts CDN (dev-stage approach; switch to self-host before release).
  *
- * 注意: PostCSS 强制要求 @import 必须排在 @tailwind base / components / utilities
- * 之前,否则整个 CSS 编译失败 — 把这行放在文件最顶部,确保先于其他规则。 */
+ * Note: PostCSS forces @import to precede @tailwind base / components / utilities, otherwise the whole
+ * CSS fails to compile — keep this line at the very top so it comes before all other rules. */
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap');
 
 @tailwind base;
@@ -22,22 +22,22 @@
 :root,
 [data-theme='dark'] {
   color-scheme: dark;
-  /* surfaces (zinc 偏冷 off-black；比 slate-950 略柔但仍是深色) */
-  --background: 220 14% 5%;        /* zinc-950  #09090b  → 调整为 #0A0E14 视觉稍亮 */
+  /* surfaces (zinc cold-ish off-black; slightly softer than slate-950 but still dark) */
+  --background: 220 14% 5%;        /* zinc-950  #09090b  → adjusted to #0A0E14, visually brighter */
   --foreground: 0 0% 98%;          /* zinc-50  near white */
-  --card: 220 13% 11%;             /* zinc-900 #18181b  → 稍提亮 11% 区分 bg 6% */
+  --card: 220 13% 11%;             /* zinc-900 #18181b  → slightly brightened to 11% to distinguish from bg 6% */
   --card-foreground: 0 0% 98%;
-  --popover: 220 13% 14%;          /* zinc-850 抬升 */
+  --popover: 220 13% 14%;          /* zinc-850 lifted */
   --popover-foreground: 0 0% 98%;
-  /* primary = 品牌蓝 #2962FF（新 logo 主色：海豚+对话气泡，钴蓝/矢车菊蓝系）*/
+  /* primary = brand blue #2962FF (new logo main color: dolphin + speech bubble, cobalt/cornflower blues) */
   --primary: 224 72% 58%;          /* #2962FF */
-  --primary-foreground: 220 14% 5%; /* dark text on brand-blue button（对比 ~7:1 AAA）*/
+  --primary-foreground: 220 14% 5%; /* dark text on brand-blue button (contrast ~7:1 AAA) */
   /* secondary = zinc-700 hover */
   --secondary: 220 9% 20%;
   --secondary-foreground: 0 0% 98%;
   --muted: 220 9% 18%;
   --muted-foreground: 220 9% 60%;   /* zinc-400 */
-  /* accent = primary 复用（hover 用） */
+  /* accent = reuses primary (for hovers) */
   --accent: 224 72% 58%;
   --accent-foreground: 220 14% 5%;
   /* destructive = red-500 */
@@ -47,25 +47,25 @@
   --border: 220 9% 22%;
   --input: 220 9% 22%;
   --ring: 224 72% 58%;
-  /* 全局 radius 锁死 6px（devtool 锐利；不再 lg/md 混用） */
+  /* Global radius locked to 6px (devtool sharpness; no more lg/md mixing) */
   --radius: 0.375rem;
-  /* semantic（info 与品牌蓝同族；success/warning 独立语义色） */
+  /* semantic (info shares the brand-blue family; success/warning are independent semantic colors) */
   --success: 142 71% 45%;           /* emerald-500 */
   --warning: 38 92% 50%;            /* amber-500 */
-  --info: 224 72% 58%;              /* 品牌蓝 = primary */
+  --info: 224 72% 58%;              /* brand blue = primary */
 }
 
-/* 浅色主题：同品牌蓝主色，surface 换浅色（zinc-50 系） */
+/* Light theme: same brand-blue primary, surfaces switch to light (zinc-50 family) */
 [data-theme='light'] {
   color-scheme: light;
-  --background: 220 20% 97%;        /* 近白 */
-  --foreground: 222 20% 12%;        /* 深灰文字 */
+  --background: 220 20% 97%;        /* near white */
+  --foreground: 222 20% 12%;        /* dark gray text */
   --card: 0 0% 100%;
   --card-foreground: 222 20% 12%;
   --popover: 0 0% 100%;
   --popover-foreground: 222 20% 12%;
-  --primary: 224 72% 58%;           /* 品牌蓝不变 */
-  --primary-foreground: 0 0% 100%;  /* 蓝底白字（对比 ~4.5:1 AA） */
+  --primary: 224 72% 58%;           /* brand blue unchanged */
+  --primary-foreground: 0 0% 100%;  /* white text on blue (contrast ~4.5:1 AA) */
   --secondary: 220 10% 90%;
   --secondary-foreground: 222 20% 12%;
   --muted: 220 12% 93%;
@@ -91,12 +91,12 @@
     font-family: 'Geist', ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: 'rlig' 1, 'calt' 1;
   }
-  /* mono fallback：消息 id / ts / 控制台 / 配置 id 等 */
+  /* mono fallback: message ids / ts / console / config ids etc. */
   code, kbd, samp, pre, .font-mono {
     font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  /* 原生 select 展开面板的 option 对比度：跟随主题变量（WebView2 支持 option 样式，
-   * 否则深色主题下会出现白底白字/黑底黑字看不清） */
+  /* Native select popup option contrast: follows the theme variables (WebView2 supports option styles,
+   * otherwise white-on-white / black-on-black is unreadable in the dark theme) */
   select option {
     background-color: hsl(var(--card));
     color: hsl(var(--foreground));
@@ -106,10 +106,10 @@
 @tailwind components;
 @tailwind utilities;
 
-/* hljs 代码高亮 override：github-dark 基础色 → Zinc+Cyan devtool 色板。
- * markdown.tsx 的注释承诺"见 tailwind.css 的 .hljs-* override"，这里落地：
- * 背景透明（跟随卡片），关键字/字符串/数字用 cyan/emerald/amber 提亮，
- * 注释走 muted，保证对比度 ≥ AA 且不引入第二色板。 */
+/* hljs code-highlight override: github-dark base color → Zinc+Cyan devtool palette.
+ * markdown.tsx's comment promises "see the .hljs-* overrides in tailwind.css", implemented here:
+ * transparent background (follows the card), keywords/strings/numbers brightened with cyan/emerald/amber,
+ * comments go muted, keeping contrast ≥ AA without introducing a second palette. */
 .hljs {
   background: transparent;
   color: hsl(var(--foreground));
@@ -164,7 +164,7 @@
   font-weight: 600;
 }
 
-/* 浅色主题下的 hljs 变体：文字/语法色压暗，保证浅底可读 */
+/* hljs variant under the light theme: text/syntax colors darkened for readability on light backgrounds */
 [data-theme='light'] .hljs {
   color: hsl(222 20% 25%);
 }

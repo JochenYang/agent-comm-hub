@@ -1,12 +1,12 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
-// tailwind.css 已合并 :root vars + @layer base overrides（合并到同一文件避免 PostCSS 跨文件 layer 报错）。
-// 早期独立的 theme.css 保留作归档，不再 import。
+// tailwind.css already merges :root vars + @layer base overrides (merged into one file to avoid PostCSS cross-file layer errors).
+// The earlier standalone theme.css is kept for archival only and is no longer imported.
 import './styles/tailwind.css'
 import { initI18n } from './i18n'
 
-// 必须在首次 render 前初始化 i18next,否则 useTranslation ready=false 会出 fallback warning。
+// Must init i18next before first render, otherwise useTranslation ready=false triggers a fallback warning.
 initI18n()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
