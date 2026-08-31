@@ -10,7 +10,7 @@
 
 import { startHub } from './entry.mjs'
 import { tmpdir } from 'node:os'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 
 const PORT = 18998
 const BASE = `http://127.0.0.1:${PORT}/mcp`
@@ -498,7 +498,7 @@ try {
   rmSync(stateFile, { force: true })
 
   console.log('== remote auth: bearer tokens bind identity ==')
-  // Token table: 张三/李四 both run a client named "kimi-code" (the R0 串台
+  // Token table: two clients both named kimi-code (the R0 cross-talk
   // scenario); tokens map them to DISTINCT peers, the manager token rules.
   const tokenFile = `${tmpdir()}/hub-auth-test-${Date.now()}.json`
   writeFileSync(tokenFile, JSON.stringify({ tokens: [
@@ -525,7 +525,7 @@ try {
     check('token identity overrides the client-reported name', zsRow?.clientName === 'kimi-code', JSON.stringify(rosterA))
     check('same-name clients land on distinct token peers', rosterA.peers.some(p => p.id === 'lisi') && rosterA.peers.some(p => p.id === 'ops-admin'), JSON.stringify(rosterA))
 
-    // The R0 leak, closed: 张三's message must NOT reach 李四's mailbox.
+    // The R0 leak, closed: one token user's message must NOT reach another's mailbox.
     await zs.call('bridge_chat', { to: 'zhangsan', message: '张三的交接任务' })
     const lsDrain = await ls.call('bridge_poll')
     check('no cross-user mailbox leak between same-name clients', lsDrain.messages.length === 0, JSON.stringify(lsDrain))
@@ -546,6 +546,199 @@ try {
   } finally {
     hubAuth.close()
     rmSync(tokenFile, { force: true })
+  }
+
+  console.log('== groups (group channels) ==')
+  const hubGrp = startHub({ port: 19007, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000 }, { info: () => {}, warn: () => {} })
+  try {
+    const base = 'http://127.0.0.1:19007/mcp'
+    const zs = makeClient('zhangsan', base)
+    const ls = makeClient('lisi', base)
+    const boss = makeClient('agent-hub-cli', base) // default manager
+    await Promise.all([zs.init(), ls.init(), boss.init()])
+    const created = await zs.call('bridge_group_create', { group: 'eng', name: '工程群', members: ['lisi'] })
+    check('group created with creator auto-joined', created.ok === true && JSON.stringify(created.group.members) === JSON.stringify(['zhangsan', 'lisi']), JSON.stringify(created))
+    const dup = await ls.callRaw('bridge_group_create', { group: 'eng', members: ['lisi'] })
+    check('duplicate group id rejected', dup.error !== undefined, JSON.stringify(dup))
+    const ghostMember = await zs.callRaw('bridge_group_create', { group: 'x', members: ['nobody'] })
+    check('unknown member rejected at create', ghostMember.error !== undefined, JSON.stringify(ghostMember))
+
+    await zs.call('bridge_group_send', { group: 'eng', message: '群里交接一下' })
+    const lsGot = await ls.call('bridge_wait', { timeoutMs: 2000 })
+    check('group message reaches members with channel tag', lsGot.type === 'message' && lsGot.message.channel === 'eng' && lsGot.message.to === 'eng' && lsGot.message.content === '群里交接一下', JSON.stringify(lsGot))
+    const bossDrain = await boss.call('bridge_poll')
+    check('non-member receives no group traffic', bossDrain.messages.length === 0, JSON.stringify(bossDrain))
+
+    const lsHistory = await ls.call('bridge_history', { limit: 10 })
+    check('own history includes group channels the peer is in', lsHistory.messages.some(m => m.channel === 'eng'), JSON.stringify(lsHistory.messages.map(m => m.to)))
+    const grpHistory = await ls.call('bridge_history', { channel: 'eng', limit: 10 })
+    check('channel history tail works for members', grpHistory.messages.some(m => m.content === '群里交接一下'), JSON.stringify(grpHistory))
+    const bossGrpHistory = await boss.call('bridge_history', { channel: 'eng', limit: 10 })
+    check('channel history readable by manager (non-member)', bossGrpHistory.messages.length >= 1, JSON.stringify(bossGrpHistory))
+
+    const outsider = await ls.callRaw('bridge_group_send', { group: 'eng', message: 'x' }) // lisi IS a member; use a fresh outsider
+    void outsider
+    const stranger = makeClient('stranger9', base)
+    await stranger.init()
+    const notMember = await stranger.callRaw('bridge_group_send', { group: 'eng', message: 'hi' })
+    check('non-member cannot send to the group', notMember.error !== undefined && /not a member/.test(notMember.error), JSON.stringify(notMember))
+    const deniedDelete = await stranger.callRaw('bridge_group_delete', { group: 'eng' })
+    check('non-creator non-manager cannot delete a group', deniedDelete.error !== undefined && /manager/.test(deniedDelete.error), JSON.stringify(deniedDelete))
+
+    // dynamic membership: add/remove members after create (0.7.x)
+    const wangwu = makeClient('wangwu', base)
+    await wangwu.init()
+    const wangDenied = await wangwu.callRaw('bridge_group_add_member', { group: 'eng', member: 'stranger9' })
+    check('non-creator non-manager cannot add members', wangDenied.error !== undefined && /manager/.test(wangDenied.error), JSON.stringify(wangDenied))
+    const bossAdd = await boss.call('bridge_group_add_member', { group: 'eng', member: 'wangwu' })
+    check('manager can add a member', bossAdd.ok === true && bossAdd.group.members.includes('wangwu'), JSON.stringify(bossAdd))
+    await zs.call('bridge_poll') // drain the earlier outsider "x" from lisi before waiting
+    await wangwu.call('bridge_group_send', { group: 'eng', message: '由 manager 拉入后发言' })
+    const zsGot = await zs.call('bridge_wait', { timeoutMs: 2000 })
+    check('newly added member can send to the group', zsGot.type === 'message' && zsGot.message.channel === 'eng' && zsGot.message.content === '由 manager 拉入后发言', JSON.stringify(zsGot))
+    const zsAdd = await zs.call('bridge_group_add_member', { group: 'eng', member: 'stranger9' })
+    check('creator can add a member', zsAdd.ok === true && zsAdd.group.members.includes('stranger9'), JSON.stringify(zsAdd))
+    const dupAdd = await zs.callRaw('bridge_group_add_member', { group: 'eng', member: 'stranger9' })
+    check('duplicate member rejected at add', dupAdd.error !== undefined && /already a member/.test(dupAdd.error), JSON.stringify(dupAdd))
+    const ghostAdd = await zs.callRaw('bridge_group_add_member', { group: 'eng', member: 'nobody' })
+    check('unknown member rejected at add', ghostAdd.error !== undefined, JSON.stringify(ghostAdd))
+    const removed = await zs.call('bridge_group_remove_member', { group: 'eng', member: 'lisi' })
+    check('creator can remove a member', removed.ok === true && !removed.group.members.includes('lisi'), JSON.stringify(removed))
+    const kickedSend = await ls.callRaw('bridge_group_send', { group: 'eng', message: 'x' })
+    check('removed member cannot send to the group', kickedSend.error !== undefined && /not a member/.test(kickedSend.error), JSON.stringify(kickedSend))
+    const selfRemoval = await zs.callRaw('bridge_group_remove_member', { group: 'eng', member: 'zhangsan' })
+    check('creator cannot remove itself', selfRemoval.error !== undefined && /creator/.test(selfRemoval.error), JSON.stringify(selfRemoval))
+    const unknownRemoval = await zs.callRaw('bridge_group_remove_member', { group: 'eng', member: 'nobody' })
+    check('unknown member rejected at remove', unknownRemoval.error !== undefined && /not a member/.test(unknownRemoval.error), JSON.stringify(unknownRemoval))
+
+    const deleted = await zs.call('bridge_group_delete', { group: 'eng' })
+    check('creator can delete the group', deleted.ok === true, JSON.stringify(deleted))
+    const afterDelete = await zs.callRaw('bridge_group_send', { group: 'eng', message: 'x' })
+    check('send to deleted group rejected', afterDelete.error !== undefined && /unknown group/.test(afterDelete.error), JSON.stringify(afterDelete))
+  } finally {
+    hubGrp.close()
+  }
+
+  console.log('== persistence (sqlite db) ==')
+  const dbFile = `${tmpdir()}/hub-state-test-${Date.now()}.db`
+  const hubDbA = startHub({ port: 19008, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000, db: dbFile }, { info: () => {}, warn: () => {} })
+  try {
+    const base = 'http://127.0.0.1:19008/mcp'
+    const alice = makeClient('alice', base)
+    const bob = makeClient('bob', base)
+    await Promise.all([alice.init(), bob.init()])
+    await alice.call('bridge_register', { peerId: 'alice', alias: '持久化·爱丽丝' })
+    await alice.call('bridge_chat', { to: 'bob', message: '重启前的话' })
+    await alice.call('bridge_group_create', { group: 'ops', members: ['bob'] })
+    const carol = makeClient('carol', base)
+    await carol.init()
+    await alice.call('bridge_group_add_member', { group: 'ops', member: 'carol' })
+    // bob never polls → the message stays queued; close flushes everything.
+  } finally {
+    hubDbA.close()
+  }
+  check('sqlite state file exists after close', existsSync(dbFile), dbFile)
+
+  const hubDbB = startHub({ port: 19009, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000, db: dbFile }, { info: () => {}, warn: () => {} })
+  try {
+    const base = 'http://127.0.0.1:19009/mcp'
+    const adminRoute = await fetch('http://127.0.0.1:19009/admin')
+    const adminHtml = await adminRoute.text()
+    check('built-in admin page served at /admin', adminRoute.status === 200 && adminRoute.headers.get('content-type')?.includes('text/html') && adminHtml.includes('管理台'), String(adminRoute.status))
+    const alice = makeClient('alice', base)
+    const bob = makeClient('bob', base)
+    await Promise.all([alice.init(), bob.init()])
+    await alice.call('bridge_register', { peerId: 'alice' })
+    const roster = await alice.call('bridge_peers')
+    check('alias restored from sqlite across restart', roster.peers.find(p => p.id === 'alice')?.alias === '持久化·爱丽丝', JSON.stringify(roster))
+    const history = await alice.call('bridge_history', { limit: 10 })
+    check('history restored from sqlite', history.messages.some(m => m.content === '重启前的话'), JSON.stringify(history.messages.map(m => m.content)))
+    const bobMail = await bob.call('bridge_poll')
+    check('offline mailbox restored from sqlite', bobMail.messages.length === 1 && bobMail.messages[0].content === '重启前的话', JSON.stringify(bobMail))
+    const groups = await alice.call('bridge_group_list')
+    check('groups restored from sqlite', groups.groups.some(g => g.id === 'ops' && g.members.includes('bob')), JSON.stringify(groups))
+    check('group membership edit restored from sqlite', groups.groups.some(g => g.id === 'ops' && g.members.includes('carol')), JSON.stringify(groups))
+  } finally {
+    hubDbB.close()
+    rmSync(dbFile, { force: true })
+  }
+
+  console.log('== auth token management (cli roundtrip) ==')
+  {
+    const { generateToken, addToken, removeToken, readTokens } = await import('./entry.mjs')
+    const tokenFile = `${tmpdir()}/hub-auth-mgmt-${Date.now()}.json`
+    try {
+      const row = addToken(tokenFile, { peer: 'zhangsan', role: 'agent', owner: '张三' })
+      check('add generates a random token matching the hub pattern', /^[A-Za-z0-9._:-]{16,128}$/.test(row.token) && row.peer === 'zhangsan' && row.owner === '张三', JSON.stringify(row))
+      addToken(tokenFile, { peer: 'lisi', role: 'manager' })
+      let dupThrew = false
+      try { addToken(tokenFile, { peer: 'lisi', role: 'agent' }) } catch { dupThrew = true }
+      check('duplicate peer rejected (rotate via remove first)', dupThrew)
+      const rows = readTokens(tokenFile)
+      check('readTokens returns both identities', rows.length === 2 && rows.some(r => r.role === 'manager'), JSON.stringify(rows.map(r => r.peer)))
+      check('remove drops the peer and persists', removeToken(tokenFile, 'lisi') === true && readTokens(tokenFile).length === 1)
+      check('remove of unknown peer is a no-op false', removeToken(tokenFile, 'ghost') === false)
+    } finally {
+      rmSync(tokenFile, { force: true })
+    }
+  }
+
+  console.log('== allow-join (anonymous walk-ins) ==')
+  {
+    const tokenFile = `${tmpdir()}/hub-join-${Date.now()}.json`
+    writeFileSync(tokenFile, JSON.stringify({ tokens: [
+      { token: 'mgr-join-token-0123456789ab', peer: 'ops', role: 'manager', owner: '管理台' },
+    ] }), 'utf8')
+    const hubJoin = startHub({ port: 19010, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000, authTokens: tokenFile, allowJoin: true }, { info: () => {}, warn: () => {} })
+    try {
+      const base = 'http://127.0.0.1:19010/mcp'
+      const anonZs = makeClient('kimi-code', base) // NO token → walk-in
+      const anonLs = makeClient('kimi-code', base)
+      await Promise.all([anonZs.init(), anonLs.init()])
+      const anonRoster = await anonZs.call('bridge_peers')
+      const anonPeers = anonRoster.peers.filter(p => p.anonymous === true)
+      check('anonymous walk-ins land on distinct join peers', anonPeers.length === 2 && anonPeers.every(p => /^join-/.test(p.id)) && anonPeers[0].id !== anonPeers[1].id, JSON.stringify(anonPeers.map(p => p.id)))
+      check('anonymous peers carry source ip in roster', anonPeers.every(p => Array.isArray(p.clientIps) && p.clientIps.includes('127.0.0.1')), JSON.stringify(anonPeers[0]?.clientIps))
+
+      const mgr = makeClient('ops', base, 'mgr-join-token-0123456789ab')
+      await mgr.init()
+      const mixed = await mgr.call('bridge_peers')
+      check('token peer and walk-in coexist', mixed.peers.some(p => p.id === 'ops') && mixed.peers.some(p => p.anonymous === true), JSON.stringify(mixed.peers.map(p => p.id)))
+
+      const api = 'http://127.0.0.1:19010/admin/api'
+      const noTok = await fetch(api + '/tokens')
+      // Allow-join walk-in without a token is an anonymous agent → 403; with allow-join off it is 401.
+      check('token API without token rejected', noTok.status === 401 || noTok.status === 403, String(noTok.status))
+      const badTok = await fetch(api + '/tokens', { headers: { Authorization: 'Bearer nope-0123456789abcdef' } })
+      check('token API with unknown token rejected 401', badTok.status === 401, String(badTok.status))
+      const mgrList = await fetch(api + '/tokens?reveal=0', { headers: { Authorization: 'Bearer mgr-join-token-0123456789ab' } })
+      const mgrListJson = await mgrList.json()
+      check('manager lists tokens masked', mgrList.status === 200 && mgrListJson.tokens[0].token.includes('…'), JSON.stringify(mgrListJson.tokens?.[0]))
+
+      const createdRes = await fetch(api + '/tokens/add', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer mgr-join-token-0123456789ab', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peer: 'newnan', role: 'agent', owner: '新成员' }),
+      })
+      const created = await createdRes.json()
+      check('manager issues a new token via api', createdRes.status === 200 && created.created?.peer === 'newnan' && /^[A-Za-z0-9._:-]{16,128}$/.test(created.created?.token ?? ''), JSON.stringify(created))
+      const newbie = makeClient('kimi-code', base, created.created.token)
+      let newbieOk = true
+      try { await newbie.init() } catch { newbieOk = false }
+      check('freshly issued token authenticates immediately (reloadAuth)', newbieOk)
+      const dupRes = await fetch(api + '/tokens/add', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer mgr-join-token-0123456789ab', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peer: 'newnan', role: 'agent' }),
+      })
+      check('duplicate peer via api rejected', dupRes.status === 400, String(dupRes.status))
+      const delRes = await fetch(api + '/tokens/remove/newnan', { method: 'DELETE', headers: { Authorization: 'Bearer mgr-join-token-0123456789ab' } })
+      const delJson = await delRes.json()
+      check('manager revokes a token via api', delRes.status === 200 && delJson.removed === true, JSON.stringify(delJson))
+    } finally {
+      hubJoin.close()
+      rmSync(tokenFile, { force: true })
+    }
   }
 
   console.log(`\n${checks - failures}/${checks} checks passed`)

@@ -3,4 +3,4 @@
  * the real wiring (startHub → server + registry + tools) without any
  * external dependencies.
  */
-export { startHub, AgentHub, McpStreamableHttpServer, SessionRegistry, hubTools } from '../src/index.js'
+export { startHub, AgentHub, McpStreamableHttpServer, SessionRegistry, hubTools, addToken, removeToken, readTokens } from '../src/index.js'

@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { BROADCAST, PEER_ID_PATTERN, type BridgeMessage, type MessageKind, type WaitResult } from './protocol.js'
+import { BROADCAST, KINDS, PEER_ID_PATTERN, type BridgeMessage, type MessageKind, type WaitResult } from './protocol.js'
 
 /** One registered long-poll waiter for a peer. */
 interface Waiter {
@@ -34,9 +34,18 @@ export interface HubOptions {
    * is the peer the message was just queued for (with broadcast, the callback
    * fires once per recipient, `message.to` staying 'all'). */
   onQueued?: (message: BridgeMessage, target: string) => void
+  /** Called once per message appended to the history ring (delivered or
+   * queued) — the persistence hook for the remote-mode SQLite store. */
+  onMessage?: (message: BridgeMessage) => void
+  /** Called when an offline mailbox was consumed (drained) or removed —
+   * the store must re-snapshot, or drained messages resurrect on restart. */
+  onMailboxesChanged?: () => void
   /** Called when the visible roster changes: a peer joins/leaves, or a
    * profile field (alias) is edited — anything another peer could observe. */
   onPeersChanged?: (peers: string[]) => void
+  /** Called when a group channel changes (create/delete or a membership
+   * edit) — the persistence hook for the remote-mode SQLite store. */
+  onGroupsChanged?: () => void
   /** Called when the idle GC evicts a peer. */
   onPeerGc?: (peerId: string) => void
   /** Live-channel check: peers returning true are skipped by the idle GC. */
@@ -52,6 +61,20 @@ export interface PeerState {
   lastSeenMs: number
   queued: number
   waiting: number
+}
+
+/** A named channel (group channel) routing one message to several members. Group ids
+ * live in their own namespace (bridge_group_* tools reference them); a group
+ * message carries `to: <groupId>` + `channel: <groupId>` and is delivered to
+ * every member except the sender. */
+export interface GroupState {
+  id: string
+  /** Display name (cosmetic, like a peer alias). */
+  name?: string
+  /** Member peer ids, in join order. */
+  members: string[]
+  createdBy: string
+  createdAt: number
 }
 
 /** Identity metadata of a peer, decoupled from routing. The peer id stays the
@@ -90,6 +113,8 @@ export class AgentHub {
   private readonly lastSeen = new Map<string, number>()
   /** Identity metadata keyed by peer id; outlives registration (see {@link PeerProfile}). */
   private readonly profiles = new Map<string, PeerProfile>()
+  /** Named channels (group channel), keyed by group id. */
+  private readonly groups = new Map<string, GroupState>()
   private readonly gcTimer: NodeJS.Timeout | undefined
 
   constructor(private readonly options: HubOptions) {
@@ -145,6 +170,7 @@ export class AgentHub {
   /** Remove a peer and its queued messages; pending waiters resolve as
    * timeouts. The profile is kept so a reconnecting peer keeps its alias. */
   unregister(peerId: string): void {
+    if ((this.queues.get(peerId) ?? []).length > 0) this.options.onMailboxesChanged?.()
     this.queues.delete(peerId)
     for (const waiter of this.waiters.get(peerId) ?? []) {
       clearTimeout(waiter.timer)
@@ -308,9 +334,21 @@ export class AgentHub {
     return this.route(from, original.from, 'ack', JSON.stringify(ack), ref)
   }
 
-  /** Recent messages involving `peer` (inbound and outbound), newest first. */
+  /** Recent messages involving `peer` (inbound and outbound, plus group
+   * channels the peer belongs to), newest first. */
   history(peerId: string, limit: number): BridgeMessage[] {
-    const filtered = this.historyRing.filter(message => message.from === peerId || message.to === peerId || message.to === BROADCAST)
+    const memberOf = new Set(
+      [...this.groups.values()].filter(group => group.members.includes(peerId)).map(group => group.id),
+    )
+    const filtered = this.historyRing.filter(
+      message => message.from === peerId || message.to === peerId || message.to === BROADCAST || (message.channel !== undefined && memberOf.has(message.channel)),
+    )
+    return filtered.slice(-Math.max(0, limit)).reverse()
+  }
+
+  /** Recent messages of one group channel, newest first. */
+  historyChannel(groupId: string, limit: number): BridgeMessage[] {
+    const filtered = this.historyRing.filter(message => message.channel === groupId || (message.to === groupId && message.channel === undefined && this.groups.has(groupId)))
     return filtered.slice(-Math.max(0, limit)).reverse()
   }
 
@@ -321,7 +359,186 @@ export class AgentHub {
     return this.historyRing.slice(-Math.max(0, limit)).reverse()
   }
 
-  /**
+  // ---- groups (group channel) ------------------------------------------------
+
+  /** Create a channel; throws when the id is taken or a member is unknown. */
+  createGroup(id: string, members: string[], createdBy: string, name?: string): GroupState {
+    if (this.groups.has(id)) throw new Error(`group already exists: ${id}`)
+    if (!PEER_ID_PATTERN.test(id)) throw new Error(`invalid group id: ${id} (expected [A-Za-z0-9._:-]{1,64})`)
+    const unique = [...new Set(members)]
+    if (unique.length === 0) throw new Error('a group needs at least one member')
+    for (const member of unique) {
+      if (!this.lastSeen.has(member)) throw new Error(`unknown member peer: ${member}`)
+    }
+    if (!unique.includes(createdBy)) unique.unshift(createdBy)
+    const group: GroupState = { id, members: unique, createdBy, createdAt: Date.now(), ...(name !== undefined && name !== '' ? { name } : {}) }
+    this.groups.set(id, group)
+    this.options.onGroupsChanged?.()
+    return group
+  }
+
+  /** Remove a channel (its history rows stay — attribution is unchanged). */
+  deleteGroup(id: string): boolean {
+    if (!this.groups.delete(id)) return false
+    this.options.onGroupsChanged?.()
+    return true
+  }
+
+  groupOf(id: string): GroupState | undefined {
+    return this.groups.get(id)
+  }
+
+  /** Add a registered peer to an existing channel, so they can send and read
+   * it like any other member. Throws when the group is unknown, the peer is
+   * not registered, or it is already inside. */
+  addGroupMember(groupId: string, member: string): GroupState {
+    const group = this.groups.get(groupId)
+    if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+    if (group.members.includes(member)) throw new Error(`peer '${member}' is already a member of group '${groupId}'`)
+    if (!this.lastSeen.has(member)) throw new Error(`unknown member peer: ${member}`)
+    group.members.push(member)
+    this.options.onGroupsChanged?.()
+    return group
+  }
+
+  /** Remove a member from a channel. The creator cannot be removed (it would
+   * orphan the channel's management). Throws when the group or the membership
+   * is missing. */
+  removeGroupMember(groupId: string, member: string): GroupState {
+    const group = this.groups.get(groupId)
+    if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+    if (member === group.createdBy) throw new Error(`cannot remove the group creator '${member}'`)
+    const index = group.members.indexOf(member)
+    if (index === -1) throw new Error(`peer '${member}' is not a member of group '${groupId}'`)
+    group.members.splice(index, 1)
+    this.options.onGroupsChanged?.()
+    return group
+  }
+
+  /** All groups (snapshot copy), insertion order. */
+  allGroups(): GroupState[] {
+    return [...this.groups.values()].map(group => ({ ...group, members: [...group.members] }))
+  }
+
+  /** Send a chat message to every member of a group except the sender;
+   * members that went offline are skipped (they read the group history).
+   * The message carries `to` and `channel` = the group id. */
+  sendToGroup(from: string, groupId: string, content: string): BridgeMessage {
+    const group = this.groups.get(groupId)
+    if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+    if (!group.members.includes(from)) throw new Error(`peer '${from}' is not a member of group '${groupId}'`)
+    const message: BridgeMessage = {
+      id: randomUUID(),
+      from,
+      to: groupId,
+      kind: 'chat',
+      content,
+      channel: groupId,
+      ts: Date.now(),
+    }
+    this.lastSeen.set(from, message.ts)
+    for (const member of group.members) {
+      if (member !== from && this.lastSeen.has(member)) this.deliver(member, message)
+    }
+    return message
+  }
+
+  /** Snapshot of every group for persistence. */
+  exportGroups(): GroupState[] {
+    return this.allGroups()
+  }
+
+  /** Load persisted groups at boot (same validation as createGroup, minus
+   * the "members must be online" rule — members reconnect later). */
+  importGroups(groups: unknown): number {
+    if (!Array.isArray(groups)) return 0
+    let count = 0
+    for (const raw of groups) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const candidate = raw as Record<string, unknown>
+      if (typeof candidate.id !== 'string' || !PEER_ID_PATTERN.test(candidate.id) || this.groups.has(candidate.id)) continue
+      if (!Array.isArray(candidate.members) || candidate.members.length === 0) continue
+      const members = [...new Set(candidate.members.filter((m): m is string => typeof m === 'string' && PEER_ID_PATTERN.test(m)))]
+      if (members.length === 0) continue
+      this.groups.set(candidate.id, {
+        id: candidate.id,
+        members,
+        createdBy: typeof candidate.createdBy === 'string' && PEER_ID_PATTERN.test(candidate.createdBy) ? candidate.createdBy : members[0],
+        createdAt: typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt) ? candidate.createdAt : Date.now(),
+        ...(typeof candidate.name === 'string' && candidate.name !== '' ? { name: candidate.name } : {}),
+      })
+      count++
+    }
+    return count
+  }
+
+  // ---- persistence import/export (remote-mode SQLite store) -----------
+
+  /** Restore the history ring at boot. Shape-invalid rows are dropped; only
+   * the newest {@link HubOptions.historyLimit} survive. */
+  importHistory(messages: unknown): number {
+    if (!Array.isArray(messages)) return 0
+    const valid: BridgeMessage[] = []
+    for (const raw of messages) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const m = raw as Record<string, unknown>
+      if (typeof m.id !== 'string' || typeof m.from !== 'string' || typeof m.to !== 'string' || typeof m.content !== 'string' || typeof m.ts !== 'number') continue
+      if ((KINDS as readonly string[]).includes(m.kind as string) === false) continue
+      valid.push({
+        id: m.id,
+        from: m.from,
+        to: m.to,
+        kind: m.kind as MessageKind,
+        content: m.content,
+        ...(typeof m.ref === 'string' ? { ref: m.ref } : {}),
+        ...(typeof m.channel === 'string' ? { channel: m.channel } : {}),
+        ts: m.ts,
+      })
+    }
+    for (const message of valid.slice(-this.options.historyLimit)) this.historyRing.push(message)
+    return Math.min(valid.length, this.options.historyLimit)
+  }
+
+  /** Snapshot of every offline mailbox, keyed by peer (persistence). */
+  exportMailboxes(): Record<string, BridgeMessage[]> {
+    const out: Record<string, BridgeMessage[]> = {}
+    for (const [peer, queue] of this.queues) {
+      if (queue.length > 0) out[peer] = queue.map(message => ({ ...message }))
+    }
+    return out
+  }
+
+  /** Restore offline mailboxes at boot (peer reconnects and drains later). */
+  importMailboxes(mailboxes: unknown): number {
+    if (typeof mailboxes !== 'object' || mailboxes === null) return 0
+    let count = 0
+    for (const [peer, queue] of Object.entries(mailboxes as Record<string, unknown>)) {
+      if (!Array.isArray(queue) || queue.length === 0) continue
+      const restored: BridgeMessage[] = []
+      for (const raw of queue) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const m = raw as Record<string, unknown>
+        if (typeof m.id !== 'string' || typeof m.from !== 'string' || typeof m.content !== 'string' || typeof m.ts !== 'number') continue
+        restored.push({
+          id: m.id,
+          from: m.from,
+          to: typeof m.to === 'string' ? m.to : peer,
+          kind: (KINDS as readonly string[]).includes(m.kind as string) ? (m.kind as MessageKind) : 'chat',
+          content: m.content,
+          ...(typeof m.ref === 'string' ? { ref: m.ref } : {}),
+          ...(typeof m.channel === 'string' ? { channel: m.channel } : {}),
+          ts: m.ts,
+        })
+      }
+      if (restored.length > 0) {
+        this.queues.set(peer, restored.slice(-this.options.maxQueue))
+        count += restored.length
+      }
+    }
+    return count
+  }
+
+    /**
    * Live summary for the status tool. `livePeers` (sessions with a live SSE
    * stream) count as connected even without recent tool activity.
    */
@@ -349,7 +566,7 @@ export class AgentHub {
   poll(peerId: string, from?: string): BridgeMessage[] {
     const queue = this.queues.get(peerId) ?? []
     const drained = from === undefined ? queue.splice(0, queue.length) : drainFrom(queue, from)
-    for (const message of drained) this.remember(message)
+    if (drained.length > 0) this.options.onMailboxesChanged?.()
     return drained
   }
 
@@ -437,13 +654,20 @@ export class AgentHub {
     if (queue.length >= this.options.maxQueue) queue.shift()
     queue.push(message)
     this.queues.set(target, queue)
+    // Queue-path messages enter the history ring HERE, not at drain: the
+    // ring is the archive of everything SENT (queued or handed to a waiter,
+    // exactly once per message), which is also what makes history survive a
+    // restart when the recipient never drained before shutdown.
+    this.remember(message)
     this.options.onQueued?.(message, target)
   }
 
-  /** Append a delivered message to the history ring. */
+  /** Append a delivered message to the history ring (and fire the
+   * persistence hook — one call per message, delivered or queued). */
   private remember(message: BridgeMessage): void {
     this.historyRing.push(message)
     if (this.historyRing.length > this.options.historyLimit) this.historyRing.splice(0, this.historyRing.length - this.options.historyLimit)
+    this.options.onMessage?.(message)
   }
 }
 

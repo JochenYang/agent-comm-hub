@@ -11,12 +11,22 @@ import { startHub, SERVER_VERSION } from './index.js'
 import { runSetup } from './setup.js'
 import { runService, runStatus, runUpdate } from './ops.js'
 import { runDiscover } from './discover.js'
+import { addToken, removeToken, readTokens, generateToken } from './auth.js'
+
+/** The set of string-typed flags parsed by parseArgs (the auth branch uses it to filter positionals). */
+const STRING_FLAGS = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file', '--auth-tokens', '--db', '--file', '--role', '--owner', '--token'])
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** Default roster persistence file (the CLI opts in; programmatic use of
  * startHub stays in-memory unless stateFile is passed). */
 const DEFAULT_STATE_FILE = join(homedir(), '.agent-comm-hub', 'roster.json')
+
+/** Default SQLite state DB (history, mailboxes, profiles, groups). */
+const DEFAULT_DB = join(homedir(), '.agent-comm-hub', 'state.db')
+
+/** Default bearer-token table for remote mode. */
+const DEFAULT_AUTH_FILE = join(homedir(), '.agent-comm-hub', 'tokens.json')
 
 interface CliArgs {
   [key: string]: number | string | boolean
@@ -25,14 +35,14 @@ interface CliArgs {
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
   const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
-  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file', '--auth-tokens'])
+  const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file', '--auth-tokens', '--db', '--file', '--role', '--owner', '--token'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--help' || flag === '-h' || flag === '--version' || flag === '-V') {
       args[flag] = true
       continue
     }
-    if (flag === '--remove' || flag === '--dry-run') {
+    if (flag === '--remove' || flag === '--dry-run' || flag === '--reveal' || flag === '--allow-join') {
       args[flag] = true
       continue
     }
@@ -72,6 +82,10 @@ Usage:
   agent-comm-hub update                  self-update from the npm registry
                                            (files updated in place; restart
                                            the hub afterwards)
+  agent-comm-hub auth add <peer> [flags] manage the remote-mode token table
+  agent-comm-hub auth remove <peer>      (add prints the generated token ONCE)
+  agent-comm-hub auth list [--reveal]
+  agent-comm-hub auth gen                print a fresh random token
 
 Hub options:
   --host <addr>            Bind address (default 127.0.0.1)
@@ -97,6 +111,23 @@ Hub options:
                              on every MCP request; each token maps to a fixed
                              peer id + role (agent|manager). See server/README.md
                              for the token table format and deployment recipes.
+  --db <path>                REMOTE MODE: SQLite state DB persisting history,
+                             mailboxes, profiles and groups across restarts
+                             (default ~/.agent-comm-hub/state.db; "off" = memory)
+
+Auth options (agent-comm-hub auth <action>):
+  --file <path>              Token table to manage
+                             (default ~/.agent-comm-hub/tokens.json)
+  --role <r>                 auth add: agent | manager (default agent)
+  --owner <name>             auth add: optional owner label
+  --token <t>                auth add: supply your own token instead of
+                             generating one (16-128 chars [A-Za-z0-9._:-])
+  --allow-join               Start the hub in allow-join mode: agents without
+                             a token may connect (LAN/VPN only; keep OFF on
+                             the public internet). Each gets a unique peer id
+                             + source IP shown in the admin roster for you to
+                             claim (rename) or issue a token to.
+  --reveal                   auth list: include the plaintext tokens
 
 Setup options:
   --url <url>              Hub endpoint to register (default http://127.0.0.1:18764/mcp)
@@ -188,6 +219,79 @@ try {
     process.exit(0)
   }
 
+  if (command === 'auth') {
+    const [action, ...authRest] = rest
+    // parseArgs has no positional args: pull <peer> out first, then hand the remaining flag pairs to it.
+    const splitArgs = (args: string[]): { positional: string[]; flags: string[] } => {
+      const positional: string[] = []
+      const flags: string[] = []
+      for (let i = 0; i < args.length; i++) {
+        if (args[i].startsWith('--')) {
+          flags.push(args[i])
+          if (STRING_FLAGS.has(args[i]) && args[i + 1] !== undefined && !args[i + 1].startsWith('--')) flags.push(args[++i])
+        } else positional.push(args[i])
+      }
+      return { positional, flags }
+    }
+    const file = (): string => {
+      const { flags } = splitArgs(authRest)
+      return (parseArgs(flags)['--file'] as string | undefined) ?? DEFAULT_AUTH_FILE
+    }
+    if (action === 'add') {
+      const { positional, flags } = splitArgs(authRest)
+      const args = parseArgs(flags)
+      const peerId = positional[0]
+      if (peerId === undefined) {
+        console.error('auth add: missing <peer> — usage: agent-comm-hub auth add <peer> [--role agent|manager] [--owner name]')
+        process.exit(1)
+      }
+      const role = (args['--role'] as string | undefined) ?? 'agent'
+      if (role !== 'agent' && role !== 'manager') {
+        console.error(`auth add: invalid role '${role}' (expected agent | manager)`)
+        process.exit(1)
+      }
+      const row = addToken(file(), {
+        peer: peerId,
+        role,
+        owner: args['--owner'] as string | undefined,
+        token: args['--token'] as string | undefined,
+      })
+      console.log(`token created for ${peerId}${row.owner ? ` (${row.owner})` : ''} [${row.role}]`)
+      console.log(`  ${row.token}`)
+      console.log('The MCP config to pass to that agent (Authorization header) — not echoed here;')
+      console.log(`Table written to ${file()} (hub hot-reloads; takes effect in ~2s)`)
+      process.exit(0)
+    }
+    if (action === 'remove') {
+      const peerId = splitArgs(authRest).positional[0]
+      if (peerId === undefined) {
+        console.error('auth remove: missing <peer>')
+        process.exit(1)
+      }
+      console.log(removeToken(file(), peerId) ? `removed peer ${peerId}` : `peer ${peerId} not found`)
+      process.exit(0)
+    }
+    if (action === 'list') {
+      const args = parseArgs(splitArgs(authRest).flags)
+      const reveal = args['--reveal'] === true
+      const rows = readTokens(file())
+      if (rows.length === 0) {
+        console.log('token table is empty — add one with: agent-comm-hub auth add <peer>')
+      }
+      for (const row of rows) {
+        const t = reveal ? row.token : row.token.slice(0, 6) + '…' + row.token.slice(-4)
+        console.log(`${row.peer.padEnd(24)} ${row.role.padEnd(8)} ${row.owner ?? ''}  ${t}`)
+      }
+      process.exit(0)
+    }
+    if (action === 'gen') {
+      console.log(generateToken())
+      process.exit(0)
+    }
+    console.error(`auth: unknown action '${action ?? ''}' (expected add | remove | list | gen)`)
+    process.exit(1)
+  }
+
   if (command === 'update') {
     const args = parseArgs(rest)
     if (args['--help'] || args['-h']) {
@@ -235,6 +339,8 @@ try {
         ? undefined
         : String(args['--state-file']),
     authTokens: args['--auth-tokens'] === undefined ? undefined : String(args['--auth-tokens']),
+    allowJoin: args['--allow-join'] === true,
+    db: args['--db'] === undefined ? DEFAULT_DB : args['--db'] === 'off' ? undefined : String(args['--db']),
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

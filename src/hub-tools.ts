@@ -9,6 +9,7 @@ import type { AgentHub } from './hub.js'
 import type { McpTool, SessionRegistry } from './mcp-server.js'
 import { AGENT_STATUSES, type HerdrCtl } from './herdr-ctl.js'
 import { decodeContent, type AckContent, type BridgeMessage, BROADCAST, PEER_ID_PATTERN, type TaskContent } from './protocol.js'
+import { ANON_JOIN_PEER } from './auth.js'
 
 /** Default wait budget when a client omits timeoutMs. */
 export const DEFAULT_WAIT_MS = 30_000
@@ -19,10 +20,11 @@ export const DEFAULT_WAIT_MS = 30_000
 export type PresentedMessage = Omit<BridgeMessage, 'content'> & { content: string | TaskContent | AckContent }
 
 export function present(message: BridgeMessage): PresentedMessage {
-  const { ref, ...rest } = message
+  const { ref, channel, ...rest } = message
   return {
     ...rest,
     ...(ref !== undefined ? { ref } : {}),
+    ...(channel !== undefined ? { channel } : {}),
     content: decodeContent(message.kind, message.content),
   }
 }
@@ -68,7 +70,12 @@ export function autoRegisterPeer(
   if (bound !== undefined) return bound
   if (registry.isSuppressed(sessionId)) return undefined
   const tokenPeer = registry.tokenFor(sessionId)?.peer
-  const peerId = tokenPeer ?? sanitizePeerId(clientName ?? 'agent')
+  // Sentinel = anonymous walk-in whose initialize-resolution never ran (e.g.
+  // it started from an SSE stream): give it a session-unique fallback id so
+  // it can never merge with another walk-in.
+  const peerId = tokenPeer === ANON_JOIN_PEER
+    ? `join-${sanitizePeerId(clientName ?? 'agent')}-${Math.random().toString(36).slice(2, 6)}`
+    : (tokenPeer ?? sanitizePeerId(clientName ?? 'agent'))
   if (!hub.has(peerId)) {
     hub.register(peerId, {
       ...(clientName !== undefined ? { name: clientName } : {}),
@@ -95,16 +102,34 @@ export function livePeersFor(registry: SessionRegistry): Set<string> {
  * always expose the same shape. */
 export function rosterFor(hub: AgentHub, registry: SessionRegistry): Array<Record<string, unknown>> {
   const status = hub.status(livePeersFor(registry))
+  // Realtime, per-session metadata synthesized from the registry (never
+  // persisted): source IP(s) and the anonymous-join flag let the admin roster
+  // tell Zhang San's kimi-code from Li Si's and spot walk-ins to claim.
+  const peerIps = new Map<string, string[]>()
+  const peerAnon = new Map<string, boolean>()
+  for (const [session, peer] of registry.peerBindings) {
+    const ip = registry.sessionIps.get(session)
+    if (ip !== undefined) {
+      const list = peerIps.get(peer) ?? []
+      if (!list.includes(ip)) list.push(ip)
+      peerIps.set(peer, list)
+    }
+    const identity = registry.tokenFor(session)
+    if (identity?.anonymous === true) peerAnon.set(peer, true)
+  }
   return status.peers.map(peer => {
     const profile = hub.profileOf(peer.id)
     const alias = profile?.alias
     const clientName = profile?.clientName
     const clientVersion = profile?.clientVersion
+    const ips = peerIps.get(peer.id)
     return {
       id: peer.id,
       ...(alias !== undefined ? { alias } : {}),
       ...(clientName !== undefined ? { clientName } : {}),
       ...(clientVersion !== undefined ? { clientVersion } : {}),
+      ...(peerAnon.get(peer.id) === true ? { anonymous: true } : {}),
+      ...(ips !== undefined && ips.length > 0 ? { clientIps: ips } : {}),
       connected: peer.connected,
       lastSeenMs: peer.lastSeenMs,
     }
@@ -166,6 +191,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     from: message.from,
     to: message.to,
     kind: message.kind,
+    ...(message.channel !== undefined ? { channel: message.channel } : {}),
     ts: message.ts,
   })
 
@@ -419,12 +445,94 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         const limit = Math.min(args.limit === undefined ? 20 : Number(args.limit), 1000)
         const target = args.peer === undefined ? peer : String(args.peer)
         if (target !== peer) {
-          requireManager(peer, `reading ${target === BROADCAST ? 'the full history' : `peer '${target}' history`} requires manager rights`, sessionId)
+          requireManager(peer, `reading ${target === BROADCAST ? 'the full history' : `peer '${target}' history`}`, sessionId)
+        }
+        if (args.channel !== undefined) {
+          const groupId = String(args.channel)
+          const group = hub.groupOf(groupId)
+          if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+          if (!group.members.includes(peer)) requireManager(peer, `reading group '${groupId}' history`, sessionId)
+          return { messages: hub.historyChannel(groupId, limit).map(present) }
         }
         const messages = target === BROADCAST
           ? hub.historyAll(limit)
           : hub.history(target, limit)
         return { messages: messages.map(present) }
+      }),
+    },
+    // ---- group tools (group channel) ---------------------------------------------
+    // A group routes one message to several members; the message carries
+    // channel = group id. Offline members are skipped (they read history) —
+    // unlike direct sends, which fail on unknown recipients.
+    {
+      name: 'bridge_group_create',
+      description: 'Create a group channel. You become a member automatically; `members` lists additional peerIds (each must be registered). Members exchange messages via bridge_group_send; anyone in the group reads its history with bridge_history { channel }. Use bridge_group_delete to remove (creator or manager).',
+      inputSchema: schema(
+        {
+          group: str('Unique group id: letters/digits/._:- , 1-64 chars.'),
+          name: optStr('Optional display name.'),
+          members: { type: 'array', items: { type: 'string' }, description: 'Member peerIds (you are added automatically; duplicates ignored).' },
+        },
+        ['group'],
+      ),
+      handler: wrap(true, async (args, peer) => {
+        const groupId = String(args.group)
+        const members = Array.isArray(args.members) ? args.members.map(String) : []
+        const group = hub.createGroup(groupId, members, peer, args.name === undefined ? undefined : String(args.name))
+        return { ok: true, group: { id: group.id, ...(group.name !== undefined ? { name: group.name } : {}), members: group.members, createdBy: group.createdBy } }
+      }),
+    },
+    {
+      name: 'bridge_group_send',
+      description: 'Send a chat message to every member of a group channel except yourself. Offline members are skipped (they catch up via bridge_history { channel }). You must be a member.',
+      inputSchema: schema({ group: str('Group id from bridge_group_create / bridge_group_list.'), message: str('The message text.') }, ['group', 'message']),
+      handler: wrap(true, async (args, peer) => receipt(hub.sendToGroup(peer, String(args.group), String(args.message)))),
+    },
+    {
+      name: 'bridge_group_list',
+      description: 'List every group channel with its members and creator.',
+      inputSchema: schema({}),
+      handler: wrap(true, async () => ({ groups: hub.allGroups() })),
+    },
+    {
+      name: 'bridge_group_delete',
+      description: 'Delete a group channel (history rows are kept). The creator or a hub manager may delete.',
+      inputSchema: schema({ group: str('Group id to delete.') }, ['group']),
+      handler: wrap(true, async (args, peer, sessionId) => {
+        const groupId = String(args.group)
+        const group = hub.groupOf(groupId)
+        if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+        if (group.createdBy !== peer) requireManager(peer, `deleting group '${groupId}'`, sessionId)
+        hub.deleteGroup(groupId)
+        return { ok: true, group: groupId }
+      }),
+    },
+    {
+      name: 'bridge_group_add_member',
+      description: 'Add a registered peer to a group channel; the new member can then send to it and read its history. The creator or a hub manager may add.',
+      inputSchema: schema({ group: str('Group id from bridge_group_create / bridge_group_list.'), member: str('peerId of the new member.') }, ['group', 'member']),
+      handler: wrap(true, async (args, peer, sessionId) => {
+        const groupId = String(args.group)
+        const member = String(args.member)
+        const group = hub.groupOf(groupId)
+        if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+        if (group.createdBy !== peer) requireManager(peer, `adding a member to group '${groupId}'`, sessionId)
+        const updated = hub.addGroupMember(groupId, member)
+        return { ok: true, group: { id: updated.id, members: updated.members } }
+      }),
+    },
+    {
+      name: 'bridge_group_remove_member',
+      description: 'Remove a member from a group channel; they stop receiving its messages (history rows are kept). The creator or a hub manager may remove; the creator itself cannot be removed.',
+      inputSchema: schema({ group: str('Group id from bridge_group_create / bridge_group_list.'), member: str('peerId to remove.') }, ['group', 'member']),
+      handler: wrap(true, async (args, peer, sessionId) => {
+        const groupId = String(args.group)
+        const member = String(args.member)
+        const group = hub.groupOf(groupId)
+        if (group === undefined) throw new Error(`unknown group: ${groupId}`)
+        if (group.createdBy !== peer) requireManager(peer, `removing a member from group '${groupId}'`, sessionId)
+        const updated = hub.removeGroupMember(groupId, member)
+        return { ok: true, group: { id: updated.id, members: updated.members } }
       }),
     },
     // ---- herdr control tools ------------------------------------------

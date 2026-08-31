@@ -14,8 +14,27 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { TokenIdentity } from './auth.js'
+
+/** Fixed path of the built-in web admin page (same origin → it calls the
+ * MCP endpoint directly with the manager token entered in the page). */
+const ADMIN_PATH = '/admin'
+
+/** Prefix of the management API the admin page calls (token issue/revoke). */
+const ADMIN_API_PATH = '/admin/api'
+
+/** Lazy-read the bundled admin page: `import.meta.url` is the bundle file
+ * (lib/cli.js in the package, test/entry.mjs in tests) so ../assets resolves
+ * to the shipped assets directory in both layouts. */
+let adminPageCache: string | undefined
+function adminPage(): string {
+  if (adminPageCache === undefined) {
+    adminPageCache = readFileSync(new URL('../assets/admin.html', import.meta.url), 'utf8')
+  }
+  return adminPageCache
+}
 
 /** One tool exposed to MCP clients. */
 export interface McpTool {
@@ -124,6 +143,10 @@ export class SessionRegistry {
     return sessionId !== undefined && this.suppressedAuto.has(sessionId)
   }
 
+  /** Session → client IP (remote mode: the admin roster shows where a peer
+   * connects from, so the operator can tell Zhang San's kimi-code from Li Si's). */
+  readonly sessionIps = new Map<string, string>()
+
   /** Sessions with a live SSE stream (server→client channel). */
   private readonly liveStreams = new Set<string>()
 
@@ -220,12 +243,31 @@ export class McpStreamableHttpServer {
      * token identity; undefined = unauthorized. When absent (loopback mode)
      * no auth check happens — the default desktop trust model. */
     private readonly authenticate?: (req: IncomingMessage) => TokenIdentity | undefined,
+    /** Management API for the built-in admin page (token issue/revoke).
+     * Every call is manager-gated by the transport before it runs. */
+    private readonly adminApi?: {
+      listTokens(reveal: boolean): Array<{ token: string; peer: string; role: string; owner?: string }>
+      addToken(input: { peer: string; role: string; owner?: string }): { token: string; peer: string; role: string; owner?: string }
+      removeToken(peer: string): boolean
+      reloadAuth(): void
+    },
   ) {}
 
   /** Attach request handling for `path` (e.g. `/mcp`) to an http server. */
   attach(server: Server, path: string): void {
     server.on('request', (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
+      if (url.pathname === ADMIN_PATH && req.method === 'GET') {
+        // The page itself is static and unauthenticated (no data behind it);
+        // it authenticates per MCP call with the token entered in the page.
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' })
+        res.end(adminPage())
+        return
+      }
+      if (url.pathname.startsWith(ADMIN_API_PATH) && this.adminApi !== undefined) {
+        void this.handleAdminApi(req, res, url)
+        return
+      }
       if (url.pathname !== path) {
         res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'not found' }))
         return
@@ -307,6 +349,57 @@ export class McpStreamableHttpServer {
     res.end(JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32001, message: `unauthorized: ${why}` } }))
   }
 
+  /** Management API for the bundled admin page: issue/revoke tokens and list
+   * them. Like everything else, each call is authenticated by `authenticate`
+   * and must resolve to a MANAGER role — an agent token gets 403. */
+  private async handleAdminApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const respond = (status: number, body: unknown): void => {
+      res.writeHead(status, { ...corsHeaders(), 'Content-Type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify(body))
+    }
+    const identity = this.authenticate?.(req)
+    if (identity === undefined) {
+      respond(401, { error: 'unauthorized: manager token required' })
+      return
+    }
+    if (identity.role !== 'manager') {
+      respond(403, { error: 'forbidden: this API needs a manager-role token' })
+      return
+    }
+    const api = this.adminApi!
+    const seg = url.pathname.slice(ADMIN_API_PATH.length).replace(/^\/+|\/+$/g, '').split('/')
+
+    if (req.method === 'GET' && seg[0] === 'tokens') {
+      respond(200, { tokens: api.listTokens(url.searchParams.get('reveal') === '1') })
+      return
+    }
+    if (req.method === 'POST' && seg[0] === 'tokens' && seg[1] === 'add') {
+      let input: Record<string, unknown>
+      try {
+        input = JSON.parse((await readBody(req)).toString('utf8'))
+      } catch (error) {
+        respond(400, { error: `bad json: ${(error as Error).message}` })
+        return
+      }
+      try {
+        const created = api.addToken({
+          peer: String(input.peer ?? ''),
+          role: String(input.role ?? 'agent'),
+          owner: input.owner === undefined ? undefined : String(input.owner),
+        })
+        respond(200, { created })
+      } catch (error) {
+        respond(400, { error: (error as Error).message })
+      }
+      return
+    }
+    if (req.method === 'DELETE' && seg[0] === 'tokens' && seg[1] === 'remove' && seg[2] !== undefined) {
+      respond(200, { removed: api.removeToken(decodeURIComponent(seg[2])) })
+      return
+    }
+    respond(404, { error: 'not found' })
+  }
+
   private async handlePost(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Remote auth: every request (initialize included) must present a valid
     // bearer token; an established session must keep presenting ITS token.
@@ -319,9 +412,19 @@ export class McpStreamableHttpServer {
       }
       const existingSession = this.registry.sessionIdFor(req)
       const bound = existingSession === undefined ? undefined : this.registry.tokenFor(existingSession)
-      if (bound !== undefined && (bound.peer !== authIdentity.peer || bound.role !== authIdentity.role)) {
+      // allow-join walk-ins present NO token on later requests: the sentinel
+      // identity ('__join__') must keep matching the session's already-minted
+      // unique anonymous peer. Only a real (non-anonymous) mismatch is fraud.
+      const bothAnonymous = bound?.anonymous === true && authIdentity.anonymous === true
+      if (bound !== undefined && !bothAnonymous && (bound.peer !== authIdentity.peer || bound.role !== authIdentity.role)) {
         this.unauthorized(res, null, 'token does not match this session')
         return
+      }
+      // Hub restarted under the client (or client kept talking after the hub
+      // forgot the session): the presented token re-binds the identity here,
+      // so a request never degrades to a nameless 'agent' peer.
+      if (existingSession !== undefined && bound === undefined && !authIdentity.anonymous) {
+        this.registry.bindToken(existingSession, authIdentity)
       }
     }
     let body: Buffer
@@ -344,6 +447,7 @@ export class McpStreamableHttpServer {
     }
     const id = message.id ?? null
     const sessionId = this.registry.sessionIdFor(req)
+    if (sessionId !== undefined) this.registry.sessionIps.set(sessionId, clientIp(req))
 
     // Notifications carry no id: acknowledge and move on.
     if (id === null) {
@@ -461,6 +565,17 @@ function rpcError(code: number, message: string): Error & { code?: number } {
 
 function messageProtocolVersion(req: IncomingMessage): string {
   return (req.headers['mcp-protocol-version'] as string | undefined) ?? LATEST_VERSION
+}
+
+/** Best-effort client IP: X-Forwarded-For first hop (behind Caddy) or the
+ * socket remote address. `::ffff:127.0.0.1` normalizes to 127.0.0.1. */
+function clientIp(req: IncomingMessage): string {
+  const forwarded = req.headers['x-forwarded-for']
+  const raw = Array.isArray(forwarded) ? forwarded[0] : forwarded
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    return raw.split(',')[0].trim()
+  }
+  return (req.socket.remoteAddress ?? '?').replace(/^::ffff:/, '')
 }
 
 function corsHeaders(): Record<string, string> {

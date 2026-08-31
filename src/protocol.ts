@@ -28,6 +28,9 @@ export interface BridgeMessage {
   content: string
   /** For `ack`: the id of the message being acknowledged. */
   ref?: string
+  /** Group/channel id when the message was sent to a group (see
+   * bridge_group_send); absent for direct and broadcast messages. */
+  channel?: string
   /** Epoch milliseconds. */
   ts: number
 }

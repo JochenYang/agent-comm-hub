@@ -1,0 +1,1234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-comm-hub admin console</title>
+<link rel="icon" href="data:image/png;base64,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">
+<style>
+  /* ── tokens ────────────────────────────────────────────────────────────
+     Notion-style console theme: warm neutral greys, one quiet blue accent
+     (#2383e2), hairline borders instead of glow — no gradients, no glass, no
+     neon. Feedback tones (ok / warn / danger) stay muted washes. Motion stays
+     on transform/opacity only, short and interruptible (apple-design: instant
+     material feedback, calm layer transitions). */
+  :root {
+    color-scheme: dark;
+    /* Notion-style dark surface: warm neutral greys, one quiet blue accent,
+       hairline borders instead of glow — no gradients, no glass, no neon. */
+    --bg: #191919;
+    --surface: #1f1f1f;
+    --surface-2: #252525;
+    --surface-3: #2b2b2b;
+    --line: #2e2e2e;
+    --line-strong: #3f3f3f;
+    --line-hover: #4a4a4a;
+    --text: #f1f1ef;
+    --text-dim: #a8a8a3;
+    --text-faint: #6f6f6a;
+    --accent: #2383e2;
+    --accent-strong: #2f93f2;
+    --accent-line: rgba(35, 131, 226, .35);
+    --accent-wash: rgba(35, 131, 226, .12);
+    --ok: #4dab5f;
+    --ok-wash: rgba(77, 171, 95, .12);
+    --ok-line: rgba(77, 171, 95, .38);
+    --danger: #d94442;
+    --danger-wash: rgba(217, 68, 66, .12);
+    --danger-line: rgba(217, 68, 66, .38);
+    --warn: #d58f3e;
+    --warn-wash: rgba(213, 143, 62, .12);
+    --warn-line: rgba(213, 143, 62, .38);
+    --radius: 6px;
+    --radius-sm: 4px;
+    --shadow-toast: 0 8px 24px rgba(0, 0, 0, .42);
+    --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13.5px/1.6 var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-wash); }
+  button, input, select { font: inherit; color: inherit; }
+
+  /* ── form primitives: quiet Notion controls, blue focus ring ── */
+  select, input {
+    background: var(--bg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: 5px 9px;
+    min-height: 30px;
+    font: 12.5px/1.4 var(--font-mono);
+    color: var(--text);
+    transition: border-color .12s ease-out, background .12s ease-out;
+  }
+  select { font: 12.5px/1.4 var(--font-ui); }
+  select:focus, input:focus {
+    outline: none; border-color: var(--accent);
+    background: var(--surface-2); box-shadow: 0 0 0 2px var(--accent-wash);
+  }
+  input::placeholder { color: var(--text-faint); }
+  input:hover, select:hover { border-color: var(--line-hover); }
+  button {
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: 4px 12px;
+    min-height: 30px;
+    cursor: pointer;
+    color: var(--text);
+    font: 500 12.5px/1 var(--font-ui);
+    transition: background .12s ease-out, border-color .12s ease-out, color .12s ease-out;
+    white-space: nowrap;
+  }
+  button:hover { background: var(--surface-3); }
+  button:active { transform: translateY(1px); }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  button.primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+  button.danger { color: var(--danger); border-color: transparent; background: transparent; }
+  button.danger:hover { background: var(--danger-wash); border-color: var(--danger); color: var(--danger); }
+  button.ghost { background: transparent; border-color: transparent; color: var(--text-dim); min-height: 26px; padding: 2px 8px; }
+  button.ghost:hover { color: var(--text); background: var(--surface-2); }
+  :is(button, input, select):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .45; cursor: default; transform: none; }
+
+  /* ── topbar: solid surface + hairline bottom edge (no glass) ── */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 22px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+    transition: border-color .2s ease-out;
+  }
+  .topbar.scrolled { border-bottom-color: var(--line-strong); }
+  .brand { display: flex; align-items: center; gap: 10px; margin-right: 6px; }
+  .brand .mark {
+    width: 24px; height: 24px; border-radius: 5px;
+    background: var(--surface-2);
+    display: grid; place-items: center;
+    overflow: hidden;
+  }
+  .brand .mark img { width: 18px; height: 18px; object-fit: contain; display: block; }
+  .brand .name { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3; }
+  .brand .name b { color: var(--text); font-weight: 600; }
+  .brand .name span { color: var(--text-dim); font-weight: 400; }
+  .brand .sub { font-size: 11px; color: var(--text-faint); }
+  .status {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
+  .status[data-state="ok"] .dot { background: var(--ok); animation: breathe 2.6s ease-in-out infinite; }
+  .status[data-state="err"] { color: var(--danger); }
+  .status[data-state="err"] .dot { background: var(--danger); }
+  @keyframes breathe { 50% { opacity: .45; } }
+  .topbar .field { display: flex; align-items: center; gap: 6px; }
+  .topbar .field label { font-size: 11px; color: var(--text-faint); }
+  .topbar .field input { min-height: 28px; padding: 4px 8px; font-size: 12px; }
+  #token { width: 240px; }
+  #mpath { width: 84px; }
+  .spacer { flex: 1; }
+
+  /* ── stats strip: plain numbers + labels, quiet hover (anchors to panels) ── */
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px; max-width: 1360px; margin: 16px auto 0; padding: 0 22px;
+  }
+  .stat {
+    display: flex; align-items: baseline; gap: 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    text-decoration: none; color: inherit;
+    transition: background .12s ease-out, border-color .12s ease-out;
+  }
+  .stat:hover { background: var(--surface-2); border-color: var(--line-strong); }
+  .stat .num { font: 600 17px/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text); }
+  .stat .lbl { font-size: 11px; color: var(--text-faint); }
+  .stat[data-tone="ok"] .num { color: var(--ok); }
+  .stat[data-tone="warn"] .num { color: var(--warn); }
+
+  /* ── workspace ──────────────────────────────────────────────────────── */
+  .workspace {
+    max-width: 1360px; margin: 16px auto 32px;
+    padding: 0 22px;
+    display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(330px, 1fr);
+    gap: 14px; align-items: start;
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+    scroll-margin-top: 62px;   /* anchor lands below the sticky topbar */
+  }
+  .stack { display: grid; gap: 14px; }
+  .panel > header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .panel > header h2 {
+    margin: 0; font-size: 13px; font-weight: 600; color: var(--text);
+  }
+  .panel > header .count {
+    font: 500 11px/1.4 var(--font-mono); color: var(--text-dim);
+    background: var(--surface-3); border-radius: 999px; padding: 2px 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .panel > header .hint { font-size: 11px; color: var(--text-faint); }
+  .panel > header .spacer { flex: 1; }
+  .toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+  /* ── list rows ──────────────────────────────────────────────────────── */
+  .rows { display: flex; flex-direction: column; }
+  .row, .g-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--line);
+    transition: background .12s ease-out;
+    animation: row-in .18s ease-out;   /* gentle fade-in on enter only */
+  }
+  @keyframes row-in { from { opacity: 0; transform: translateY(2px); } }
+  .row:last-child, .g-row:last-child { border-bottom: none; }
+  .row:hover, .g-row:hover { background: var(--surface-2); }
+  .presence { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex: none; }
+  .row[data-online="true"] .presence { background: var(--ok); }
+  .who { min-width: 0; flex: 1; }
+  .who .id { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .who .alias { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .self-tag { color: var(--accent); margin-right: 5px; }
+  .chip {
+    font-size: 10px; color: var(--text-dim);
+    border: 1px solid var(--line-strong); border-radius: 4px;
+    padding: 1px 6px; white-space: nowrap;
+  }
+  .chip.ok { color: var(--ok); border-color: var(--ok-line); }
+  .chip.warn { color: var(--warn); border-color: var(--warn-line); }
+  .chip.dim { color: var(--text-faint); }
+  .chip.danger { color: var(--danger); border-color: var(--danger-line); }
+  .muted { color: var(--text-faint); }
+  .who .id .chip { margin-left: 4px; }
+  .badge {
+    min-width: 20px; text-align: center;
+    color: var(--danger);
+    background: var(--danger-wash);
+    border: 1px solid var(--danger-line);
+    border-radius: 999px; font-size: 10px; font-weight: 600;
+    padding: 0 6px; line-height: 16px;
+  }
+  .row .actions, .g-row .actions { display: flex; gap: 6px; flex: none; }
+  .empty { padding: 34px 16px; text-align: center; color: var(--text-faint); font-size: 12px; }
+  .empty b { display: block; color: var(--text-dim); font-weight: 400; margin-bottom: 4px; }
+  .loading { height: 46px; display: grid; place-items: center; }
+
+  /* Inline edit / two-step confirm: expands and collapses in place
+     (spatial consistency, symmetrical path) */
+  .editbox { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+  .editbox input { flex: 1; min-width: 60px; min-height: 30px; padding: 4px 8px; font-size: 12px; }
+  .confirm-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  .confirm-note { color: var(--danger); font-size: 12px; flex: 1; min-width: 0; }
+  .confirm-note b { font-weight: 700; }
+
+  /* ── search & filter chips ──────────────────────────────────────────── */
+  .search {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2);
+  }
+  .search input { flex: 1; min-width: 0; }
+  .filter { display: flex; gap: 6px; flex: none; }
+  .filter button { min-height: 26px; padding: 2px 10px; font-size: 11px; }
+  .filter button[aria-pressed="true"] {
+    background: var(--accent-wash); color: var(--accent);
+    border-color: var(--accent-line); font-weight: 700;
+  }
+
+  /* ── groups ─────────────────────────────────────────────────────────── */
+  .group-form { display: flex; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2); flex-wrap: wrap; }
+  .group-form input { flex: 1; min-width: 0; }
+  .group-form input[name="group"] { flex: 0 0 118px; }
+  .group-form button { flex: none; }
+  .g-row { flex-wrap: wrap; }
+  .g-row .g-name { min-width: 0; flex: 1; }
+  .g-row .g-name .id { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .g-row .g-name .id .grp { color: var(--accent); }
+  .g-row .g-name .members { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .g-expand {
+    flex: 1 1 100%; display: grid; gap: 8px;
+    padding: 10px 12px; margin-top: 6px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    animation: row-in .16s ease-out;
+  }
+  .g-members { display: flex; flex-wrap: wrap; gap: 6px; }
+  .member-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--text);
+    background: var(--surface-3); border: 1px solid var(--line-strong);
+    border-radius: 999px; padding: 2px 4px 2px 8px;
+  }
+  .member-chip button {
+    min-height: 16px; height: 16px; width: 16px; padding: 0;
+    border: none; background: transparent; color: var(--text-faint);
+    font-size: 11px; line-height: 1; border-radius: 50%;
+    display: grid; place-items: center;
+  }
+  .member-chip button:hover { color: var(--danger); background: var(--danger-wash); }
+  .g-add { display: flex; gap: 6px; }
+  .g-add input { flex: 1; min-width: 0; }
+
+  /* ── message tail ───────────────────────────────────────────────────── */
+  .feed { list-style: none; margin: 0; padding: 6px 0; max-height: 430px; overflow: auto; }
+  .feed li { padding: 9px 16px; border-bottom: 1px solid var(--line); animation: row-in .16s ease-out; }
+  .feed li:last-child { border-bottom: none; }
+  .feed .meta { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; color: var(--text-faint); margin-bottom: 3px; }
+  .feed .meta .t { font-variant-numeric: tabular-nums; }
+  .feed .meta .route { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .feed .meta .kind { border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .08em; flex: none; }
+  .feed .meta .kind.group { color: var(--accent); border-color: var(--accent-line); }
+  .feed .meta .kind.task { color: var(--warn); border-color: var(--warn-line); }
+  .feed .meta .kind.ack { color: var(--ok); border-color: var(--ok-line); }
+  .feed .meta .kind.notice { color: var(--text-faint); }
+  .feed .body { font-size: 12px; word-break: break-word; color: var(--text); }
+  .panel > footer {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    padding: 9px 16px; font-size: 11px; min-height: 36px;
+    border-top: 1px solid var(--line); color: var(--text-faint);
+  }
+  .panel > footer.err { color: var(--danger); }
+  .panel > footer .sep { color: var(--line-strong); }
+
+  /* ── toasts: aria-live broadcast + one-way slide-in (interruptible,
+     transform/opacity only) ── */
+  .toasts { position: fixed; right: 18px; bottom: 18px; display: grid; gap: 8px; z-index: 50; }
+  .toast {
+    background: var(--surface-3); border: 1px solid var(--line-strong);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm); padding: 9px 14px;
+    font-size: 12px; max-width: 380px;
+    box-shadow: var(--shadow-toast);
+    animation: slide-in .18s ease-out;
+  }
+  .toast.err { border-left-color: var(--danger); }
+  .toast.ok { border-left-color: var(--ok); }
+  .toast.warn { border-left-color: var(--warn); }
+  @keyframes slide-in { from { opacity: 0; transform: translateX(14px); } }
+
+  /* ── responsive / motion ────────────────────────────────────────────── */
+  @media (max-width: 980px) {
+    .workspace { grid-template-columns: 1fr; }
+    .topbar { flex-wrap: wrap; }
+    .spacer { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  @media (prefers-contrast: more) {
+    .topbar { background: var(--bg); border-bottom-color: var(--line-strong); }
+    .panel { border-color: var(--line-strong); }
+    input, select { border-color: var(--line-strong); }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark"><img src="data:image/png;base64,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" alt="logo"></span>
+    <span>
+      <span class="name"><b>agent-comm-hub</b> <span data-i18n="brandTitle">管理台</span></span><br>
+      <span class="sub" data-i18n="brandSub">远程运维控制台 · manager</span>
+    </span>
+  </div>
+  <span class="status" id="conn" data-state="off" aria-live="polite"><span class="dot"></span><span id="conn-text" data-i18n="statusOff">未连接</span></span>
+  <span class="spacer"></span>
+  <div class="field">
+    <label for="token" data-i18n="fieldToken">token</label>
+    <input id="token" type="password" placeholder="manager token" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="mpath" data-i18n="fieldMcp">mcp</label>
+    <input id="mpath" value="/mcp" spellcheck="false" aria-label="MCP path">
+  </div>
+  <button id="lang" class="ghost" data-i18n-title="langTitle" title="切换语言">中 / EN</button>
+  <button id="reload" class="primary" data-i18n="btnReload">重新连接</button>
+</header>
+
+<nav class="stats" aria-label="overview">
+  <a class="stat" data-tone="ok" href="#panel-roster">
+    <span><span class="num" id="stat-online">–</span><div class="lbl" id="stat-online-lbl" data-i18n="statRoster">在线 / 花名册</div></span>
+  </a>
+  <a class="stat" href="#panel-tokens">
+    <span><span class="num" id="stat-tokens">–</span><div class="lbl" data-i18n="statTokens">已签发令牌</div></span>
+  </a>
+  <a class="stat" data-tone="warn" href="#panel-groups">
+    <span><span class="num" id="stat-groups">–</span><div class="lbl" data-i18n="statGroups">群组</div></span>
+  </a>
+  <a class="stat" href="#panel-log">
+    <span><span class="num" id="stat-msgs">–</span><div class="lbl" data-i18n="statLog">消息尾迹（30 条）</div></span>
+  </a>
+</nav>
+
+<main class="workspace">
+  <!-- main: members & tokens -->
+  <section class="panel" id="panel-tokens">
+    <header>
+      <h2 data-i18n="panelTokens">成员与令牌</h2>
+      <span class="hint" id="tok-hint"></span>
+      <span class="spacer"></span>
+      <div class="toolbar">
+        <button class="ghost" id="tok-reveal" data-i18n-title="btnRevealTitle" title="切换 明文/打码 显示" data-i18n="btnReveal">明/打码</button>
+        <button class="ghost" id="tok-refresh" data-i18n-title="btnRefreshTok" title="刷新 token 列表">↻ <span data-i18n="btnRefresh">刷新</span></button>
+      </div>
+    </header>
+    <form class="group-form" id="tok-form">
+      <input name="peer" data-i18n-ph="formPeer" placeholder="peer id（如 zhangsan）" required spellcheck="false" aria-label="peer id">
+      <select name="role" aria-label="role">
+        <option value="agent">agent</option>
+        <option value="manager">manager</option>
+      </select>
+      <input name="owner" data-i18n-ph="formOwner" placeholder="归属人（可选）" spellcheck="false" aria-label="owner">
+      <button class="primary" type="submit" data-i18n="formIssue">签发</button>
+    </form>
+    <div class="rows" id="tokens">
+      <div class="empty" id="tok-empty" data-i18n="emptyTokensRemote">远程模式（--auth-tokens）下才能在此签发 token</div>
+    </div>
+  </section>
+
+  <!-- main: roster -->
+  <section class="panel" id="panel-roster">
+    <header>
+      <h2 data-i18n="panelRoster">花名册</h2>
+      <span class="count" id="roster-count">0</span>
+      <span class="hint" id="roster-hint"></span>
+      <span class="spacer"></span>
+      <div class="toolbar">
+        <button class="ghost" id="refresh" data-i18n-title="btnRefreshTitle" title="立即刷新">↻ <span data-i18n="btnRefresh">刷新</span></button>
+      </div>
+    </header>
+    <div class="search">
+      <input id="roster-q" type="search" data-i18n-ph="searchRoster" placeholder="过滤 peer id / 别名 / 客户端…" spellcheck="false" aria-label="search roster">
+      <div class="filter" id="roster-filter" role="group" aria-label="presence filter">
+        <button data-f="all" aria-pressed="true" data-i18n="filterAll">全部</button>
+        <button data-f="online" aria-pressed="false" data-i18n="filterOnline">在线</button>
+        <button data-f="offline" aria-pressed="false" data-i18n="filterOffline">离线</button>
+      </div>
+    </div>
+    <div class="rows" id="roster">
+      <div class="loading"><span class="chip dim" data-i18n="stateLoading">连接中…</span></div>
+    </div>
+  </section>
+
+  <aside class="stack">
+    <!-- groups -->
+    <section class="panel" id="panel-groups">
+      <header>
+        <h2 data-i18n="panelGroups">群组</h2>
+        <span class="hint" data-i18n="groupsHint">频道内互发 · 离线成员从历史补读</span>
+      </header>
+      <form class="group-form" id="g-create">
+        <input name="group" data-i18n-ph="formGroup" placeholder="group id" required spellcheck="false" aria-label="group id">
+        <input name="name" data-i18n-ph="formGName" placeholder="显示名（可选）" spellcheck="false" aria-label="display name">
+        <input name="members" data-i18n-ph="formMembers" placeholder="成员 peer id，逗号分隔" required spellcheck="false" aria-label="members">
+        <button class="primary" type="submit" data-i18n="formCreate">创建</button>
+      </form>
+      <div class="rows" id="groups">
+        <div class="empty" data-i18n="emptyGroups">暂无群组</div>
+      </div>
+    </section>
+
+    <!-- message tail -->
+    <section class="panel" id="panel-log">
+      <header>
+        <h2 data-i18n="panelLog">消息尾迹</h2>
+        <span class="hint" id="log-hint" data-i18n="logHintAll">全量</span>
+        <span class="spacer"></span>
+        <div class="filter" id="log-filter" role="group" aria-label="kind filter">
+          <button data-k="all" aria-pressed="true" data-i18n="filterAll">全部</button>
+          <button data-k="chat" aria-pressed="false">chat</button>
+          <button data-k="task" aria-pressed="false">task</button>
+          <button data-k="ack" aria-pressed="false">ack</button>
+          <button data-k="group" aria-pressed="false" data-i18n="filterGroup">群组</button>
+          <button data-k="notice" aria-pressed="false">notice</button>
+        </div>
+      </header>
+      <ul class="feed" id="log"><li class="empty">—</li></ul>
+      <footer id="bar" data-i18n="stateWaitConn">等待连接…</footer>
+    </section>
+  </aside>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+'use strict'
+/* ── i18n: tiny dictionary, zh/en; language persisted in localStorage ── */
+const I18N = {
+  zh: {
+    title: 'agent-comm-hub 管理台',
+    brandTitle: '管理台',
+    brandSub: '远程运维控制台 · manager',
+    statusOff: '未连接',
+    statusOn: '已连接',
+    statusErr: '连接异常',
+    fieldToken: 'token',
+    fieldMcp: 'mcp',
+    btnReload: '重新连接',
+    btnReveal: '明/打码',
+    btnRevealTitle: '切换 明文/打码 显示',
+    btnRefresh: '刷新',
+    btnRefreshTitle: '立即刷新',
+    btnRefreshTok: '刷新 token 列表',
+    langTitle: '切换语言',
+    langToggle: '中 / EN',
+    statRoster: '在线 / 花名册',
+    statTokens: '已签发令牌',
+    statGroups: '群组',
+    statLog: '消息尾迹（30 条）',
+    panelTokens: '成员与令牌',
+    panelRoster: '花名册',
+    panelGroups: '群组',
+    panelLog: '消息尾迹',
+    groupsHint: '频道内互发 · 离线成员从历史补读',
+    formPeer: 'peer id（如 zhangsan）',
+    formOwner: '归属人（可选）',
+    formIssue: '签发',
+    formGroup: 'group id',
+    formGName: '显示名（可选）',
+    formMembers: '成员 peer id，逗号分隔',
+    formCreate: '创建',
+    emptyTokensRemote: '远程模式（--auth-tokens）下才能在此签发 token',
+    emptyTokensNone: '还没有 token · 用上方表单签发第一枚',
+    emptyGroups: '还没有群组 · 用上方表单创建一个',
+    emptyNoPeers: '还没有 peer 接入',
+    emptyNoPeersSub: 'agent 连上 MCP 端点后会出现在这里',
+    emptyNoMatch: '没有匹配项',
+    emptyNoMatchSub: '换个关键词或筛选条件',
+    searchRoster: '过滤 peer id / 别名 / 客户端…',
+    stateLoading: '连接中…',
+    stateWaitConn: '等待连接…',
+    stateRefreshEvery: '每 3 秒自动刷新 · {time}',
+    filterAll: '全部',
+    filterOnline: '在线',
+    filterOffline: '离线',
+    filterGroup: '群组',
+    rosterOnline: '在线',
+    rosterOffline: '离线',
+    rosterPending: '待认领',
+    rosterPendingTitle: '匿名加入，待认领',
+    rosterSelfTitle: '本管理台会话',
+    rosterQueued: '排队消息',
+    actionRename: '改名',
+    actionKick: '移除',
+    actionSave: '保存',
+    actionCancel: '取消',
+    actionCopy: '复制',
+    actionDelete: '删除',
+    actionMembers: '成员',
+    actionSend: '发消息',
+    renamePh: '新别名（清空并提交 = 清除别名）',
+    renameDone: '已改名 {from} → {to}',
+    kickNote: '移除 <b>{peer}</b>？排队消息将被清空',
+    kickYes: '确认移除',
+    kickDone: '已移除 {peer}',
+    kickAbsent: '{peer} 已不在 hub 上',
+    revokeNote: '吊销 <b>{peer}</b> 的 token？该成员将无法再连接。',
+    revokeYes: '确认吊销',
+    revokeDone: '已吊销 {peer}',
+    copyDone: '已复制 {peer} 的 token',
+    copyFail: '复制失败：{msg}',
+    tokensCount: '共 {n} 枚 · {reveal}',
+    tokensVisible: '明文',
+    tokensMasked: '打码',
+    tokenIssued: '已签发 {peer} [{role}] token：{token}',
+    groupCreated: '群 #{group} 已创建',
+    groupDeleted: '已删除 #{name}',
+    groupDelNote: '删除群 <b>{name}</b>？（消息历史保留）',
+    groupDelYes: '确认删除',
+    groupSend: '发到 #{name}：',
+    groupSent: '已发送到 #{name}',
+    groupRemoved: '已移除 {peer}',
+    groupRemoveTitle: '移除 {peer}',
+    groupAdded: '已添加 {peer} → #{group}',
+    groupAddPh: '添加成员 peer id',
+    groupAdd: '添加',
+    groupMemberCount: '{n} 人',
+    groupOnlyOwner: '仅创建者',
+    logHintAll: '全量',
+    logHint: '全量 · 显示 {shown}/{total}',
+    logNone: '还没有消息',
+    logNoneKind: '该类型暂无消息',
+    errUnauth: '未授权：token 缺失或无效',
+    errNeedManager: '未授权：需要 manager token'
+  },
+  en: {
+    title: 'agent-comm-hub admin console',
+    brandTitle: 'admin console',
+    brandSub: 'remote ops console · manager',
+    statusOff: 'disconnected',
+    statusOn: 'connected',
+    statusErr: 'connection error',
+    fieldToken: 'token',
+    fieldMcp: 'mcp',
+    btnReload: 'Reconnect',
+    btnReveal: 'show/hide',
+    btnRevealTitle: 'Toggle plain/masked tokens',
+    btnRefresh: 'refresh',
+    btnRefreshTitle: 'Refresh now',
+    btnRefreshTok: 'Refresh token list',
+    langTitle: 'Switch language',
+    langToggle: 'EN / 中',
+    statRoster: 'Online / Roster',
+    statTokens: 'Tokens issued',
+    statGroups: 'Groups',
+    statLog: 'Message tail (30)',
+    panelTokens: 'Members & Tokens',
+    panelRoster: 'Roster',
+    panelGroups: 'Groups',
+    panelLog: 'Message Tail',
+    groupsHint: 'Channel broadcast · offline members read back from history',
+    formPeer: 'peer id (e.g. zhangsan)',
+    formOwner: 'owner (optional)',
+    formIssue: 'Issue',
+    formGroup: 'group id',
+    formGName: 'display name (optional)',
+    formMembers: 'member peer ids, comma separated',
+    formCreate: 'Create',
+    emptyTokensRemote: 'Tokens can only be issued here in remote mode (--auth-tokens)',
+    emptyTokensNone: 'No tokens yet · issue the first one with the form above',
+    emptyGroups: 'No groups yet · create one with the form above',
+    emptyNoPeers: 'No peers connected yet',
+    emptyNoPeersSub: 'agents that join the MCP endpoint will show up here',
+    emptyNoMatch: 'No matches',
+    emptyNoMatchSub: 'try another keyword or filter',
+    searchRoster: 'Filter peer id / alias / client…',
+    stateLoading: 'connecting…',
+    stateWaitConn: 'waiting for connection…',
+    stateRefreshEvery: 'auto-refresh every 3 s · {time}',
+    filterAll: 'All',
+    filterOnline: 'Online',
+    filterOffline: 'Offline',
+    filterGroup: 'group',
+    rosterOnline: 'online',
+    rosterOffline: 'offline',
+    rosterPending: 'unclaimed',
+    rosterPendingTitle: 'anonymous join, pending claim',
+    rosterSelfTitle: 'this console session',
+    rosterQueued: 'queued messages',
+    actionRename: 'Rename',
+    actionKick: 'Remove',
+    actionSave: 'Save',
+    actionCancel: 'Cancel',
+    actionCopy: 'Copy',
+    actionDelete: 'Delete',
+    actionMembers: 'Members',
+    actionSend: 'Send',
+    renamePh: 'new alias (submit empty to clear)',
+    renameDone: 'renamed {from} → {to}',
+    kickNote: 'Remove <b>{peer}</b>? Queued messages will be dropped',
+    kickYes: 'Remove',
+    kickDone: 'removed {peer}',
+    kickAbsent: '{peer} is no longer on the hub',
+    revokeNote: 'Revoke <b>{peer}</b>\'s token? The member will not be able to connect.',
+    revokeYes: 'Revoke',
+    revokeDone: 'revoked {peer}',
+    copyDone: 'copied {peer}\'s token',
+    copyFail: 'copy failed: {msg}',
+    tokensCount: '{n} total · {reveal}',
+    tokensVisible: 'plain',
+    tokensMasked: 'masked',
+    tokenIssued: 'issued {peer} [{role}] token: {token}',
+    groupCreated: 'group #{group} created',
+    groupDeleted: 'deleted #{name}',
+    groupDelNote: 'Delete group <b>{name}</b>? (message history is kept)',
+    groupDelYes: 'Delete',
+    groupSend: 'Send to #{name}: ',
+    groupSent: 'sent to #{name}',
+    groupRemoved: 'removed {peer}',
+    groupRemoveTitle: 'Remove {peer}',
+    groupAdded: 'added {peer} → #{group}',
+    groupAddPh: 'member peer id',
+    groupAdd: 'Add',
+    groupMemberCount: '{n} members',
+    groupOnlyOwner: 'creator only',
+    logHintAll: 'all',
+    logHint: 'all · showing {shown}/{total}',
+    logNone: 'no messages yet',
+    logNoneKind: 'no messages of this kind',
+    errUnauth: 'unauthorized: token missing or invalid',
+    errNeedManager: 'unauthorized: manager token required'
+  }
+}
+function pickLang() {
+  const saved = localStorage.getItem('hub-admin-lang')
+  if (saved === 'zh' || saved === 'en') return saved
+  return /^zh/i.test(navigator.language || '') ? 'zh' : 'en'
+}
+const LANG = pickLang()
+const t = (key, vars) => {
+  let s = I18N[LANG][key] ?? I18N.zh[key] ?? key
+  if (vars) for (const [k, v] of Object.entries(vars)) s = s.split('{' + k + '}').join(String(v))
+  return s
+}
+/* Apply keys to static DOM: [data-i18n] text, [data-i18n-ph] placeholder. */
+function applyI18n() {
+  document.title = t('title')
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n) })
+  document.querySelectorAll('[data-i18n-ph]').forEach((el) => { el.placeholder = t(el.dataset.i18nPh) })
+  document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle) })
+}
+document.querySelector('#lang').textContent = t('langToggle')
+
+const $ = (id) => document.getElementById(id)
+const token = () => $('token').value.trim()
+const endpoint = () => location.origin + ($('mpath').value.trim() || '/mcp')
+
+let sid = null
+async function rpc(method, params) {
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' }
+  if (token() !== '') headers.Authorization = 'Bearer ' + token()
+  if (sid) headers['Mcp-Session-Id'] = sid
+  // Notifications (no id) go out as 202; requests carry an id — mixing them
+  // up makes the hub report "method not found".
+  const isNotification = method.startsWith('notifications/')
+  const body = { jsonrpc: '2.0', method, params }
+  if (!isNotification) body.id = Date.now() % 1e6
+  const res = await fetch(endpoint(), { method: 'POST', headers, body: JSON.stringify(body) })
+  if (res.status === 401) throw new Error(t('errUnauth'))
+  const json = isNotification ? null : await res.json().catch(() => null)
+  const newSid = res.headers.get('mcp-session-id')
+  if (newSid) sid = newSid
+  if (isNotification) return {}
+  if (!json || json.error) throw new Error(json?.error?.message ?? ('HTTP ' + res.status))
+  const parsed = JSON.parse(json.result?.content?.[0]?.text ?? '{}')
+  if (json.result?.isError) throw new Error(parsed.error ?? 'tool error')
+  return parsed
+}
+async function ensureSession() {
+  if (sid) return
+  // MCP handshake: the returned Mcp-Session-Id binds this session for all
+  // subsequent tool calls (remote mode also binds the manager identity via
+  // the token).
+  await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'hub-admin', version: '1.0' } })
+  await rpc('notifications/initialized')
+}
+async function call(tool, args) { await ensureSession(); return rpc('tools/call', { name: tool, arguments: args ?? {} }) }
+
+/* ── toast feedback: four states (info/ok/warn/err), aria-live broadcast ── */
+function toast(msg, kind = '') {
+  const el = document.createElement('div')
+  el.className = 'toast ' + kind
+  el.textContent = msg
+  $('toasts').append(el)
+  setTimeout(() => el.remove(), 3600)
+}
+
+/* ── render: connection state ── */
+function setConn(state, text) {
+  $('conn').dataset.state = state
+  $('conn-text').textContent = text
+}
+
+/* ── token management (members & tokens panel) ── */
+let revealTokens = false
+let pendingRevoke = null   // inline two-step confirm
+async function adminApi(method, path, body) {
+  const headers = {}
+  if (!(body instanceof FormData) && body !== undefined) headers['Content-Type'] = 'application/json'
+  if (token() !== '') headers.Authorization = 'Bearer ' + token()
+  const res = await fetch(endpoint().replace(/\/mcp$/, '') + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  if (res.status === 401 || res.status === 403) throw new Error(t('errNeedManager'))
+  const json = await res.json().catch(() => null)
+  if (!json || json.error) throw new Error(json?.error ?? ('HTTP ' + res.status))
+  return json
+}
+
+function tokRow(tk) {
+  const row = document.createElement('div')
+  row.className = 'row'
+  if (pendingRevoke === tk.peer) {
+    const box = document.createElement('div')
+    box.className = 'confirm-row'
+    const note = document.createElement('span')
+    note.className = 'confirm-note'
+    note.innerHTML = t('revokeNote', { peer: escapeHtml(tk.peer) })
+    const yes = document.createElement('button'); yes.className = 'danger'; yes.textContent = t('revokeYes')
+    const no = document.createElement('button'); no.textContent = t('actionCancel')
+    yes.onclick = async () => {
+      pendingRevoke = null
+      try {
+        await adminApi('DELETE', '/admin/api/tokens/remove/' + encodeURIComponent(tk.peer), undefined)
+        toast(t('revokeDone', { peer: tk.peer }), 'ok')
+      } catch (e) { toast(String(e.message ?? e), 'err') }
+      loadTokens()
+    }
+    no.onclick = () => { pendingRevoke = null; loadTokens() }
+    box.append(note, yes, no)
+    row.append(box)
+    return row
+  }
+  const who = document.createElement('div')
+  who.className = 'who'
+  who.innerHTML = `<div class="id">${escapeHtml(tk.peer)} <span class="chip ${tk.role === 'manager' ? 'warn' : ''}">${tk.role}</span></div>` +
+    `<div class="alias">${escapeHtml(tk.owner || '—')}</div>`
+  const tok = document.createElement('span')
+  tok.className = 'chip'
+  tok.textContent = tk.token
+  const actions = document.createElement('div')
+  actions.className = 'actions'
+  if (revealTokens) {
+    const copy = document.createElement('button'); copy.className = 'ghost'; copy.textContent = t('actionCopy')
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(tk.token); toast(t('copyDone', { peer: tk.peer }), 'ok') }
+      catch (e) { toast(t('copyFail', { msg: String(e.message ?? e) }), 'err') }
+    }
+    actions.append(copy)
+  }
+  const del = document.createElement('button'); del.className = 'ghost danger'; del.textContent = t('actionKick')
+  del.onclick = () => { pendingRevoke = tk.peer; renderTokens(lastTokens) }
+  actions.append(del)
+  row.append(who, tok, actions)
+  return row
+}
+
+let lastTokens = []
+function renderTokens(list) {
+  lastTokens = list
+  const wrap = $('tokens')
+  wrap.innerHTML = ''
+  $('tok-hint').textContent = t('tokensCount', { n: list.length, reveal: revealTokens ? t('tokensVisible') : t('tokensMasked') })
+  if (list.length === 0) {
+    $('tok-empty').textContent = t('emptyTokensNone')
+  } else {
+    $('tok-empty').textContent = ''
+    for (const tk of list) wrap.append(tokRow(tk))
+  }
+  $('stat-tokens').textContent = String(list.length)
+}
+
+async function loadTokens() {
+  try {
+    const res = await adminApi('GET', '/admin/api/tokens?reveal=' + (revealTokens ? '1' : '0'), undefined)
+    renderTokens(res.tokens ?? [])
+  } catch (e) {
+    $('tokens').innerHTML = `<div class="empty">${escapeHtml(String(e.message ?? e))}</div>`
+  }
+}
+
+$('tok-form').onsubmit = async (ev) => {
+  ev.preventDefault()
+  const f = new FormData(ev.target)
+  try {
+    const res = await adminApi('POST', '/admin/api/tokens/add', {
+      peer: f.get('peer'), role: f.get('role'), owner: f.get('owner') || undefined,
+    })
+    revealTokens = true   // reveal after issuing so the new token can be copied
+    loadTokens()
+    toast(t('tokenIssued', { peer: res.created.peer, role: res.created.role, token: res.created.token }), 'ok')
+    ev.target.reset()
+  } catch (e) { toast(String(e.message ?? e), 'err') }
+}
+$('tok-reveal').onclick = () => { revealTokens = !revealTokens; loadTokens() }
+$('tok-refresh').onclick = () => { pendingRevoke = null; loadTokens() }
+
+/* ── render: roster (inline rename / two-step confirm remove; search + presence filter) ── */
+let editingId = null
+let confirmingId = null
+let rosterQuery = ''
+let rosterFilter = 'all'
+function displayName(p) { return p.alias ?? p.id }
+
+function rosterRow(p) {
+  if (editingId === p.id) return rosterEditRow(p)
+  if (confirmingId === p.id) return rosterConfirmRow(p)
+  const row = document.createElement('div')
+  row.className = 'row'
+  row.dataset.online = String(p.connected)
+
+  const presence = document.createElement('span')
+  presence.className = 'presence'
+  presence.title = p.connected ? t('rosterOnline') : t('rosterOffline')
+
+  const who = document.createElement('div')
+  who.className = 'who'
+  const self = p.id === selfPeer() ? `<span class="self-tag" title="${t('rosterSelfTitle')}">●</span>` : ''
+  const anon = p.anonymous ? ` <span class="chip warn" title="${t('rosterPendingTitle')}">${t('rosterPending')}</span>` : ''
+  const ips = Array.isArray(p.clientIps) && p.clientIps.length ? ` · <span class="muted">${escapeHtml(p.clientIps.join(', '))}</span>` : ''
+  who.innerHTML = `<div class="id">${self}${escapeHtml(displayName(p))}${anon}</div>` +
+    `<div class="alias">${escapeHtml(p.alias ? p.id : (p.clientName ?? ''))}${ips}</div>`
+
+  const chip = document.createElement('span')
+  if (p.clientVersion) { chip.className = 'chip'; chip.textContent = 'v' + p.clientVersion }
+
+  const state = document.createElement('span')
+  state.className = 'chip ' + (p.connected ? 'ok' : 'dim')
+  state.textContent = p.connected ? t('rosterOnline') : t('rosterOffline')
+
+  const badge = document.createElement('span')
+  if ((p.queued ?? 0) > 0) { badge.className = 'badge'; badge.title = t('rosterQueued'); badge.textContent = String(p.queued) }
+
+  const actions = document.createElement('div')
+  actions.className = 'actions'
+  actions.append(mkBtn(t('actionRename'), 'ghost', () => { editingId = p.id; confirmingId = null; renderRoster(lastPeers) }))
+  if (p.connected) actions.append(mkBtn(t('actionKick'), 'ghost danger', () => { confirmingId = p.id; editingId = null; renderRoster(lastPeers) }))
+
+  row.append(presence, who, chip, state, badge, actions)
+  return row
+}
+
+function rosterEditRow(p) {
+  const row = document.createElement('div')
+  row.className = 'row'
+  const box = document.createElement('div')
+  box.className = 'editbox'
+  const input = document.createElement('input')
+  input.value = p.alias ?? ''
+  input.placeholder = t('renamePh')
+  input.spellcheck = false
+  const save = document.createElement('button'); save.className = 'primary'; save.textContent = t('actionSave')
+  const cancel = document.createElement('button'); cancel.textContent = t('actionCancel')
+  const submit = async () => {
+    const next = input.value.trim()
+    if (next === (p.alias ?? '')) { editingId = null; refresh(); return }
+    try {
+      await call('bridge_rename', { peer: p.id, alias: next })
+      toast(t('renameDone', { from: displayName(p), to: next || '—' }), 'ok')
+    } catch (e) { toast(String(e.message ?? e), 'err') }
+    editingId = null
+    refresh()
+  }
+  save.onclick = submit
+  cancel.onclick = () => { editingId = null; refresh() }
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') { e.stopPropagation(); void submit() }
+    if (e.key === 'Escape') { e.stopPropagation(); editingId = null; refresh() }
+  }
+  box.append(input, save, cancel)
+  row.append(box)
+  queueMicrotask(() => input.focus())
+  return row
+}
+
+function rosterConfirmRow(p) {
+  const row = document.createElement('div')
+  row.className = 'row'
+  const box = document.createElement('div')
+  box.className = 'confirm-row'
+  const note = document.createElement('span')
+  note.className = 'confirm-note'
+  note.innerHTML = t('kickNote', { peer: escapeHtml(displayName(p)) })
+  const yes = document.createElement('button'); yes.className = 'danger'; yes.textContent = t('kickYes')
+  const no = document.createElement('button'); no.textContent = t('actionCancel')
+  yes.onclick = async () => {
+    try {
+      const res = await call('bridge_unregister', { peer: p.id })
+      toast(res?.kicked === false ? t('kickAbsent', { peer: p.id }) : t('kickDone', { peer: displayName(p) }), 'ok')
+    } catch (e) { toast(String(e.message ?? e), 'err') }
+    confirmingId = null
+    refresh()
+  }
+  no.onclick = () => { confirmingId = null; refresh() }
+  box.append(note, yes, no)
+  row.append(box)
+  return row
+}
+
+let lastPeers = []
+let lastRosterKey = ''
+function rosterKey(peers) {
+  return rosterFilter + '|' + rosterQuery + '|' + peers.map(p =>
+    [p.id, p.connected ? 1 : 0, p.alias ?? '', p.queued ?? 0, p.clientName ?? '',
+     p.anonymous ? 1 : 0, Array.isArray(p.clientIps) ? p.clientIps.join(', ') : ''].join('\u0001')
+  ).join('\u0002')
+}
+function renderRoster(peers, force = false) {
+  lastPeers = peers
+  // Skip rebuilding when the snapshot is unchanged: the 3 s poll must not
+  // interrupt a hover or an ongoing read (apple-design: interruptibility).
+  const key = rosterKey(peers)
+  if (!force && key === lastRosterKey) return
+  lastRosterKey = key
+  const online = peers.filter(p => p.connected).length
+  $('roster-count').textContent = String(peers.length)
+  $('roster-hint').textContent = `${online} ${t('filterOnline')}`
+  $('stat-online').textContent = `${online}/${peers.length}`
+  const q = rosterQuery.toLowerCase()
+  const wrap = $('roster')
+  wrap.innerHTML = ''
+  const shown = peers.filter(p => {
+    if (rosterFilter === 'online' && !p.connected) return false
+    if (rosterFilter === 'offline' && p.connected) return false
+    if (q === '') return true
+    return [p.id, p.alias ?? '', p.clientName ?? ''].some(s => s.toLowerCase().includes(q))
+  })
+  if (shown.length === 0) {
+    wrap.innerHTML = peers.length === 0
+      ? `<div class="empty"><b>${escapeHtml(t('emptyNoPeers'))}</b>${escapeHtml(t('emptyNoPeersSub'))}</div>`
+      : `<div class="empty"><b>${escapeHtml(t('emptyNoMatch'))}</b>${escapeHtml(t('emptyNoMatchSub'))}</div>`
+    return
+  }
+  for (const p of shown) wrap.append(rosterRow(p))
+}
+
+$('roster-q').addEventListener('input', (e) => { rosterQuery = e.target.value; renderRoster(lastPeers, true) })
+$('roster-filter').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-f]')
+  if (!b) return
+  rosterFilter = b.dataset.f
+  for (const x of $('roster-filter').children) x.setAttribute('aria-pressed', String(x === b))
+  renderRoster(lastPeers, true)
+})
+
+/* ── render: groups (member expansion management / inline confirm delete) ── */
+let expandedGroup = null
+let pendingGroupDelete = null
+let lastGroups = []
+
+function groupRow(g) {
+  const row = document.createElement('div')
+  row.className = 'g-row'
+  if (pendingGroupDelete === g.id) {
+    const box = document.createElement('div')
+    box.className = 'confirm-row'
+    const note = document.createElement('span')
+    note.className = 'confirm-note'
+    note.innerHTML = t('groupDelNote', { name: escapeHtml(g.name ?? g.id) })
+    const yes = document.createElement('button'); yes.className = 'danger'; yes.textContent = t('groupDelYes')
+    const no = document.createElement('button'); no.textContent = t('actionCancel')
+    yes.onclick = async () => {
+      pendingGroupDelete = null
+      try { await call('bridge_group_delete', { group: g.id }); toast(t('groupDeleted', { name: g.name ?? g.id }), 'ok') }
+      catch (e) { toast(String(e.message ?? e), 'err') }
+      refresh()
+    }
+    no.onclick = () => { pendingGroupDelete = null; renderGroups(lastGroups) }
+    box.append(note, yes, no)
+    row.append(box)
+    return row
+  }
+  const memCount = (g.members ?? []).length
+  const name = document.createElement('div')
+  name.className = 'g-name'
+  name.innerHTML = `<div class="id"><span class="grp">#</span>${escapeHtml(g.name ?? g.id)} <span class="chip dim">${escapeHtml(t('groupMemberCount', { n: memCount }))}</span></div>` +
+    `<div class="members">${escapeHtml((g.members ?? []).join(' · ') || t('groupOnlyOwner'))}</div>`
+  const actions = document.createElement('div')
+  actions.className = 'actions'
+  actions.append(mkBtn(t('actionMembers'), 'ghost' + (expandedGroup === g.id ? ' primary' : ''), () => {
+    expandedGroup = expandedGroup === g.id ? null : g.id
+    renderGroups(lastGroups)
+  }))
+  actions.append(mkBtn(t('actionSend'), 'ghost', async () => {
+    const text = prompt(t('groupSend', { name: g.name ?? g.id }))
+    if (!text) return
+    try { await call('bridge_group_send', { group: g.id, message: text }); toast(t('groupSent', { name: g.name ?? g.id }), 'ok') }
+    catch (e) { toast(String(e.message ?? e), 'err') }
+    refresh()
+  }))
+  actions.append(mkBtn(t('actionDelete'), 'ghost danger', () => { pendingGroupDelete = g.id; renderGroups(lastGroups) }))
+  row.append(name, actions)
+  if (expandedGroup === g.id) row.append(groupExpand(g))
+  return row
+}
+
+function groupExpand(g) {
+  const box = document.createElement('div')
+  box.className = 'g-expand'
+  const mem = document.createElement('div')
+  mem.className = 'g-members'
+  for (const m of g.members ?? []) {
+    const chip = document.createElement('span')
+    chip.className = 'member-chip'
+    const remove = document.createElement('button')
+    remove.textContent = '×'
+    remove.title = t('groupRemoveTitle', { peer: m })
+    remove.onclick = async () => {
+      try { await call('bridge_group_remove_member', { group: g.id, member: m }); toast(t('groupRemoved', { peer: m }), 'ok') }
+      catch (e) { toast(String(e.message ?? e), 'err') }
+      refresh()
+    }
+    const span = document.createElement('span'); span.textContent = m
+    chip.append(span, remove)
+    mem.append(chip)
+  }
+  const add = document.createElement('form')
+  add.className = 'g-add'
+  const input = document.createElement('input')
+  input.placeholder = t('groupAddPh')
+  input.spellcheck = false
+  const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = t('groupAdd')
+  input.required = true
+  add.append(input, btn)
+  add.onsubmit = async (ev) => {
+    ev.preventDefault()
+    const m = input.value.trim()
+    if (!m) return
+    try { await call('bridge_group_add_member', { group: g.id, member: m }); toast(t('groupAdded', { peer: m, group: g.name ?? g.id }), 'ok') }
+    catch (e) { toast(String(e.message ?? e), 'err') }
+    refresh()
+  }
+  box.append(mem, add)
+  queueMicrotask(() => input.focus())
+  return box
+}
+
+function renderGroups(groups) {
+  lastGroups = groups
+  $('stat-groups').textContent = String(groups.length)
+  const wrap = $('groups')
+  wrap.innerHTML = ''
+  if (groups.length === 0) {
+    wrap.innerHTML = '<div class="empty"></div>'
+    $('groups .empty')[0]?.setAttribute('data-i18n', 'emptyGroups')
+    wrap.querySelector('.empty').textContent = t('emptyGroups')
+    return
+  }
+  for (const g of groups) wrap.append(groupRow(g))
+}
+
+/* ── render: message tail (kind filter chips) ── */
+function kindOf(m) { return m.channel ? 'group' : m.kind }
+function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML }
+function selfPeer() { return lastStatus?.peerId ?? '' }
+
+let logFilter = 'all'
+let lastTail = []
+let lastTailKey = ''
+function renderTail(messages, force = false) {
+  lastTail = messages
+  // Skip rebuilding when nothing new arrived: keep the scroll position and any
+  // read in progress (apple-design: interruptibility).
+  const key = messages.map(m => m.id + '@' + m.ts).join('|')
+  if (!force && key === lastTailKey) return
+  lastTailKey = key
+  const feed = $('log')
+  feed.innerHTML = ''
+  const shown = logFilter === 'all' ? messages : messages.filter(m => kindOf(m) === logFilter)
+  $('log-hint').textContent = t('logHint', { shown: shown.length, total: messages.length })
+  $('stat-msgs').textContent = String(messages.length)
+  if (shown.length === 0) {
+    feed.innerHTML = '<li class="empty">' + (logFilter === 'all' ? t('logNone') : t('logNoneKind')) + '</li>'
+    return
+  }
+  for (const m of shown) {
+    const li = document.createElement('li')
+    const time = new Date(m.ts).toLocaleTimeString(LANG === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false })
+    const body = typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    const metaEl = document.createElement('div')
+    metaEl.className = 'meta'
+    const tEl = document.createElement('span'); tEl.className = 't'; tEl.textContent = time
+    const route = document.createElement('span'); route.className = 'route'; route.textContent = m.from + ' → ' + m.to
+    const kind = document.createElement('span')
+    kind.className = 'kind ' + kindOf(m)
+    kind.textContent = m.channel ? '#' + m.channel : m.kind
+    metaEl.append(tEl, route, kind)
+    const bodyEl = document.createElement('div')
+    bodyEl.className = 'body'
+    bodyEl.textContent = body
+    li.append(metaEl, bodyEl)
+    feed.append(li)
+  }
+}
+
+$('log-filter').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-k]')
+  if (!b) return
+  logFilter = b.dataset.k
+  for (const x of $('log-filter').children) x.setAttribute('aria-pressed', String(x === b))
+  renderTail(lastTail, true)
+})
+
+/* ── helpers ── */
+function mkBtn(label, cls, onclick) {
+  const b = document.createElement('button')
+  b.textContent = label
+  b.className = cls
+  b.onclick = onclick
+  return b
+}
+
+/* ── poll loop: skip re-render while a panel has an interaction in flight ── */
+let lastStatus = null
+async function refresh() {
+  try {
+    const status = await call('bridge_status')
+    lastStatus = status
+    setConn('ok', t('statusOn'))
+    const bar = $('bar')
+    bar.className = ''
+    bar.textContent = t('stateRefreshEvery', { time: new Date().toLocaleTimeString(LANG === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) })
+    if (!editingId && !confirmingId) renderRoster(status.peers ?? [])
+    const groups = await call('bridge_group_list')
+    if (!pendingGroupDelete && expandedGroup === null) renderGroups(groups.groups ?? [])
+    const tail = await call('bridge_history', { peer: 'all', limit: 30 })
+    renderTail(tail.messages ?? [])
+    loadTokens()
+  } catch (e) {
+    setConn('err', t('statusErr'))
+    const bar = $('bar')
+    bar.className = 'err'
+    // A hub restart invalidates the old session: next tick re-runs initialize.
+    sid = null
+    bar.textContent = String(e.message ?? e)
+  }
+}
+
+$('g-create').onsubmit = async (ev) => {
+  ev.preventDefault()
+  const f = new FormData(ev.target)
+  const members = String(f.get('members')).split(',').map(s => s.trim()).filter(Boolean)
+  try {
+    await call('bridge_group_create', { group: f.get('group'), name: f.get('name') || undefined, members })
+    toast(t('groupCreated', { group: f.get('group') }), 'ok')
+    ev.target.reset()
+  } catch (e) { toast(String(e.message ?? e), 'err') }
+  refresh()
+}
+$('refresh').onclick = () => { editingId = null; confirmingId = null; refresh() }
+$('reload').onclick = () => { sid = null; localStorage.setItem('hub-admin-token', token()); refresh() }
+$('lang').onclick = () => { localStorage.setItem('hub-admin-lang', LANG === 'zh' ? 'en' : 'zh'); location.reload() }
+$('token').addEventListener('change', () => localStorage.setItem('hub-admin-token', token()))
+$('token').value = localStorage.getItem('hub-admin-token') ?? ''
+
+/* ── material feedback: topbar gets heavier past the content edge
+     (rAF-throttled, interruptible transition) ── */
+const topbar = document.querySelector('.topbar')
+let scrollTick = false
+addEventListener('scroll', () => {
+  if (scrollTick) return
+  scrollTick = true
+  requestAnimationFrame(() => {
+    scrollTick = false
+    topbar.classList.toggle('scrolled', scrollY > 8)
+  })
+}, { passive: true })
+
+/* ── exit path: Esc closes every inline confirm/edit/expansion along the
+     same path it opened (spatial consistency) ── */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return
+  if (editingId === null && confirmingId === null && pendingRevoke === null &&
+      pendingGroupDelete === null && expandedGroup === null) return
+  editingId = null; confirmingId = null; pendingRevoke = null
+  pendingGroupDelete = null; expandedGroup = null
+  refresh()
+})
+
+applyI18n()
+setInterval(refresh, 3000)
+refresh()
+</script>
+</body>
+</html>
