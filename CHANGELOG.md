@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1 (2026-09-01)
+
+- Fix a misleading desktop warning: the SQLite "state open" line was logged
+  at `warn` (stderr), which the desktop GUI surfaced as an `[err]` entry on
+  every start even though the hub was running fine. It is now `info`
+  (stdout), so the app shows it as a normal startup log. No behavior change.
+
 ## 0.7.0 (2026-08-30)
 
 - **Remote mode (server deployment)**: `--auth-tokens <file>` turns on bearer

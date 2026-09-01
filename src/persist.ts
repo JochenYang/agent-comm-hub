@@ -57,7 +57,7 @@ export class SQLiteStateStore {
   constructor(
     file: string,
     private readonly historyLimit: number,
-    log: { warn(message: string): void },
+    log: { info(message: string): void; warn(message: string): void },
   ) {
     this.db = new DatabaseSync(file)
     this.db.exec('PRAGMA journal_mode = WAL')
@@ -77,7 +77,7 @@ export class SQLiteStateStore {
         id TEXT PRIMARY KEY, name TEXT, members TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL
       );
     `)
-    log.warn(`sqlite state open: ${file}`)
+    log.info(`sqlite state open: ${file}`)
   }
 
   /** Buffer one history message (called per message via the hub hook). */
