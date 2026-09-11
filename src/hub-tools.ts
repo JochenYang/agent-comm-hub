@@ -8,7 +8,7 @@
 import type { AgentHub } from './hub.js'
 import type { McpTool, SessionRegistry } from './mcp-server.js'
 import { AGENT_STATUSES, type HerdrCtl } from './herdr-ctl.js'
-import { decodeContent, type AckContent, type BridgeMessage, BROADCAST, PEER_ID_PATTERN, type TaskContent } from './protocol.js'
+import { decodeContent, type AckContent, type BridgeMessage, BROADCAST, PEER_ID_PATTERN, type TaskContent, type TaskStatus } from './protocol.js'
 import { ANON_JOIN_PEER } from './auth.js'
 
 /** Default wait budget when a client omits timeoutMs. */
@@ -374,7 +374,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_task',
-      description: 'Delegate a structured task to another agent. The receiving agent decides whether to accept; expect an ack (accepted/rejected/done/failed) via bridge_wait / bridge_poll.',
+      description: 'Delegate a structured task to another agent. The receiving agent decides whether to accept; expect an ack (accepted/rejected/done/failed) via bridge_wait / bridge_poll. Track progress with bridge_task_status(ref) or bridge_tasks; wait specifically for the ack with bridge_wait({ ref }).',
       inputSchema: schema(
         {
           to: str('Target peerId, or "all" to broadcast.'),
@@ -392,7 +392,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_ack',
-      description: 'Acknowledge a message received from another agent (usually a delegated task): accepted | rejected | done | failed. The ack is routed back to the original sender of `ref`.',
+      description: 'Acknowledge a message received from another agent (usually a delegated task): accepted | rejected | done | failed. The ack is routed back to the original sender of `ref` and updates the hub task ledger (see bridge_task_status / bridge_tasks).',
       inputSchema: schema(
         {
           ref: str('The id of the message being acknowledged.'),
@@ -411,13 +411,62 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       }),
     },
     {
+      name: 'bridge_tasks',
+      description: 'List delegated tasks involving you, newest first. role=sent = tasks you assigned; role=received = tasks assigned to you (or broadcast); status filters the ledger state (pending/accepted/rejected/done/failed). Each row carries the full ack timeline.',
+      inputSchema: schema({
+        role: { type: 'string', enum: ['sent', 'received', 'all'], description: 'Which side of the task to list (default all).' },
+        status: { type: 'string', enum: ['pending', 'accepted', 'rejected', 'done', 'failed'], description: 'Only tasks whose current ledger status matches.' },
+        limit: int('How many tasks to return (default 50).'),
+      }),
+      handler: wrap(true, async (args, peer) => {
+        const role = args.role === undefined ? undefined : String(args.role)
+        if (role !== undefined && role !== 'sent' && role !== 'received' && role !== 'all') {
+          throw new Error(`invalid role: ${role} (expected sent | received | all)`)
+        }
+        const status = args.status === undefined ? undefined : String(args.status)
+        const validStatus: TaskStatus[] = ['pending', 'accepted', 'rejected', 'done', 'failed']
+        if (status !== undefined && !validStatus.includes(status as TaskStatus)) {
+          throw new Error(`invalid status: ${status} (expected ${validStatus.join(' | ')})`)
+        }
+        const tasks = hub.listTasks(peer, {
+          ...(role !== undefined ? { role: role as 'sent' | 'received' | 'all' } : {}),
+          ...(status !== undefined ? { status: status as TaskStatus } : {}),
+          ...(args.limit !== undefined ? { limit: Number(args.limit) } : {}),
+        })
+        return { tasks }
+      }),
+    },
+    {
+      name: 'bridge_task_status',
+      description: 'Status of one delegated task: current ledger state (pending → accepted → done/failed, or rejected), the original prompt/context/deliverable, and every ack event (who, status, note, when). Use the task message id (the same id you pass as bridge_ack ref).',
+      inputSchema: schema({ ref: str('Task message id (the id returned by bridge_task, also used as ack ref).') }, ['ref']),
+      handler: wrap(true, async (args, peer, sessionId) => {
+        const ref = String(args.ref)
+        const task = hub.taskOf(ref)
+        if (task === undefined) throw new Error(`unknown task: ${ref}`)
+        // Sender always sees their own task; the assignee sees it too.
+        // Anyone else needs manager rights (same gate as reading history).
+        if (task.from !== peer && task.to !== peer && task.to !== BROADCAST) {
+          requireManager(peer, `reading task '${ref}'`, sessionId)
+        }
+        return { task }
+      }),
+    },
+    {
       name: 'bridge_wait',
-      description: 'Wait (long-poll) for the next message addressed to you. Resolves immediately when one is queued; otherwise blocks until one arrives or the timeout fires. `from` narrows to one sender. Loop this tool to hold a real-time conversation.',
+      description: 'Wait (long-poll) for the next message addressed to you. Resolves immediately when one is queued; otherwise blocks until one arrives or the timeout fires. `from` narrows to one sender. `ref` waits specifically for the ack of that task id. Loop this tool to hold a real-time conversation.',
       inputSchema: schema({
         from: optStr('Only wait for messages from this peerId.'),
+        ref: optStr('Only wait for the ack of this task message id (bridge_task id).'),
         timeoutMs: int(`Max wait in milliseconds (default ${DEFAULT_WAIT_MS}, ceiling is server waitTimeoutMs).`),
       }),
-      handler: wrap(true, async (args, peer) => presentWait(await hub.wait(peer, args.timeoutMs === undefined ? options.defaultWaitMs ?? DEFAULT_WAIT_MS : Number(args.timeoutMs), args.from === undefined ? undefined : String(args.from)))),
+      handler: wrap(true, async (args, peer) => presentWait(await hub.wait(
+        peer,
+        args.timeoutMs === undefined ? options.defaultWaitMs ?? DEFAULT_WAIT_MS : Number(args.timeoutMs),
+        args.from === undefined ? undefined : String(args.from),
+        undefined,
+        args.ref === undefined ? undefined : String(args.ref),
+      ))),
     },
     {
       name: 'bridge_poll',

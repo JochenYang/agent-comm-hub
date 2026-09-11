@@ -5,7 +5,19 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { BROADCAST, KINDS, PEER_ID_PATTERN, type BridgeMessage, type MessageKind, type WaitResult } from './protocol.js'
+import {
+  BROADCAST,
+  KINDS,
+  PEER_ID_PATTERN,
+  TERMINAL_TASK_STATUSES,
+  type AckContent,
+  type BridgeMessage,
+  type MessageKind,
+  type TaskContent,
+  type TaskRecord,
+  type TaskStatus,
+  type WaitResult,
+} from './protocol.js'
 
 /** One registered long-poll waiter for a peer. */
 interface Waiter {
@@ -17,6 +29,8 @@ interface Waiter {
   onAbort: () => void
   /** Optional sender filter: only messages from this peer match. */
   from?: string
+  /** Optional ack-ref filter: only `ack` messages whose `ref` matches. */
+  ref?: string
 }
 
 export interface HubOptions {
@@ -97,6 +111,10 @@ export interface PeerProfile {
  * map would leak on hubs that see many distinct one-shot client names. */
 const MAX_PROFILES = 512
 
+/** Cap for the task ledger. Oldest non-pending tasks are evicted first so a
+ * long-running hub cannot grow the map without bound; pending tasks stay. */
+const MAX_TASKS = 1024
+
 /** Live hub summary returned by the status tool. */
 export interface HubStatus {
   server: 'agent-comm-hub'
@@ -115,6 +133,8 @@ export class AgentHub {
   private readonly profiles = new Map<string, PeerProfile>()
   /** Named channels (group channel), keyed by group id. */
   private readonly groups = new Map<string, GroupState>()
+  /** Task ledger: task message id → record (status + ack timeline). */
+  private readonly taskLedger = new Map<string, TaskRecord>()
   private readonly gcTimer: NodeJS.Timeout | undefined
 
   constructor(private readonly options: HubOptions) {
@@ -322,16 +342,105 @@ export class AgentHub {
     return this.route(from, to, kind, content)
   }
 
-  /** Send a structured task message to `to` (or {@link BROADCAST}). */
+  /** Send a structured task message to `to` (or {@link BROADCAST}). Records
+   * a ledger entry so the sender can later query status / wait for acks. */
   sendTask(from: string, to: string, task: { prompt: string; context?: string; deliverable?: string }): BridgeMessage {
-    return this.route(from, to, 'task', JSON.stringify(task))
+    const message = this.route(from, to, 'task', JSON.stringify(task))
+    this.recordTask(message, task)
+    return message
   }
 
-  /** Send an acknowledgement back to the sender of `ref`. */
+  /** Send an acknowledgement back to the sender of `ref`. Updates the task
+   * ledger when `ref` is a known task; chat/notice refs still route. */
   sendAck(from: string, ref: string, ack: { status: 'accepted' | 'rejected' | 'done' | 'failed'; note?: string }): BridgeMessage {
     const original = this.historyRing.findLast(message => message.id === ref)
     if (!original) throw new Error(`cannot ack unknown message: ${ref}`)
-    return this.route(from, original.from, 'ack', JSON.stringify(ack), ref)
+    const message = this.route(from, original.from, 'ack', JSON.stringify(ack), ref)
+    this.applyAckToLedger(message, from, ref, ack)
+    return message
+  }
+
+  /** Create or refresh the ledger row for a newly sent task. */
+  private recordTask(message: BridgeMessage, task: TaskContent): void {
+    const now = message.ts
+    this.taskLedger.set(message.id, {
+      id: message.id,
+      from: message.from,
+      to: message.to,
+      prompt: task.prompt,
+      ...(task.context !== undefined ? { context: task.context } : {}),
+      ...(task.deliverable !== undefined ? { deliverable: task.deliverable } : {}),
+      status: 'pending',
+      acks: [],
+      createdAt: now,
+      updatedAt: now,
+    })
+    this.evictOverflowTasks()
+  }
+
+  /** Fold an ack into the task's timeline and status. Unknown refs are a
+   * no-op (chat/notice can be acked for routing without a ledger row). */
+  private applyAckToLedger(
+    message: BridgeMessage,
+    from: string,
+    ref: string,
+    ack: { status: AckContent['status']; note?: string },
+  ): void {
+    const record = this.taskLedger.get(ref)
+    if (record === undefined) return
+    record.acks.push({
+      from,
+      status: ack.status,
+      ...(ack.note !== undefined ? { note: ack.note } : {}),
+      ts: message.ts,
+      messageId: message.id,
+    })
+    record.status = ack.status as TaskStatus
+    record.updatedAt = message.ts
+  }
+
+  /** Keep the ledger bounded: drop oldest terminal tasks first. */
+  private evictOverflowTasks(): void {
+    if (this.taskLedger.size <= MAX_TASKS) return
+    const evictable = [...this.taskLedger.values()]
+      .filter(t => TERMINAL_TASK_STATUSES.includes(t.status))
+      .sort((a, b) => a.updatedAt - b.updatedAt)
+    let overflow = this.taskLedger.size - MAX_TASKS
+    for (const record of evictable) {
+      if (overflow <= 0) break
+      this.taskLedger.delete(record.id)
+      overflow--
+    }
+  }
+
+  /** One task by message id (the ack `ref`). */
+  taskOf(ref: string): TaskRecord | undefined {
+    const record = this.taskLedger.get(ref)
+    return record === undefined ? undefined : { ...record, acks: record.acks.map(a => ({ ...a })) }
+  }
+
+  /**
+   * Tasks involving `peer`. `role`:
+   * - `sent` — tasks this peer delegated (`from`)
+   * - `received` — tasks addressed to this peer (or broadcast)
+   * - `all` (default) — either side
+   * Optional `status` filter matches the ledger's current status.
+   */
+  listTasks(peerId: string, options?: { role?: 'sent' | 'received' | 'all'; status?: TaskStatus; limit?: number }): TaskRecord[] {
+    const role = options?.role ?? 'all'
+    const limit = Math.max(1, options?.limit ?? 50)
+    const out: TaskRecord[] = []
+    for (const record of this.taskLedger.values()) {
+      const isSent = record.from === peerId
+      const isReceived = record.to === peerId || record.to === BROADCAST
+      if (role === 'sent' && !isSent) continue
+      if (role === 'received' && !isReceived) continue
+      if (role === 'all' && !isSent && !isReceived) continue
+      if (options?.status !== undefined && record.status !== options.status) continue
+      out.push({ ...record, acks: record.acks.map(a => ({ ...a })) })
+    }
+    out.sort((a, b) => b.updatedAt - a.updatedAt)
+    return out.slice(0, limit)
   }
 
   /** Recent messages involving `peer` (inbound and outbound, plus group
@@ -574,17 +683,23 @@ export class AgentHub {
    * Long-poll for the next message addressed to `peer`: resolves immediately
    * when a matching one is queued, otherwise waits up to `timeoutMs` (capped
    * by `waitTimeoutMs`) or until `signal` aborts. `from` narrows to one sender.
+   * `ref` narrows to the ack of a specific task message id.
    *
    * Takes ONLY the first matching queued message. Calling poll() here would
    * drain the whole mailbox and discard every message after the first —
    * a multi-message burst (or a reconnect with a full queue) would silently
    * lose messages that never reach wait/poll again.
    */
-  wait(peerId: string, timeoutMs: number, from?: string, signal?: AbortSignal): Promise<WaitResult> {
+  wait(peerId: string, timeoutMs: number, from?: string, signal?: AbortSignal, ref?: string): Promise<WaitResult> {
     const startedAt = Date.now()
+    const matches = (message: BridgeMessage): boolean => {
+      if (from !== undefined && message.from !== from) return false
+      if (ref !== undefined && !(message.kind === 'ack' && message.ref === ref)) return false
+      return true
+    }
     const queue = this.queues.get(peerId)
     if (queue !== undefined && queue.length > 0) {
-      const index = from === undefined ? 0 : queue.findIndex(message => message.from === from)
+      const index = queue.findIndex(matches)
       if (index >= 0) {
         const [queued] = queue.splice(index, 1)
         this.options.onMailboxesChanged?.()
@@ -619,7 +734,13 @@ export class AgentHub {
       }
       signal?.addEventListener('abort', onAbort, { once: true })
       const list = this.waiters.get(peerId) ?? []
-      list.push({ resolve: settle, timer, onAbort, ...(from !== undefined ? { from } : {}) })
+      list.push({
+        resolve: settle,
+        timer,
+        onAbort,
+        ...(from !== undefined ? { from } : {}),
+        ...(ref !== undefined ? { ref } : {}),
+      })
       this.waiters.set(peerId, list)
     })
   }
@@ -651,7 +772,11 @@ export class AgentHub {
   /** Queue or hand off a message; wake the first matching waiter for its target. */
   private deliver(target: string, message: BridgeMessage): void {
     const list = this.waiters.get(target) ?? []
-    const index = list.findIndex(waiter => waiter.from === undefined || waiter.from === message.from)
+    const index = list.findIndex(waiter => {
+      if (waiter.from !== undefined && waiter.from !== message.from) return false
+      if (waiter.ref !== undefined && !(message.kind === 'ack' && message.ref === waiter.ref)) return false
+      return true
+    })
     if (index >= 0) {
       const [waiter] = list.splice(index, 1)
       this.waiters.set(target, list)

@@ -30,8 +30,11 @@ Optional: call `bridge_register(peerId)` to claim a readable id
 - `bridge_ack(ref, status, note?)` — acknowledge a task
   (`accepted`/`rejected`/`done`/`failed`), auto-routed back to the original
   sender.
-- `bridge_wait(from?, timeoutMs?)` — long-poll for the next message (default
-  30 s; loop it to hold a real-time conversation).
+- `bridge_task_status(ref)` — one task's ledger state + full ack timeline.
+- `bridge_tasks(role?, status?, limit?)` — list tasks you sent or received.
+- `bridge_wait(from?, ref?, timeoutMs?)` — long-poll for the next message
+  (default 30 s; `ref` waits specifically for that task's ack; loop it to
+  hold a real-time conversation).
 - `bridge_poll(from?)` — non-blocking drain of every queued message.
 - `bridge_status()` / `bridge_peers()` — hub health and who is online.
 - `bridge_history(peer?, limit?)` — recent messages (newest first). `peer`

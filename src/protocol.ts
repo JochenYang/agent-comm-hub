@@ -51,6 +51,37 @@ export interface AckContent {
   note?: string
 }
 
+/** Lifecycle of a delegated task, as tracked by the hub ledger. */
+export type TaskStatus = 'pending' | 'accepted' | 'rejected' | 'done' | 'failed'
+
+/** Terminal statuses: further acks are still recorded but do not reopen. */
+export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] = ['rejected', 'done', 'failed']
+
+/** One ack event on a task (timeline entry). */
+export interface TaskAckEvent {
+  from: string
+  status: AckContent['status']
+  note?: string
+  ts: number
+  /** The ack message id (for bridge_history correlation). */
+  messageId: string
+}
+
+/** Hub-side record of a delegated `task` message and its acks. */
+export interface TaskRecord {
+  /** Same as the task message id (the `ref` of every ack). */
+  id: string
+  from: string
+  to: string
+  prompt: string
+  context?: string
+  deliverable?: string
+  status: TaskStatus
+  acks: TaskAckEvent[]
+  createdAt: number
+  updatedAt: number
+}
+
 /** Encode a structured payload for `content`. */
 export function encodeContent(payload: TaskContent | AckContent): string {
   return JSON.stringify(payload)

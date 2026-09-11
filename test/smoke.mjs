@@ -179,6 +179,57 @@ try {
   const ack = await claude.call('bridge_wait', { timeoutMs: 3000 })
   check('ack routed back to original sender', ack.type === 'message' && ack.message.kind === 'ack' && ack.message.to === 'claude' && ack.message.ref === task.message.id && ack.message.content.status === 'accepted', JSON.stringify(ack))
 
+  // Task ledger: status is queryable without scanning history.
+  const statusAfterAccept = await claude.call('bridge_task_status', { ref: task.message.id })
+  check(
+    'task ledger shows accepted after ack',
+    statusAfterAccept.task?.id === task.message.id
+      && statusAfterAccept.task?.status === 'accepted'
+      && statusAfterAccept.task?.acks?.length === 1
+      && statusAfterAccept.task?.acks[0]?.from === 'mavis'
+      && statusAfterAccept.task?.acks[0]?.note === 'on it',
+    JSON.stringify(statusAfterAccept),
+  )
+  const assigneeView = await mavis.call('bridge_task_status', { ref: task.message.id })
+  check('assignee can read its own received task status', assigneeView.task?.status === 'accepted', JSON.stringify(assigneeView))
+  await mavis.call('bridge_ack', { ref: task.message.id, status: 'done', note: 'summary ready' })
+  const statusAfterDone = await claude.call('bridge_task_status', { ref: task.message.id })
+  check(
+    'task ledger reaches done and keeps the ack timeline',
+    statusAfterDone.task?.status === 'done' && statusAfterDone.task?.acks?.length === 2,
+    JSON.stringify(statusAfterDone),
+  )
+  const sentList = await claude.call('bridge_tasks', { role: 'sent' })
+  check(
+    'bridge_tasks role=sent lists the delegated task as done',
+    sentList.tasks?.some(x => x.id === task.message.id && x.status === 'done'),
+    JSON.stringify(sentList),
+  )
+  const recvList = await mavis.call('bridge_tasks', { role: 'received', status: 'done' })
+  check(
+    'bridge_tasks role=received+status filters the ledger',
+    recvList.tasks?.length === 1 && recvList.tasks[0].id === task.message.id,
+    JSON.stringify(recvList),
+  )
+  // wait({ref}) delivers only the matching ack, even if another chat is queued first.
+  await claude.call('bridge_task', { to: 'mavis', prompt: 'second task for ref-wait' })
+  const task2 = await mavis.call('bridge_wait', { timeoutMs: 3000 })
+  await claude.call('bridge_chat', { to: 'mavis', message: 'noise before ack' })
+  const waitAckPromise = claude.call('bridge_wait', { ref: task2.message.id, timeoutMs: 3000 })
+  await mavis.call('bridge_poll') // drain noise so mavis can see task2
+  await mavis.call('bridge_ack', { ref: task2.message.id, status: 'accepted' })
+  const waitedAck = await waitAckPromise
+  check(
+    'wait({ref}) returns only the matching task ack',
+    waitedAck.type === 'message' && waitedAck.message.kind === 'ack' && waitedAck.message.ref === task2.message.id,
+    JSON.stringify(waitedAck),
+  )
+  // Drain leftovers (task2's later acks / noise) so the broadcast section
+  // starts from a clean mailbox.
+  await claude.call('bridge_poll')
+  await mavis.call('bridge_poll')
+  await opencode.call('bridge_poll')
+
   console.log('== broadcast ==')
   await opencode.call('bridge_chat', { to: 'all', message: 'attention everyone' })
   const mavisBroadcast = await mavis.call('bridge_wait', { timeoutMs: 3000 })
