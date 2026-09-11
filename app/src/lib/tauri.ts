@@ -72,6 +72,8 @@ export interface PresentedMessage {
   kind: 'chat' | 'task' | 'ack' | 'notice'
   content: string | TaskContent | AckContent
   ref?: string
+  /** Group channel id (present on group-routed messages; hub >= 0.6). */
+  channel?: string
   ts: number
 }
 
@@ -188,6 +190,8 @@ export interface HubConfigValues {
   peer_idle_timeout_ms: number
   herdr_bin: string
   herdr_timeout_ms: number
+  /** Remote-mode bearer token (connection-level; empty = local loopback hub). */
+  auth_token: string
 }
 
 export const tauri = {

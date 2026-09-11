@@ -420,7 +420,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (240 checks: 135 smoke + 36 setup + 11 ops + 35 herdr + 23 discover)
+pnpm test             # test suite (263 checks: 138 smoke + 36 setup + 11 ops + 35 herdr + 23 discover + 20 e2e)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
 ```

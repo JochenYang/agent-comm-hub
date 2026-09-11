@@ -33,7 +33,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.7.1'
+export const SERVER_VERSION = '0.7.2'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -95,6 +95,10 @@ export interface HubConfig {
    * never merge with, or read, another peer. Enable for LAN/VPN onboarding;
    * keep OFF on the public internet. */
   allowJoin?: boolean
+  /** SSE heartbeat cadence in ms (default 20000; see mcp-server.ts). Keeps
+   * proxies from reaping idle streams and lets clients detect half-open
+   * connections. Not a CLI flag — tests inject small values. */
+  heartbeatMs?: number
 }
 
 export const DEFAULT_CONFIG: HubConfig = {
@@ -431,6 +435,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     },
     auth,
     authTokensAdmin(resolved.authTokens, authReload),
+    resolved.heartbeatMs,
   )
   const server = createServer()
   mcp.attach(server, resolved.path)

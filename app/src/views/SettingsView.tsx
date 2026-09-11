@@ -9,6 +9,7 @@ const LABEL_KEY: Record<string, string> = {
   host: 'hub_host',
   port: 'hub_port',
   path: 'hub_path',
+  auth_token: 'auth_token',
   max_queue: 'max_queue',
   history_limit: 'history_limit',
   wait_timeout_ms: 'wait_timeout_ms',
@@ -21,11 +22,12 @@ const LABEL_KEY: Record<string, string> = {
 
 const FIELDS: Array<{
   key: keyof HubConfigValues
-  type: 'text' | 'number'
+  type: 'text' | 'number' | 'password'
 }> = [
   { key: 'host', type: 'text' },
   { key: 'port', type: 'number' },
   { key: 'path', type: 'text' },
+  { key: 'auth_token', type: 'password' },
   { key: 'max_queue', type: 'number' },
   { key: 'history_limit', type: 'number' },
   { key: 'wait_timeout_ms', type: 'number' },
@@ -68,8 +70,9 @@ export function SettingsView(): React.JSX.Element {
           host: String(raw.host ?? '127.0.0.1'),
           port: Number(raw.port ?? 18764),
           path: String(raw.path ?? '/mcp'),
+          auth_token: String(raw.auth_token ?? ''),
           max_queue: Number(raw.max_queue ?? 200),
-          history_limit: Number(raw.history_limit ?? 100),
+          history_limit: Number(raw.history_limit ?? 1000),
           wait_timeout_ms: Number(raw.wait_timeout_ms ?? 60_000),
           default_wait_ms: Number(raw.default_wait_ms ?? 30_000),
           connected_window_ms: Number(raw.connected_window_ms ?? 30_000),

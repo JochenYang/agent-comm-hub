@@ -18,6 +18,10 @@ token / 桌面 GUI）统一改名区分、交接任务、全员广播。
 安全底线：**没有 token 表就不要开 `--host 0.0.0.0`**。hub 无 token 模式是
 "仅本机"信任模型，对局域网/公网等于不设防（任何人可连入、冒充 manager）。
 
+SSE 保活：hub ≥ 0.7.2 每 20s 向每条 SSE 长连发一帧心跳（JSON-RPC 心跳通知），
+反代的空闲读超时（如 nginx 默认 `proxy_read_timeout 60s`）不会再悄悄掐断推送
+通道；半开连接也会在下一次心跳写入失败时被清理，对应的 peer 才能被空闲 GC
+回收。若用 nginx 反代（非 Caddy），确认没有短于 20s 的空闲读超时即可。
 ## 1. 签发 token（`agent-comm-hub auth`）
 
 一条命令生成随机 token、写入表并**打印一次**（表文件是明文凭证库，注意
@@ -42,6 +46,30 @@ agent-comm-hub auth gen                                           # 只生成一
 - `peer`：路由 id，**token 与 peer 一一绑定**——这就是"多人同叫 kimi-code
   也能区分"的机制：张三/李四的 token 分别映射到 `zhangsan` / `lisi`，同名
   client 各得各的信箱。
+
+### 多人使用同一个 agent（A + B + C 都是 kimi-code）
+
+**身份不看 client 名，只看 token。** 每个人签发一枚专属 token，peer 固定：
+
+| 人 | token → peer | 实际运行的 client | 信箱 |
+|---|---|---|---|
+| A 张三 | `tok_a` → `zhangsan` | kimi-code | 只收发给 `zhangsan` 的 |
+| B 李四 | `tok_b` → `lisi` | kimi-code（同名） | 只收发给 `lisi` 的 |
+| C 王五 | `tok_c` → `wangwu` | kimi-code（同名） | 只收发给 `wangwu` 的 |
+
+因此：
+- `bridge_chat(to:"lisi", …)` **只有李四收到**；张三/王五的 poll/wait 看不到。
+- 全员通知用 `to:"all"`（发送者自己不收）。
+- 部分人小圈子用 `bridge_group_*`（例如 `#frontend = zhangsan + lisi`）。
+- 同一人开多个不同 agent：peer 用 `人.agent`（`zhangsan.kimi` / `zhangsan.opencode`），一人多枚 token。
+
+管理台「身份与接入」面板：填归属人 + peer → 签发 → **一键复制该成员的 MCP 配置**
+（含 Authorization header），直接发给对方粘贴进 agent 配置即可。CLI 等价：
+
+```bash
+agent-comm-hub auth add zhangsan --owner 张三
+# 把打印的 token 填进对方 agent 的 MCP headers
+```
 - `role`：`agent`（普通成员）或 `manager`（可改名/踢人/读全量历史；管理台
   或管理员本人用）。
 - `owner`：可选展示标签（花名册/日志里标注"这是谁的 agent"）。
@@ -60,9 +88,13 @@ agent-comm-hub --host 127.0.0.1 --auth-tokens /etc/agent-comm-hub/tokens.json
 agent-comm-hub --host 0.0.0.0 --auth-tokens ./tokens.json
 ```
 
-建议配 systemd 常驻（`agent-comm-hub service install` 亦可作为起点，改 host
-与追加 flags）。
+常驻与运维资产（同目录）：
 
+- `agent-comm-hub.service` —— systemd unit 示例（配合无鉴权的 `GET /healthz` 做存活探测）
+- `nginx.conf.example` —— nginx 反代片段（SSE 关缓冲 + 读超时 > 心跳间隔 20s）
+- `Dockerfile` / `docker-compose.yml` —— 一体化容器（内置 healthcheck，状态落 `/data` 卷）
+
+`agent-comm-hub service install` 亦可作为本机自启起点（远程服务器建议直接用上面的 unit 改 host 与追加 flags）。
 ## 3. agent 侧接入
 
 MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorization` header。
@@ -87,12 +119,20 @@ MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorizat
 ## 4. 管理台
 
 网页版管理台已内置：`/admin`（与 MCP 同一端口，需带 manager token 访问，本机可
-免 token）。面板提供成员与令牌管理（签发/吊销/查看，与 CLI `auth` 等价）、
-花名册（每成员 client 名/版本/来源 IP，可改名/踢人/认领 `join-*` 匿名身份）、
-群组面板与事件日志。此外仍支持：
+免 token）。面板按运行形态自动标注 **本机 / 远程鉴权 / 只读**，并提供：
 
-- **桌面 GUI**：以 `agent-hub-cli` 连入（本机 hub 场景）；远程场景下让它指向
-  服务器地址并携带 manager token 即可（连接设置里可配 header——1.1.x 起）。
+- **身份与接入**：一人一 token = 一个 peer 的映射图；签发后即时生成可复制的
+  MCP 配置片段（HTTP + opencode 两种形态 + curl 探测），用于分发给团队成员。
+- **成员与令牌**：签发/吊销/明文切换（与 CLI `auth` 等价）。
+- **花名册**：client 名/版本/来源 IP、改名/踢人、认领 `join-*` 匿名身份；
+  页头展示队列上限 / 历史上限 / peer 数。
+- **群组**与**消息尾迹**。
+
+此外仍支持：
+
+- **桌面 GUI**：以 `agent-hub-cli` 连入。本机场景开箱即用；远程场景在设置面板把
+  Hub 监听地址/端口指向服务器，并在「访问 token（远程）」填入 manager token 即可
+  （保存并重启后生效，之后所有请求与 SSE 长连都携带 Bearer）。
 - **任意 MCP 客户端**：用 manager token 连入后即拥有 `bridge_rename` /
   `bridge_unregister { peer }` / `bridge_history { peer: "all" }` 全量管理能力。
 

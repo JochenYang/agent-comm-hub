@@ -138,7 +138,11 @@ impl Default for HubConfig {
             port: 18764,
             path: "/mcp".into(),
             max_queue: 200,
-            history_limit: 100,
+            // Match the hub's own default (main repo src/index.ts DEFAULT_CONFIG = 1000): this
+            // value is always passed explicitly via to_argv, so a smaller value here would
+            // silently shrink the hub's ring — and the ring is the 3s poll's fallback source
+            // (100 messages evict within seconds under dense agent chatter).
+            history_limit: 1000,
             wait_timeout_ms: 60_000,
             default_wait_ms: 30_000,
             connected_window_ms: 30_000,
@@ -694,7 +698,7 @@ mod tests {
         assert_eq!(cfg.port, 18764);
         assert_eq!(cfg.path, "/mcp");
         assert_eq!(cfg.max_queue, 200);
-        assert_eq!(cfg.history_limit, 100);
+        assert_eq!(cfg.history_limit, 1000);
         assert_eq!(cfg.wait_timeout_ms, 60_000);
         assert_eq!(cfg.default_wait_ms, 30_000);
         assert_eq!(cfg.connected_window_ms, 30_000);

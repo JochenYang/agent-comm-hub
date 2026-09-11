@@ -1,0 +1,15 @@
+# agent-comm-hub — docker compose 示例
+# 用法：
+#   1. 在宿主机准备令牌表：mkdir -p ./data && agent-comm-hub auth add alice --file ./data/tokens.json
+#   2. docker compose up -d
+#   3. 前面套 Caddy/nginx 终结 TLS（见 Caddyfile.example / nginx.conf.example）
+services:
+  hub:
+    build: .
+    # 或者直接拉发布物：image: node:22-alpine + command 里 npx，见 Dockerfile 注释
+    restart: unless-stopped
+    ports:
+      # 只绑回环：对外暴露交给反代；内网直曝才改 0.0.0.0
+      - "127.0.0.1:18764:18764"
+    volumes:
+      - ./data:/data

@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { create } from 'zustand'
 import {
   tauri,
@@ -18,6 +19,11 @@ import { SELF_PEER_ID } from '@/lib/self'
  */
 
 interface MessagesState {
+  /** Full recent-message pool: every source (bridge_wait loop, SSE push,
+   * 3s poll, local archives) appends here with NO view filtering — views
+   * filter at render time via useVisibleMessages. Deduped by id, capped at
+   * POOL_CAP. (Filtering at push time was the "switch conversations and the
+   * message + unread badge are gone" bug.) */
   messages: PresentedMessage[]
   loading: boolean
   error: string | null
@@ -49,7 +55,7 @@ interface MessagesState {
   unreadMap: Readonly<Record<string, number>>
   /** The ts at which the user last "saw" a peer's messages (peerId → ts). */
   lastReadTs: Record<string, number>
-  /** Internal bridge: the module-level wait loop / SSE listener appends messages through this (dedup + conversation filter). */
+  /** Internal bridge: the module-level wait loop / SSE listener appends messages through this (dedup + pool cap). */
   pushMessageSafe: (msg: PresentedMessage) => void
   /** Pulls local archive history from SQLite and merges it in (startup restore / shared by the `/history` command). */
   restoreLocal: (limit?: number, peer?: string) => Promise<void>
@@ -58,10 +64,23 @@ interface MessagesState {
 const POLL_INTERVAL_MS = 3_000
 const HISTORY_LIMIT = 100
 
-/** Whether a message belongs to the current view. The pull is already the full ring tail (peer="all", see refresh); filtering
- * all happens client-side: relayAll = relay-flow view, no message is filtered; otherwise the default filters:
- * no conversation = only messages involving self + broadcasts (mirroring the hub's history filtering semantics); a conversation =
- * that peer's send/receive + broadcasts. */
+/** Pool size cap. Matches the hub's history-ring default so the 3s poll can
+ * always re-supply anything evicted. */
+const POOL_CAP = 1000
+
+/** Bound the pool, keeping the most recent messages by ts. Merge paths
+ * append older history at the END of the array, so eviction must sort by ts
+ * first — plain slicing would drop recent live messages instead. */
+function capPool(messages: PresentedMessage[]): PresentedMessage[] {
+  if (messages.length <= POOL_CAP) return messages
+  return [...messages].sort((a, b) => a.ts - b.ts).slice(messages.length - POOL_CAP)
+}
+
+/** Whether a message belongs to the current view — applied at RENDER time via
+ * useVisibleMessages; the pool itself is never filtered. relayAll = relay-flow view, no
+ * message is filtered; otherwise the default filters: no conversation = only messages
+ * involving self + broadcasts (mirroring the hub's history filtering semantics); a
+ * conversation = that peer's send/receive + broadcasts. */
 function belongsToView(relayAll: boolean, activePeer: string | null, msg: { from: string; to: string }): boolean {
   if (relayAll) return true
   if (activePeer === null) {
@@ -71,17 +90,17 @@ function belongsToView(relayAll: boolean, activePeer: string | null, msg: { from
 }
 
 export const useMessagesStore = create<MessagesState>()((set, get) => {
-  /** Append a message (dedup + conversation filter). */
+  /** Append a message (dedup by id, no view filter — see the messages field doc). */
   const pushMessage = (msg: PresentedMessage): void => {
     set((s) => {
       if (s.messages.some((m) => m.id === msg.id)) return s
-      if (!belongsToView(get().relayAll, s.activePeer, msg)) return s
-      return { messages: [...s.messages, msg] }
+      return { messages: capPool([...s.messages, msg]) }
     })
   }
 
-  /** Optimistic append: the hub's history ring only records on waiter hits, so a freshly sent message isn't in
-   *  history yet — use the receipt to append locally right away (later refresh dedups the merge). */
+
+  /** Optimistic append: render a freshly sent message right away from the receipt
+   *  (the SSE relay / next poll would deliver it a beat later; merges dedup by id). */
   const appendLocal = (receipt: ChatReceipt | null | undefined, content: unknown): void => {
     if (receipt === null || receipt === undefined || receipt.ok !== true || receipt.id === '') return
     pushMessage({
@@ -118,14 +137,8 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
         if (records.length === 0) return
         const restored = records.map(recordToMessage)
         set((s) => {
-          // Also filter by the current view: the full archive pulled by the relay view (incl. others' private chats) must not
-          // remain in the normal message stream; belongsToView recomputes when switching back to the conversation view.
-          const inView = (m: PresentedMessage): boolean => belongsToView(get().relayAll, s.activePeer, m)
-          const merged = [
-            ...restored.filter(inView),
-            ...s.messages.filter((m) => !restored.some((r) => r.id === m.id) && inView(m))
-          ]
-          return { messages: merged }
+          const notInPool = restored.filter((r) => !s.messages.some((m) => m.id === r.id))
+          return { messages: capPool([...s.messages, ...notInPool]) }
         })
       } catch {
         // Hub not running / no history: keep the current state
@@ -136,17 +149,15 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
       set({ loading: true, error: null })
       try {
         // Pull peer="all" (the unfiltered ring tail) rather than only the current conversation: a single poll serves
-        // two purposes at once — the view (filtered by conversation below) + SQLite archiving (the Rust side writes
-        // each returned message to disk as a side effect, so peer-to-peer traffic becomes recoverable). Previously only
+        // two purposes at once — the pool every view filters from + SQLite archiving (the Rust side writes
         // its own stream was pulled, so other agents' inter-chats never made it into SQLite. Ring cap is 1000, pulling
         // 200 per call, which covers the delta between polls at a normal conversation density.
         const result = await tauri.invoke.bridgeHistory('all', 200)
         const base = Array.isArray(result?.messages) ? result.messages : []
         // Merge rather than replace: optimistically appended local messages aren't in history, so a full replace would wipe out what was just sent.
         set((s) => {
-          const inView = (m: PresentedMessage): boolean => belongsToView(get().relayAll, s.activePeer, m)
-          const extra = s.messages.filter((m) => !base.some((b) => b.id === m.id) && inView(m))
-          return { messages: [...extra, ...base.filter(inView)] }
+          const notInPool = base.filter((b) => !s.messages.some((m) => m.id === b.id))
+          return { messages: capPool([...s.messages, ...notInPool]) }
         })
       } catch (e) {
         set({ error: serializeError(e) })
@@ -211,7 +222,9 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
       const { messages, lastReadTs } = get()
       let n = 0
       for (const m of messages) {
-        if (m.from === peerId && m.ts > (lastReadTs[peerId] ?? 0)) n++
+        if (m.from !== peerId) continue
+        if (m.to !== SELF_PEER_ID && m.to !== 'all' && m.channel === undefined) continue
+        if (m.ts > (lastReadTs[peerId] ?? 0)) n++
       }
       return n
     },
@@ -222,15 +235,15 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
 
 // ---- Derived unreadMap: recomputed when messages/unread changes ----
 useMessagesStore.subscribe((s) => {
+  // Count only messages ADDRESSED to me (direct / broadcast / a group channel I'm in):
+  // the pool holds all relay traffic now, so counting by sender alone would badge me
+  // for other people's conversations — and the relay view no longer needs a skip case.
   const out: Record<string, number> = {}
-  // In the relay-flow view every peer's messages enter the pool — those aren't "unread sent to me"; counting them as usual
-  // would pollute the dimension into a full screen of badges; no unread is derived in this view.
-  if (!s.relayAll) {
-    for (const m of s.messages) {
-      const peer = m.from
-      if (peer === SELF_PEER_ID) continue
-      if (m.ts > (s.lastReadTs[peer] ?? 0)) out[peer] = (out[peer] ?? 0) + 1
-    }
+  for (const m of s.messages) {
+    const peer = m.from
+    if (peer === SELF_PEER_ID) continue
+    if (m.to !== SELF_PEER_ID && m.to !== 'all' && m.channel === undefined) continue
+    if (m.ts > (s.lastReadTs[peer] ?? 0)) out[peer] = (out[peer] ?? 0) + 1
   }
   // Only set when the value changes, to avoid an infinite loop (unreadMap isn't persisted in state, just a derived snapshot)
   const prev = useMessagesStore.getState().unreadMap
@@ -287,8 +300,9 @@ window.setInterval(() => {
   void useMessagesStore.getState().refresh()
 }, POLL_INTERVAL_MS)
 
-// Continuous bridge_wait long-polling: the hub doesn't push SSE messages and history is only recorded on waiter/poll hits —
-// without waiting, other peers' replies are never received. 25s budget; renew on hit or timeout.
+// Continuous bridge_wait long-polling: drains THIS peer's mailbox in real time (direct
+// messages + group mail land here even without SSE) and keeps the peer "connected" in the
+// hub's activity window. 25s budget; renew on hit or timeout.
 void (async function waitLoop(): Promise<void> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -304,7 +318,22 @@ void (async function waitLoop(): Promise<void> {
   }
 })()
 
-// SSE incremental-push listener (takes effect when the hub supports notifications/message; currently idle)
+// SSE push listener — the PRIMARY real-time channel: hub >= 0.6 relays every routed message
+// to manager sessions (this GUI is one) as it is sent; hub >= 0.7.2 adds heartbeats and the
+// Rust side keeps the stream alive via a reconnect watchdog. The 3s poll is the fallback.
 void tauri.event.onHubMessage((msg) => {
   useMessagesStore.getState().pushMessageSafe(msg)
 })
+
+/** View filter applied at RENDER time: relayAll shows everything; no conversation selected
+ * shows messages involving self + broadcasts; a conversation shows that peer's traffic +
+ * broadcasts. The pool itself keeps everything (push paths never drop by view). */
+export function useVisibleMessages(): PresentedMessage[] {
+  const messages = useMessagesStore((s) => s.messages)
+  const activePeer = useMessagesStore((s) => s.activePeer)
+  const relayAll = useMessagesStore((s) => s.relayAll)
+  return useMemo(
+    () => messages.filter((m) => belongsToView(relayAll, activePeer, m)),
+    [messages, activePeer, relayAll]
+  )
+}

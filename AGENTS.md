@@ -113,9 +113,10 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 ```bash
 pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
-pnpm test             # build:test (esbuild test entries) + node test/smoke.mjs
+pnpm test             # build + build:test (esbuild), then node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs → 240 checks (135+36+11+35+23)
+                      #   + test/discover.mjs + test/e2e.mjs → 263 checks
+                      #   (138+36+11+35+23+20)
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -126,12 +127,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 124/124 + 36/36 +
-  11/11 + 35/35 + 23/23 on Node 24 / Windows).
+  merging, the full `pnpm test` must stay green (verified: 138/138 + 36/36 +
+  11/11 + 35/35 + 23/23 + 20/20 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (124 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (138 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, broadcast (no echo to sender), status/peers/history incl. the
@@ -164,6 +165,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   rejected), `~`/wildcard expansion, PATH probing (win32 PATHEXT vs POSIX
   semantics), config-path discovery, npm-global discovery incl. scoped dirs,
   os filtering, source priority.
+- `test/e2e.mjs` (20 checks): end-to-end against the REAL built CLI
+  (`lib/cli.js`) spawned as a subprocess — /healthz, MCP sessions, SSE push
+  timeliness (message reaches passive listeners before any poll), heartbeat
+  via `--heartbeat-ms`, task/ack, broadcast, groups, SQLite persistence
+  across a real process restart, and remote-auth mode (401s, token identity,
+  manager gating). Hand-written and committed like the other suites.
 - Only the `test/*-entry.mjs` files are **esbuild outputs** of the `.ts`
   entries (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`,
   `discover-entry.ts`) and are gitignored — edit the `.ts` files, not the

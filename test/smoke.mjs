@@ -405,6 +405,35 @@ try {
     hubEvt.close()
   }
 
+  console.log('== healthz ==')
+  const hz = await fetch(`http://127.0.0.1:${PORT}/healthz`)
+  const hzJson = await hz.json()
+  check('GET /healthz answers ok without a session or token', hz.status === 200 && hzJson.ok === true, `${hz.status} ${JSON.stringify(hzJson)}`)
+
+  console.log('== SSE heartbeat ==')
+  // The heartbeat keeps proxies from reaping idle streams and gives clients
+  // a liveness signal; tests shrink the cadence to 50ms.
+  const hubHb = startHub({ port: 19011, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 10, heartbeatMs: 50 }, { info: () => {}, warn: () => {} })
+  try {
+    const hbBase = 'http://127.0.0.1:19011/mcp'
+    const hbClient = makeClient('hb', hbBase)
+    await hbClient.init()
+    const hbRes = await fetch(hbBase, { headers: { Accept: 'text/event-stream', 'Mcp-Session-Id': hbClient.sessionId() } })
+    const hbReader = hbRes.body.getReader()
+    const hbDecoder = new TextDecoder()
+    let hbBuffer = ''
+    const hbDeadline = Date.now() + 2000
+    while (!hbBuffer.includes('"event":"heartbeat"') && Date.now() < hbDeadline) {
+      const chunk = await hbReader.read()
+      if (chunk.done) break
+      hbBuffer += hbDecoder.decode(chunk.value, { stream: true })
+    }
+    check('SSE stream receives periodic heartbeat notifications', hbBuffer.includes('"event":"heartbeat"'), hbBuffer.slice(-200))
+    await hbReader.cancel()
+  } finally {
+    hubHb.close()
+  }
+
   console.log('== true rename (re-key) and history gate ==')
   const hubKey = startHub({ port: 19003, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 30, connectedWindowMs: 60_000 }, { info: () => {}, warn: () => {} })
   try {
@@ -515,6 +544,9 @@ try {
     check('request with unknown token rejected 401', badAuth.status === 401, String(badAuth.status))
     const sseNoAuth = await fetch(authBase, { headers: { Accept: 'text/event-stream' } })
     check('SSE without token rejected 401', sseNoAuth.status === 401, String(sseNoAuth.status))
+    // /healthz is the one unauthenticated route: monitors must not need a token.
+    const hzAuth = await fetch('http://127.0.0.1:19006/healthz')
+    check('healthz stays open in remote-auth mode', hzAuth.status === 200, String(hzAuth.status))
 
     const zs = makeClient('kimi-code', authBase, 'zs-token-0123456789abcdef')
     const ls = makeClient('kimi-code', authBase, 'ls-token-0123456789abcdef')

@@ -68,7 +68,10 @@ enum ConnState {
 pub struct McpClient {
     base_url: String,
     mcp_path: String,
-    /// Request-response calls (initialize / tools/call): a 30s total timeout guard rails against hanging.
+    /// Request-response calls (initialize / tools/call): a 45s total timeout. Sized for the
+    /// bridge_wait long-poll: the frontend uses a 25s budget and the hub's default server-side
+    /// budget is 30s, so a 30s cap raced the wait itself — a full-budget wait arrived as an HTTP
+    /// timeout instead of a clean `{type:'timeout'}`, tearing the client down via lazy reconnect.
     http: reqwest::Client,
     /// Dedicated client for the SSE long-lived connection. reqwest's total-timeout semantics are
     /// "from connection start until the response body is fully read" — an SSE body never finishes,
@@ -82,12 +85,18 @@ pub struct McpClient {
     next_id: Arc<RwLock<u64>>,
     state: Arc<RwLock<ConnState>>,
     client_info: ClientInfo,
+    /// Remote-mode bearer token (a hub started with `--auth-tokens`). Sent as
+    /// `Authorization: Bearer <token>` on every POST and on the SSE GET; a
+    /// loopback hub without auth ignores it. Sourced from the `auth_token`
+    /// config key (settings panel), NOT from HubConfig — it is a property of
+    /// the connection, not of the spawned process.
+    auth_token: Option<String>,
 }
 
 impl McpClient {
-    pub fn new(host: &str, port: u16, path: &str, client_info: ClientInfo) -> Self {
+    pub fn new(host: &str, port: u16, path: &str, client_info: ClientInfo, auth_token: Option<String>) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(45))
             .build()
             .expect("reqwest client build");
         // SSE client: don't set .timeout (a total timeout would cut the long-lived connection); only cap connect duration.
@@ -104,6 +113,7 @@ impl McpClient {
             next_id: Arc::new(RwLock::new(1)),
             state: Arc::new(RwLock::new(ConnState::Disconnected)),
             client_info,
+            auth_token,
         }
     }
 
@@ -179,6 +189,9 @@ impl McpClient {
         if let Some(sid) = self.session_id.read().await.as_ref() {
             req = req.header("Mcp-Session-Id", sid.clone());
         }
+        if let Some(token) = &self.auth_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
         let resp = req.send().await?;
         let status = resp.status();
         // Extract the session id (returned by the server after initialize)
@@ -207,15 +220,19 @@ impl McpClient {
     /// SSE long-lived connection: GET /mcp receives `notifications/*` pushes, returning an mpsc::Receiver.
 /// The caller owns consumption; the receiving end closes naturally on disconnect.
 ///
-/// Must go through `sse_http` (no total timeout) rather than `http`: `http`'s 30s `.timeout()`
-/// covers "connect + read the entire response body", an SSE stream never finishes, and after
-/// ~30s reqwest would cut this stream on the client side — which looks like hub:peers /
+///
+/// Must go through `sse_http` (no total timeout) rather than `http`: `http`'s `.timeout()`
+/// covers "connect + read the entire response body", an SSE stream never finishes, and on
+/// expiry reqwest would cut this stream on the client side — which looks like hub:peers /
 /// hub:message pushes silently stopping, with no error logged (P1 fix).
     pub async fn subscribe_notifications(&self) -> Result<mpsc::Receiver<Value>> {
         let url = self.endpoint_url();
         let mut req = self.sse_http.get(&url).header("Accept", "text/event-stream");
         if let Some(sid) = self.session_id.read().await.as_ref() {
             req = req.header("Mcp-Session-Id", sid.clone());
+        }
+        if let Some(token) = &self.auth_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
         }
         let resp = req.send().await?;
         let status = resp.status();
@@ -281,13 +298,13 @@ mod tests {
 
     #[test]
     fn endpoint_url_format() {
-        let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("x", "0"));
+        let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("x", "0"), None);
         assert_eq!(c.endpoint_url(), "http://127.0.0.1:18764/mcp");
     }
 
     #[test]
     fn not_connected_before_initialize() {
-        let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("x", "0"));
+        let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("x", "0"), None);
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             assert!(!c.is_connected().await);
@@ -301,7 +318,7 @@ mod tests {
     fn session_id_parsing_handles_empty() {
         // Directly confirm the header-name lookup is case-insensitive (reqwest normalize).
         // The real parsing lives in call(); here we only guarantee the ClientInfo / endpoint_url logic is sound.
-        let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("a", "1"));
+        let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("a", "1"), None);
         assert_eq!(c.endpoint_url(), "http://127.0.0.1:18764/mcp");
     }
 }

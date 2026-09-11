@@ -274,6 +274,17 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
         return; // already initialized
     }
     let cfg = state.hub.config();
+    // Remote-mode bearer token (hub started with --auth-tokens). This is a
+    // CONNECTION property, not a spawn argument, so it lives outside
+    // apply_saved_config and is read straight from the store here. Empty
+    // string = no token (local loopback hub).
+    let auth_token = state
+        .store
+        .get_config("auth_token")
+        .ok()
+        .flatten()
+        .map(|r| r.value)
+        .filter(|v| !v.is_empty());
     // clientInfo.name is directly the target peer id: the hub attaches same-name connections
     // N:1 (no duplicate registration, no "peer already registered"). Historically it used
     // "agent-comm-hub-cli" + an explicit bridge_register("agent-hub-cli") rename — a lazy
@@ -284,6 +295,7 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
         cfg.port,
         &cfg.path,
         ClientInfo::new(SELF_PEER_ID, env!("CARGO_PKG_VERSION")),
+        auth_token,
     ));
     // Port ready ≠ hub fully ready: initialize may race startup (especially with a cold npx
     // download / freshly freed port); retry 15 times × 1s (15s window) before giving up
@@ -315,69 +327,107 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
         log::warn!("bridge_register {SELF_PEER_ID} failed: {e}");
     }
 
-    // Open an SSE long-lived connection to stay alive — this is the correct MCP-idiomatic way
-    // for "the CLI keeps a persistent connection once started". A single GET /mcp
-    // (Accept: text/event-stream) calls markSseOpen(sessionId) on the hub end; as long as this
-    // SSE is not closed by the client, the hub's `livePeers` set always contains
-    // agent-hub-cli, so `bridge_peers` reports connected=true, on equal footing with the
-    // `bridge_wait` long-poll (except bridge_wait is POST + queue-wait).
-    //
-    // The hub pushes JSON-RPC notifications `{method:"notifications/message",
-    // params:{level,logger,data}}` over this SSE; data is branched by event (hub ≥ 0.6 protocol contract):
+    // Publish the client BEFORE spawning the SSE watchdog: every watchdog
+    // iteration checks that its client is still the active one (Arc::ptr_eq)
+    // and exits when a lazy reconnect replaced it — reconnects never stack up
+    // duplicate SSE streams.
+    *state.mcp.write().await = Some(client.clone());
+
+    // SSE long-lived connection + reconnect watchdog. The stream serves two
+    // purposes: staying "connected" on the hub (a live SSE channel counts, on
+    // equal footing with the bridge_wait long-poll) and receiving real-time
+    // pushes. The hub pushes JSON-RPC notifications
+    // `{method:"notifications/message", params:{level,logger,data}}`; data is
+    // branched by event:
     // - `{event:"peers_changed", peers:[full roster]}` → persist to SQLite + emit `hub:peers`
-    //   (the frontend roster's main channel; any peer coming on/offline or renaming pushes it)
     // - `{event:"message", message:{BridgeMessage, content decoded}}` → emit `hub:message`
-    // Parsing is defensive throughout: missing fields only log at debug level and never panic
-    // (notifications are a best-effort side channel).
-    match client.subscribe_notifications().await {
-        Ok(mut rx) => {
-            let app = app.clone();
-            let store = state.store.clone();
-            let kicked = state.kicked.clone();
-            tokio::spawn(async move {
-                while let Some(notif) = rx.recv().await {
-                    let method = notif.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                    if method == "notifications/message" {
-                        let data = notif.pointer("/params/data");
-                        match data.and_then(|d| d.get("event")).and_then(Value::as_str) {
-                            Some("peers_changed") => {
-                                match data.and_then(|d| d.get("peers")).and_then(Value::as_array) {
-                                    Some(peers) => {
-                                        sync_roster_to_store(&store, &kicked, peers);
-                                        let _ = app.emit("hub:peers", peers);
-                                    }
-                                    // Missing peers field: skip entirely; emitting an empty array would clear the frontend roster.
-                                    None => {
-                                        log::debug!("SSE peers_changed has no data.peers field, ignoring");
-                                    }
-                                }
-                            }
-                            Some("message") => match data.and_then(|d| d.get("message")) {
-                                Some(msg) => {
-                                    let _ = app.emit("hub:message", msg);
-                                }
-                                None => {
-                                    log::debug!("SSE message notification has no data.message field, ignoring");
-                                }
-                            },
-                            // The legacy assumption of params.message (the hub never sent it) is obsolete;
-                            // any unknown shape goes to debug, not to the UI.
-                            other => {
-                                log::debug!("SSE notifications/message data.event={other:?}");
-                            }
-                        }
-                    } else if !method.is_empty() {
-                        log::debug!("SSE notification: {method}");
+    // - `{event:"heartbeat", ts}` → liveness only (hub ≥ 0.7.2, every ~20s)
+    // The watchdog treats a closed channel (hub restart) or >70s of silence
+    // (three missed heartbeats — a half-open TCP looks alive otherwise) as
+    // fatal and resubscribes with capped exponential backoff. Previously the
+    // subscription was attempted exactly once: one dead stream silently
+    // downgraded the UI to the 3s history poll (the "messages only appear
+    // after the peer picks them up" symptom).
+    // Parsing is defensive throughout: missing fields only log at debug level
+    // and never panic (notifications are a best-effort side channel).
+    {
+        let mcp_slot = state.mcp.clone();
+        let app = app.clone();
+        let store = state.store.clone();
+        let kicked = state.kicked.clone();
+        tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                {
+                    let current = mcp_slot.read().await;
+                    if !matches!(current.as_ref(), Some(active) if Arc::ptr_eq(active, &client)) {
+                        log::info!("SSE watchdog: mcp client superseded, stopping");
+                        break;
                     }
                 }
-                log::info!("SSE notification receiver closed naturally (channel dropped by hub)");
-            });
-        }
-        Err(e) => {
-            log::warn!("subscribe_notifications failed: {e}; agent-hub-cli will go offline after 30s");
-        }
+                match client.subscribe_notifications().await {
+                    Ok(mut rx) => {
+                        backoff = Duration::from_secs(1);
+                        loop {
+                            match tokio::time::timeout(Duration::from_secs(70), rx.recv()).await {
+                                Ok(Some(notif)) => {
+                                    let method =
+                                        notif.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                                    if method == "notifications/message" {
+                                        let data = notif.pointer("/params/data");
+                                        match data.and_then(|d| d.get("event")).and_then(Value::as_str) {
+                                            Some("peers_changed") => {
+                                                match data.and_then(|d| d.get("peers")).and_then(Value::as_array) {
+                                                    Some(peers) => {
+                                                        sync_roster_to_store(&store, &kicked, peers);
+                                                        let _ = app.emit("hub:peers", peers);
+                                                    }
+                                                    // Missing peers field: skip entirely; emitting an empty array would clear the frontend roster.
+                                                    None => {
+                                                        log::debug!("SSE peers_changed has no data.peers field, ignoring");
+                                                    }
+                                                }
+                                            }
+                                            Some("message") => match data.and_then(|d| d.get("message")) {
+                                                Some(msg) => {
+                                                    let _ = app.emit("hub:message", msg);
+                                                }
+                                                None => {
+                                                    log::debug!("SSE message notification has no data.message field, ignoring");
+                                                }
+                                            },
+                                            // Liveness beat: receiving it is enough (the timeout above resets).
+                                            Some("heartbeat") => {}
+                                            // The legacy assumption of params.message (the hub never sent it) is obsolete;
+                                            // any unknown shape goes to debug, not to the UI.
+                                            other => {
+                                                log::debug!("SSE notifications/message data.event={other:?}");
+                                            }
+                                        }
+                                    } else if !method.is_empty() {
+                                        log::debug!("SSE notification: {method}");
+                                    }
+                                }
+                                Ok(None) => {
+                                    log::info!("SSE channel closed by hub; resubscribing");
+                                    break;
+                                }
+                                Err(_) => {
+                                    log::warn!("SSE silent >70s (heartbeats missed); resubscribing");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("subscribe_notifications failed: {e}; retrying in {backoff:?}");
+                    }
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        });
     }
-    *state.mcp.write().await = Some(client);
 }
 
 /// Persist the hub's peers snapshot (from bridge_peers results / the peers_changed array) to SQLite.
@@ -934,7 +984,8 @@ pub async fn hub_cli_setup() -> CmdResult<Value> {
 
 // -------- Config (T-2.5) --------
 
-/// Returns all 12 hub config items (key → value string).
+/// Returns the 12 hub spawn config items + the connection-level `auth_token`
+/// (read back from SQLite; never part of HubConfig).
 #[tauri::command]
 pub async fn config_get(state: State<'_, AppState>) -> CmdResult<Value> {
     let cfg = state.hub.config();
@@ -956,6 +1007,16 @@ pub async fn config_get(state: State<'_, AppState>) -> CmdResult<Value> {
         "herdr_timeout_ms".into(),
         json!(cfg.herdr_timeout_ms.unwrap_or(30_000)),
     );
+    // auth_token is connection-level (see ensure_mcp_initialized): read it back
+    // from SQLite rather than HubConfig so the settings panel round-trips it.
+    let auth_token = state
+        .store
+        .get_config("auth_token")
+        .ok()
+        .flatten()
+        .map(|r| r.value)
+        .unwrap_or_default();
+    out.insert("auth_token".into(), json!(auth_token));
     Ok(Value::Object(out))
 }
 

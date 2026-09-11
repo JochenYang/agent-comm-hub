@@ -52,6 +52,16 @@ const LATEST_VERSION = SUPPORTED_VERSIONS[0]
 
 const MAX_BODY_BYTES = 1_048_576
 
+/** SSE heartbeat cadence. A frame this often keeps proxies from reaping
+ * 'idle' SSE connections (nginx defaults to a 60s read timeout), surfaces
+ * half-open TCP on the next write (the failure path in notify() then drops
+ * the stream so the idle GC can evict the peer), and doubles as the
+ * liveness signal for client-side reconnect watchdogs. Sent as a real
+ * JSON-RPC notification — not a `: ping` comment — because comment frames
+ * are invisible to most SSE parsers and a watchdog needs an observable
+ * event; MCP clients ignore unknown notifications per spec. */
+const HEARTBEAT_MS = 20_000
+
 interface JsonRpcRequest {
   jsonrpc?: string
   id?: number | string | null
@@ -231,6 +241,7 @@ export class SessionRegistry {
 /** A minimal MCP server bound to one URL path of an http.Server. */
 export class McpStreamableHttpServer {
   private readonly sseStreams = new Map<string, ServerResponse>()
+  private heartbeatTimer: NodeJS.Timeout | undefined
 
   constructor(
     private readonly tools: McpTool[],
@@ -251,10 +262,23 @@ export class McpStreamableHttpServer {
       removeToken(peer: string): boolean
       reloadAuth(): void
     },
+    /** SSE heartbeat cadence override (tests); defaults to HEARTBEAT_MS. */
+    private readonly heartbeatMs?: number,
   ) {}
 
   /** Attach request handling for `path` (e.g. `/mcp`) to an http server. */
   attach(server: Server, path: string): void {
+    // Heartbeat: one unref'd timer per server. Best-effort — a failed write
+    // is exactly the dead-stream signal, handled inside notify().
+    this.heartbeatTimer = setInterval(() => {
+      if (this.sseStreams.size === 0) return
+      this.notifyAll('notifications/message', {
+        level: 'debug',
+        logger: 'bridge',
+        data: { event: 'heartbeat', ts: Date.now() },
+      })
+    }, this.heartbeatMs ?? HEARTBEAT_MS)
+    this.heartbeatTimer.unref?.()
     server.on('request', (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       if (url.pathname === ADMIN_PATH && req.method === 'GET') {
@@ -262,6 +286,15 @@ export class McpStreamableHttpServer {
         // it authenticates per MCP call with the token entered in the page.
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' })
         res.end(adminPage())
+        return
+      }
+      // Unauthenticated liveness probe for monitors/orchestrators (systemd
+      // watchdog, container healthcheck, uptime probes). Exposes nothing
+      // beyond "the process is up and serving HTTP" — deliberately no peer
+      // count or state, so it is safe without a token.
+      if (url.pathname === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...corsHeaders() })
+        res.end(JSON.stringify({ ok: true, ts: Date.now() }))
         return
       }
       if (url.pathname.startsWith(ADMIN_API_PATH) && this.adminApi !== undefined) {
@@ -290,6 +323,7 @@ export class McpStreamableHttpServer {
 
   /** Close all open SSE streams (called on server shutdown). */
   close(): void {
+    if (this.heartbeatTimer !== undefined) clearInterval(this.heartbeatTimer)
     for (const stream of this.sseStreams.values()) stream.end()
     this.sseStreams.clear()
   }

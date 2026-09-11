@@ -34,7 +34,7 @@ interface CliArgs {
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {}
-  const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms'])
+  const numeric = new Set(['--port', '--max-queue', '--history-limit', '--wait-timeout-ms', '--default-wait-ms', '--connected-window-ms', '--peer-idle-timeout-ms', '--herdr-timeout-ms', '--heartbeat-ms'])
   const string = new Set(['--host', '--path', '--url', '--server-name', '--agent', '--herdr-bin', '--manager-peers', '--state-file', '--auth-tokens', '--db', '--file', '--role', '--owner', '--token'])
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
@@ -93,6 +93,7 @@ Hub options:
   --path <p>               MCP endpoint path (default /mcp)
   --max-queue <n>          Queued messages per peer before dropping oldest (default 200)
   --history-limit <n>      Retained history messages (default 1000)
+  --heartbeat-ms <n>       SSE heartbeat cadence in ms (default 20000)
   --wait-timeout-ms <n>    Long-poll ceiling for bridge_wait (default 60000)
   --default-wait-ms <n>    bridge_wait default budget (default 30000)
   --connected-window-ms <n>  Peer counts as active within this window (default 30000)
@@ -341,6 +342,7 @@ try {
     authTokens: args['--auth-tokens'] === undefined ? undefined : String(args['--auth-tokens']),
     allowJoin: args['--allow-join'] === true,
     db: args['--db'] === undefined ? DEFAULT_DB : args['--db'] === 'off' ? undefined : String(args['--db']),
+    heartbeatMs: args['--heartbeat-ms'] as number | undefined,
   }, log)
   const shutdown = (): void => {
     log.info('agent-comm-hub shutting down')

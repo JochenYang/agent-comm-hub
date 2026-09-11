@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.2 (2026-09-06)
+
+- **SSE heartbeat**: the hub now sends a `notifications/message` heartbeat
+  (`data.event: "heartbeat"`, level `debug`) to every open SSE stream every
+  20s. It keeps reverse proxies from reaping idle streams (nginx's default
+  60s read timeout silently killed push channels in remote deployments),
+  surfaces half-open TCP connections on the next write (the failed write
+  drops the stream, so the idle GC can evict the dead peer instead of it
+  lingering as a ghost), and gives clients a liveness signal for reconnect
+  watchdogs. MCP clients ignore the unknown notification per spec.
+- **`GET /healthz`**: an unauthenticated liveness endpoint (`{ok, ts}`) for
+  systemd watchdogs, container healthchecks and uptime monitors. It exposes
+  no hub state, so it stays open even in remote-auth mode.
+- **`--heartbeat-ms <n>`**: CLI override of the SSE heartbeat cadence
+  (default 20000), mainly for tests and ops debugging.
+- Test suite grows to 263 checks (138 smoke + 36 setup + 11 ops +
+  35 herdr control + 23 discovery + 20 e2e against the real CLI
+  subprocess).
+
 ## 0.7.1 (2026-09-01)
 
 - Fix a misleading desktop warning: the SQLite "state open" line was logged

@@ -1,0 +1,28 @@
+# agent-comm-hub systemd unit 示例（Linux 服务器常驻）
+# 安装：
+#   sudo cp agent-comm-hub.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agent-comm-hub
+# 前提：node >= 22 与 agent-comm-hub 已装好（npm i -g agent-comm-hub），
+# token 表已签发（agent-comm-hub auth add ...）；路径按实际用户调整。
+
+[Unit]
+Description=agent-comm-hub — multi-peer MCP communication hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agenthub
+# hub 只听回环，TLS 由前面的 Caddy/nginx 终结；内网信任网络层时改 0.0.0.0
+ExecStart=/usr/bin/env agent-comm-hub --host 127.0.0.1 --port 18764 \
+    --auth-tokens /etc/agent-comm-hub/tokens.json \
+    --db /var/lib/agent-comm-hub/state.db
+Restart=on-failure
+RestartSec=2
+# 无状态机密以外的数据都在 --db 指向的 SQLite；令牌表单独备份（chmod 600）
+
+# 看门狗：配合 0.7.2 起的无鉴权 GET /healthz
+# ExecStartPost=/bin/sh -c 'sleep 1; curl -fsS http://127.0.0.1:18764/healthz'
+
+[Install]
+WantedBy=multi-user.target

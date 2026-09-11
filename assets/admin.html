@@ -135,11 +135,82 @@
   .status[data-state="err"] { color: var(--danger); }
   .status[data-state="err"] .dot { background: var(--danger); }
   @keyframes breathe { 50% { opacity: .45; } }
+
+  /* mode chip: local / lan / remote — tells the operator which trust model is live */
+  .mode-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    border: 1px solid var(--line-strong); border-radius: 999px;
+    padding: 2px 10px; color: var(--text-dim); background: var(--surface-2);
+    white-space: nowrap;
+  }
+  .mode-chip[data-mode="local"] { color: var(--ok); border-color: var(--ok-line); background: var(--ok-wash); }
+  .mode-chip[data-mode="remote"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-wash); }
+  .mode-chip[data-mode="limited"] { color: var(--warn); border-color: var(--warn-line); background: var(--warn-wash); }
+  .mode-chip[data-mode="offline"] { color: var(--danger); border-color: var(--danger-line); background: var(--danger-wash); }
+
+  /* identity / multi-user onboarding panel */
+  .id-map {
+    display: grid; gap: 8px;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .id-map .flow {
+    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 8px; align-items: center;
+    font-size: 11.5px; color: var(--text-dim);
+  }
+  .id-map .node {
+    border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+    background: var(--bg); padding: 8px 10px; text-align: center; min-width: 0;
+  }
+  .id-map .node b { display: block; color: var(--text); font-size: 12px; font-weight: 600; }
+  .id-map .node span { color: var(--text-faint); font-size: 10.5px; }
+  .id-map .arrow { color: var(--text-faint); font-size: 14px; text-align: center; }
+  .id-map .note { font-size: 11px; color: var(--text-faint); line-height: 1.5; }
+  .id-map .note b { color: var(--text-dim); font-weight: 600; }
+  .id-map .note code {
+    font-family: var(--font-mono); font-size: 10.5px;
+    background: var(--surface-3); border-radius: 3px; padding: 0 4px;
+    color: var(--text-dim);
+  }
+  /* tighten identity flow on mid widths */
+  @media (max-width: 1100px) {
+    .id-map .flow { grid-template-columns: 1fr; gap: 6px; }
+    .id-map .arrow { transform: rotate(90deg); }
+  }
+
+  .invite-grid {
+    display: grid; grid-template-columns: minmax(120px, 1fr) minmax(160px, 1.4fr) minmax(90px, 120px) auto; gap: 8px;
+    padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--surface-2);
+  }
+  @media (max-width: 980px) { .invite-grid { grid-template-columns: 1fr 1fr; } }
+  .invite-grid input, .invite-grid select { width: 100%; }
+
+  .snippet {
+    margin: 0; padding: 12px 16px;
+    background: var(--bg); border-top: 1px solid var(--line);
+    font: 11px/1.55 var(--font-mono); color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto;
+  }
+  .snippet.hidden { display: none; }
+  .snippet-bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 16px; border-top: 1px solid var(--line); background: var(--surface-2);
+  }
+  .snippet-bar.hidden { display: none; }
+  .snippet-bar .hint { font-size: 11px; color: var(--text-faint); flex: 1; min-width: 0; }
+
+  .ops-strip {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
+    padding: 8px 16px; border-bottom: 1px solid var(--line);
+    font-size: 11px; color: var(--text-faint);
+  }
+  .ops-strip b { color: var(--text-dim); font-weight: 600; font-variant-numeric: tabular-nums; }
   .topbar .field { display: flex; align-items: center; gap: 6px; }
   .topbar .field label { font-size: 11px; color: var(--text-faint); }
   .topbar .field input { min-height: 28px; padding: 4px 8px; font-size: 12px; }
-  #token { width: 240px; }
-  #mpath { width: 84px; }
+  #token { width: 220px; }
+  #mpath { width: min(320px, 42vw); }
   .spacer { flex: 1; }
 
   /* ── stats strip: plain numbers + labels, quiet hover (anchors to panels) ── */
@@ -354,14 +425,15 @@
     </span>
   </div>
   <span class="status" id="conn" data-state="off" aria-live="polite"><span class="dot"></span><span id="conn-text" data-i18n="statusOff">未连接</span></span>
+  <span class="mode-chip" id="mode-chip" data-mode="unknown" title="运行形态：本机 / 远程鉴权 / 无管理权限">—</span>
   <span class="spacer"></span>
   <div class="field">
     <label for="token" data-i18n="fieldToken">token</label>
     <input id="token" type="password" placeholder="manager token" autocomplete="off">
   </div>
   <div class="field">
-    <label for="mpath" data-i18n="fieldMcp">mcp</label>
-    <input id="mpath" value="/mcp" spellcheck="false" aria-label="MCP path">
+    <label for="mpath" data-i18n="fieldMcp">endpoint</label>
+    <input id="mpath" value="/mcp" spellcheck="false" aria-label="MCP endpoint" data-i18n-ph="fieldMcpPh" placeholder="/mcp 或 http://127.0.0.1:18764/mcp">
   </div>
   <button id="lang" class="ghost" data-i18n-title="langTitle" title="切换语言">中 / EN</button>
   <button id="reload" class="primary" data-i18n="btnReload">重新连接</button>
@@ -383,6 +455,44 @@
 </nav>
 
 <main class="workspace">
+  <!-- identity: multi-user same-agent model + invite → MCP config snippet -->
+  <section class="panel" id="panel-identity">
+    <header>
+      <h2 data-i18n="panelIdentity">身份与接入</h2>
+      <span class="hint" id="id-hint" data-i18n="identityHint">一人一 token = 一个 peer，同名 agent 也互不串台</span>
+      <span class="spacer"></span>
+      <span class="hint" id="ops-health"></span>
+    </header>
+    <div class="id-map" aria-label="identity mapping">
+      <div class="flow">
+        <div class="node"><b data-i18n="idPerson">人 / 机器</b><span>A · B · C</span></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="node"><b data-i18n="idToken">专属 token</b><span>zhangsan / lisi / wangwu</span></div>
+        <div class="arrow" aria-hidden="true">→</div>
+        <div class="node"><b data-i18n="idPeer">独立 peer</b><span>kimi-code × 3 · 信箱隔离</span></div>
+      </div>
+      <div class="note" data-i18n-html="identityNote">
+        <b>规则：</b>token 决定 peer，不是 clientInfo 名。A 发给 B 时 C 收不到；全员用 <code>to:"all"</code>，小圈子用群组。
+        同一人多 agent 建议 <code>人.agent</code>（如 <code>zhangsan.kimi</code>）。
+      </div>
+    </div>
+    <form class="invite-grid" id="invite-form">
+      <input name="owner" data-i18n-ph="inviteOwner" placeholder="归属人（张三）" required spellcheck="false" aria-label="owner">
+      <input name="peer" data-i18n-ph="invitePeer" placeholder="peer id（zhangsan 或 zhangsan.kimi）" required spellcheck="false" aria-label="peer id">
+      <select name="role" aria-label="role">
+        <option value="agent">agent</option>
+        <option value="manager">manager</option>
+      </select>
+      <button class="primary" type="submit" data-i18n="inviteIssue">签发并生成配置</button>
+    </form>
+    <div class="snippet-bar hidden" id="snippet-bar">
+      <span class="hint" id="snippet-hint"></span>
+      <button class="ghost" id="snippet-copy" data-i18n="snippetCopy">复制 MCP 配置</button>
+      <button class="ghost" id="snippet-hide" data-i18n="snippetHide">收起</button>
+    </div>
+    <pre class="snippet hidden" id="snippet" tabindex="0"></pre>
+  </section>
+
   <!-- main: members & tokens -->
   <section class="panel" id="panel-tokens">
     <header>
@@ -485,7 +595,8 @@ const I18N = {
     statusOn: '已连接',
     statusErr: '连接异常',
     fieldToken: 'token',
-    fieldMcp: 'mcp',
+    fieldMcp: 'endpoint',
+    fieldMcpPh: '/mcp 或 http://127.0.0.1:18764/mcp',
     btnReload: '重新连接',
     btnReveal: '明/打码',
     btnRevealTitle: '切换 明文/打码 显示',
@@ -498,8 +609,29 @@ const I18N = {
     statTokens: '已签发令牌',
     statGroups: '群组',
     statLog: '消息尾迹（30 条）',
+    panelIdentity: '身份与接入',
     panelTokens: '成员与令牌',
     panelRoster: '花名册',
+    identityHint: '一人一 token = 一个 peer，同名 agent 也互不串台',
+    identityNote: '<b>规则：</b>token 决定 peer，不是 clientInfo 名。A 发给 B 时 C 收不到；全员用 <code>to:"all"</code>，小圈子用群组。同一人多 agent 建议 <code>人.agent</code>（如 <code>zhangsan.kimi</code>）。',
+    idPerson: '人 / 机器',
+    idToken: '专属 token',
+    idPeer: '独立 peer',
+    inviteOwner: '归属人（张三）',
+    invitePeer: 'peer id（zhangsan 或 zhangsan.kimi）',
+    inviteIssue: '签发并生成配置',
+    snippetCopy: '复制 MCP 配置',
+    snippetHide: '收起',
+    snippetHint: '把这段配置发给 {peer}；token 只显示这一次',
+    snippetCopied: '已复制 {peer} 的 MCP 配置',
+    modeLocal: '本机',
+    modeRemote: '远程鉴权',
+    modeLimited: '只读（无 manager）',
+    modeUnknown: '检测中…',
+    modeOffline: '未连接',
+    errEndpoint: '无法访问 MCP 端点 {url} · 若本页是静态打开，请填 hub 完整地址（默认 http://127.0.0.1:18764/mcp）',
+    errHttp: 'HTTP {status} · {url}',
+    opsHealth: '队列上限 {queue} · 历史 {hist} · peer {n}',
     panelGroups: '群组',
     panelLog: '消息尾迹',
     groupsHint: '频道内互发 · 离线成员从历史补读',
@@ -582,7 +714,8 @@ const I18N = {
     statusOn: 'connected',
     statusErr: 'connection error',
     fieldToken: 'token',
-    fieldMcp: 'mcp',
+    fieldMcp: 'endpoint',
+    fieldMcpPh: '/mcp or http://127.0.0.1:18764/mcp',
     btnReload: 'Reconnect',
     btnReveal: 'show/hide',
     btnRevealTitle: 'Toggle plain/masked tokens',
@@ -595,8 +728,29 @@ const I18N = {
     statTokens: 'Tokens issued',
     statGroups: 'Groups',
     statLog: 'Message tail (30)',
+    panelIdentity: 'Identity & Onboarding',
     panelTokens: 'Members & Tokens',
     panelRoster: 'Roster',
+    identityHint: 'One person = one token = one peer · same client name stays isolated',
+    identityNote: '<b>Rule:</b> the token decides the peer, not clientInfo. A→B never lands in C\'s mailbox; use <code>to:"all"</code> for everyone, groups for a subset. Multi-agent per person: <code>person.agent</code> (e.g. <code>zhangsan.kimi</code>).',
+    idPerson: 'Person / machine',
+    idToken: 'Dedicated token',
+    idPeer: 'Isolated peer',
+    inviteOwner: 'Owner (Zhang San)',
+    invitePeer: 'peer id (zhangsan or zhangsan.kimi)',
+    inviteIssue: 'Issue + config',
+    snippetCopy: 'Copy MCP config',
+    snippetHide: 'Hide',
+    snippetHint: 'Send this config to {peer}; the token is shown only once',
+    snippetCopied: 'copied MCP config for {peer}',
+    modeLocal: 'Local',
+    modeRemote: 'Remote auth',
+    modeLimited: 'Read-only (no manager)',
+    modeUnknown: 'detecting…',
+    modeOffline: 'Offline',
+    errEndpoint: 'Cannot reach MCP endpoint {url} · if this page was opened as a static file, set the full hub URL (default http://127.0.0.1:18764/mcp)',
+    errHttp: 'HTTP {status} · {url}',
+    opsHealth: 'queue {queue} · history {hist} · peers {n}',
     panelGroups: 'Groups',
     panelLog: 'Message Tail',
     groupsHint: 'Channel broadcast · offline members read back from history',
@@ -683,10 +837,12 @@ const t = (key, vars) => {
   if (vars) for (const [k, v] of Object.entries(vars)) s = s.split('{' + k + '}').join(String(v))
   return s
 }
-/* Apply keys to static DOM: [data-i18n] text, [data-i18n-ph] placeholder. */
+/* Apply keys to static DOM: [data-i18n] text, [data-i18n-html] rich text,
+   [data-i18n-ph] placeholder. Rich keys are trusted UI copy (no user input). */
 function applyI18n() {
   document.title = t('title')
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n) })
+  document.querySelectorAll('[data-i18n-html]').forEach((el) => { el.innerHTML = t(el.dataset.i18nHtml) })
   document.querySelectorAll('[data-i18n-ph]').forEach((el) => { el.placeholder = t(el.dataset.i18nPh) })
   document.querySelectorAll('[data-i18n-title]').forEach((el) => { el.title = t(el.dataset.i18nTitle) })
 }
@@ -694,7 +850,35 @@ document.querySelector('#lang').textContent = t('langToggle')
 
 const $ = (id) => document.getElementById(id)
 const token = () => $('token').value.trim()
-const endpoint = () => location.origin + ($('mpath').value.trim() || '/mcp')
+
+/** True when this page was opened as a static file (assets/admin.html on
+ *  Live Server / file://) rather than served by the hub at /admin. In that
+ *  case location.origin is NOT the hub — default to loopback:18764. */
+function pageLooksStatic() {
+  const p = location.pathname
+  return /assets\//i.test(p) || /\.html?$/i.test(p)
+}
+
+const DEFAULT_HUB = 'http://127.0.0.1:18764'
+
+function endpoint() {
+  const raw = ($('mpath').value.trim() || '/mcp')
+  // Absolute URL wins.
+  if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, '')
+  // host[:port][/path] without a leading slash → treat as host root + path.
+  if (/^[a-z0-9._-]+(:\d+)?(\/|$)/i.test(raw) && !raw.startsWith('/')) {
+    const scheme = location.protocol === 'https:' && !pageLooksStatic() ? 'https://' : 'http://'
+    return (scheme + raw).replace(/\/+$/, '')
+  }
+  const path = raw.startsWith('/') ? raw : '/' + raw
+  if (pageLooksStatic()) return DEFAULT_HUB + path
+  return location.origin + path
+}
+
+/** Base for /admin/api/* (strip the /mcp suffix from the MCP endpoint). */
+function apiBase() {
+  return endpoint().replace(/\/mcp\/?$/i, '')
+}
 
 let sid = null
 async function rpc(method, params) {
@@ -706,13 +890,21 @@ async function rpc(method, params) {
   const isNotification = method.startsWith('notifications/')
   const body = { jsonrpc: '2.0', method, params }
   if (!isNotification) body.id = Date.now() % 1e6
-  const res = await fetch(endpoint(), { method: 'POST', headers, body: JSON.stringify(body) })
+  let res
+  try {
+    res = await fetch(endpoint(), { method: 'POST', headers, body: JSON.stringify(body) })
+  } catch {
+    throw new Error(t('errEndpoint', { url: endpoint() }))
+  }
   if (res.status === 401) throw new Error(t('errUnauth'))
+  // Static file servers (Live Server :5500, python -m http.server) answer
+  // POST /mcp with 405 — surface the real hub URL instead of a bare code.
+  if (res.status === 405) throw new Error(t('errHttp', { status: 405, url: endpoint() }))
   const json = isNotification ? null : await res.json().catch(() => null)
   const newSid = res.headers.get('mcp-session-id')
   if (newSid) sid = newSid
   if (isNotification) return {}
-  if (!json || json.error) throw new Error(json?.error?.message ?? ('HTTP ' + res.status))
+  if (!json || json.error) throw new Error(json?.error?.message ?? t('errHttp', { status: res.status, url: endpoint() }))
   const parsed = JSON.parse(json.result?.content?.[0]?.text ?? '{}')
   if (json.result?.isError) throw new Error(parsed.error ?? 'tool error')
   return parsed
@@ -749,7 +941,7 @@ async function adminApi(method, path, body) {
   const headers = {}
   if (!(body instanceof FormData) && body !== undefined) headers['Content-Type'] = 'application/json'
   if (token() !== '') headers.Authorization = 'Bearer ' + token()
-  const res = await fetch(endpoint().replace(/\/mcp$/, '') + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+  const res = await fetch(apiBase() + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
   if (res.status === 401 || res.status === 403) throw new Error(t('errNeedManager'))
   const json = await res.json().catch(() => null)
   if (!json || json.error) throw new Error(json?.error ?? ('HTTP ' + res.status))
@@ -838,8 +1030,183 @@ $('tok-form').onsubmit = async (ev) => {
     revealTokens = true   // reveal after issuing so the new token can be copied
     loadTokens()
     toast(t('tokenIssued', { peer: res.created.peer, role: res.created.role, token: res.created.token }), 'ok')
+    showSnippet(res.created)
     ev.target.reset()
   } catch (e) { toast(String(e.message ?? e), 'err') }
+}
+
+/* ── mode + identity onboarding ────────────────────────────────────────
+   Local hub (no --auth-tokens): tokens API is absent / 403 → local mode,
+   invite form stays visible but issuing fails with a clear toast.
+   Remote hub with manager token: full invite → one-shot MCP config.
+   Remote hub with agent token: limited (read-only console). */
+let hubMode = 'unknown'   // local | remote | limited | offline | unknown
+function setMode(mode) {
+  hubMode = mode
+  const chip = $('mode-chip')
+  chip.dataset.mode = mode
+  chip.textContent = mode === 'local' ? t('modeLocal')
+    : mode === 'remote' ? t('modeRemote')
+    : mode === 'limited' ? t('modeLimited')
+    : mode === 'offline' ? t('modeOffline')
+    : t('modeUnknown')
+  chip.title = mode === 'local'
+    ? 'Loopback trust model — no token table. Multi-user needs --auth-tokens on a server/LAN hub.'
+    : mode === 'remote'
+      ? 'Remote auth active — each person/agent holds a dedicated token → dedicated peer mailbox.'
+      : mode === 'limited'
+        ? 'Connected, but this token is not a manager — token issue/revoke is unavailable.'
+        : mode === 'offline'
+          ? 'Hub unreachable — check the endpoint field (full URL if this page is static-hosted).'
+          : 'Detecting…'
+}
+
+function mcpBaseUrl() {
+  // Same origin as the admin page; path from the mcp field.
+  return location.origin + ($('mpath').value.trim() || '/mcp')
+}
+
+function buildMcpConfig(identity) {
+  const url = mcpBaseUrl()
+  const headers = { Authorization: 'Bearer ' + identity.token }
+  // Multi-shape snippet: covers the majority of MCP clients in one paste.
+  return [
+    '# agent-comm-hub · peer: ' + identity.peer + (identity.owner ? ' (' + identity.owner + ')' : ''),
+    '# 一人一枚 token；不要多人共用（共用=共享信箱）',
+    '',
+    '## Claude Code / generic HTTP MCP (.mcp.json)',
+    JSON.stringify({
+      mcpServers: {
+        'agent-hub': {
+          type: 'http',
+          url,
+          headers,
+        },
+      },
+    }, null, 2),
+    '',
+    '## opencode (opencode.json → mcp)',
+    JSON.stringify({
+      mcp: {
+        'agent-hub': {
+          type: 'remote',
+          url,
+          headers,
+        },
+      },
+    }, null, 2),
+    '',
+    '## curl 探测',
+    'curl -sS -X POST ' + url + ' \\',
+    "  -H 'Content-Type: application/json' \\",
+    "  -H 'Accept: application/json, text/event-stream' \\",
+    "  -H 'Authorization: Bearer " + identity.token + "' \\",
+    "  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"1\"}}}'",
+  ].join('\n')
+}
+
+let lastSnippetIdentity = null
+function showSnippet(identity) {
+  lastSnippetIdentity = identity
+  const bar = $('snippet-bar')
+  const pre = $('snippet')
+  bar.classList.remove('hidden')
+  pre.classList.remove('hidden')
+  $('snippet-hint').textContent = t('snippetHint', { peer: identity.peer })
+  pre.textContent = buildMcpConfig(identity)
+  pre.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
+$('snippet-copy').onclick = async () => {
+  if (!lastSnippetIdentity) return
+  try {
+    await navigator.clipboard.writeText(buildMcpConfig(lastSnippetIdentity))
+    toast(t('snippetCopied', { peer: lastSnippetIdentity.peer }), 'ok')
+  } catch (e) { toast(t('copyFail', { msg: String(e.message ?? e) }), 'err') }
+}
+$('snippet-hide').onclick = () => {
+  $('snippet-bar').classList.add('hidden')
+  $('snippet').classList.add('hidden')
+}
+
+/* Owner types a human name → suggest a peer slug (editable). */
+const inviteOwner = document.querySelector('#invite-form [name=owner]')
+const invitePeer = document.querySelector('#invite-form [name=peer]')
+let peerTouched = false
+invitePeer?.addEventListener('input', () => { peerTouched = true })
+inviteOwner?.addEventListener('input', () => {
+  if (peerTouched) return
+  const slug = String(inviteOwner.value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9._:-]+/g, '')
+  invitePeer.value = slug
+})
+
+$('invite-form').onsubmit = async (ev) => {
+  ev.preventDefault()
+  const f = new FormData(ev.target)
+  const peer = String(f.get('peer') || '').trim()
+  const owner = String(f.get('owner') || '').trim()
+  const role = String(f.get('role') || 'agent')
+  if (!peer) return
+  try {
+    const res = await adminApi('POST', '/admin/api/tokens/add', {
+      peer,
+      role,
+      ...(owner !== '' ? { owner } : {}),
+    })
+    revealTokens = true
+    peerTouched = false
+    loadTokens()
+    toast(t('tokenIssued', { peer: res.created.peer, role: res.created.role, token: res.created.token }), 'ok')
+    showSnippet(res.created)
+    ev.target.reset()
+    peerTouched = false
+  } catch (e) {
+    // Local mode / non-manager: surface a precise next step instead of a raw 403.
+    const msg = String(e.message ?? e)
+    if (hubMode === 'local' || /manager token required|401|403/i.test(msg)) {
+      toast(t('emptyTokensRemote'), 'warn')
+    } else {
+      toast(msg, 'err')
+    }
+  }
+}
+
+async function detectMode() {
+  try {
+    await adminApi('GET', '/admin/api/tokens?reveal=0', undefined)
+    setMode('remote')
+    return
+  } catch (e) {
+    const msg = String(e?.message ?? e)
+    // Network / wrong origin: never claim "limited" when the hub is unreachable.
+    if (/Cannot reach|HTTP 405|Failed to fetch|NetworkError|ECONNREFUSED/i.test(msg)) {
+      setMode('offline')
+      return
+    }
+    if (/manager token required|unauthorized|401|403/i.test(msg)) {
+      // Token present but not a manager, or remote with empty token.
+      try {
+        await call('bridge_status')
+        setMode('limited')
+      } catch (e2) {
+        const m2 = String(e2?.message ?? e2)
+        setMode(/Cannot reach|HTTP 405|Failed to fetch/i.test(m2) ? 'offline' : 'limited')
+      }
+      return
+    }
+    // API not present (local hub without --auth-tokens): status still works.
+    try {
+      await call('bridge_status')
+      setMode('local')
+    } catch (e2) {
+      const m2 = String(e2?.message ?? e2)
+      setMode(/Cannot reach|HTTP 405|Failed to fetch/i.test(m2) ? 'offline' : 'limited')
+    }
+  }
 }
 $('tok-reveal').onclick = () => { revealTokens = !revealTokens; loadTokens() }
 $('tok-refresh').onclick = () => { pendingRevoke = null; loadTokens() }
@@ -1166,10 +1533,19 @@ async function refresh() {
     const status = await call('bridge_status')
     lastStatus = status
     setConn('ok', t('statusOn'))
+    // Recovered from a failed tick: re-probe tokens API for the real mode.
+    if (hubMode === 'offline' || hubMode === 'unknown') void detectMode()
     const bar = $('bar')
     bar.className = ''
     bar.textContent = t('stateRefreshEvery', { time: new Date().toLocaleTimeString(LANG === 'zh' ? 'zh-CN' : 'en-GB', { hour12: false }) })
     if (!editingId && !confirmingId) renderRoster(status.peers ?? [])
+    // Ops strip: capacity knobs the server operator actually needs at a glance.
+    const n = (status.peers ?? []).length
+    $('ops-health').textContent = t('opsHealth', {
+      queue: status.maxQueue ?? '—',
+      hist: status.historyLimit ?? '—',
+      n,
+    })
     const groups = await call('bridge_group_list')
     if (!pendingGroupDelete && expandedGroup === null) renderGroups(groups.groups ?? [])
     const tail = await call('bridge_history', { peer: 'all', limit: 30 })
@@ -1177,11 +1553,16 @@ async function refresh() {
     loadTokens()
   } catch (e) {
     setConn('err', t('statusErr'))
+    setMode('offline')
     const bar = $('bar')
     bar.className = 'err'
     // A hub restart invalidates the old session: next tick re-runs initialize.
     sid = null
     bar.textContent = String(e.message ?? e)
+    // Don't leave the roster stuck on "connecting…" when the hub is down.
+    if ($('roster').querySelector('.loading')) {
+      $('roster').innerHTML = `<div class="empty"><b>${escapeHtml(t('statusErr'))}</b>${escapeHtml(String(e.message ?? e))}</div>`
+    }
   }
 }
 
@@ -1197,10 +1578,22 @@ $('g-create').onsubmit = async (ev) => {
   refresh()
 }
 $('refresh').onclick = () => { editingId = null; confirmingId = null; refresh() }
-$('reload').onclick = () => { sid = null; localStorage.setItem('hub-admin-token', token()); refresh() }
+$('reload').onclick = () => { sid = null; localStorage.setItem('hub-admin-token', token()); void detectMode(); refresh() }
 $('lang').onclick = () => { localStorage.setItem('hub-admin-lang', LANG === 'zh' ? 'en' : 'zh'); location.reload() }
 $('token').addEventListener('change', () => localStorage.setItem('hub-admin-token', token()))
 $('token').value = localStorage.getItem('hub-admin-token') ?? ''
+// Static-hosted pages: seed the endpoint with the default hub URL once.
+if (pageLooksStatic() && !localStorage.getItem('hub-admin-endpoint')) {
+  $('mpath').value = DEFAULT_HUB + '/mcp'
+  localStorage.setItem('hub-admin-endpoint', $('mpath').value)
+} else {
+  $('mpath').value = localStorage.getItem('hub-admin-endpoint') || $('mpath').value
+}
+$('mpath').addEventListener('change', () => {
+  localStorage.setItem('hub-admin-endpoint', $('mpath').value.trim())
+  sid = null
+  void detectMode()
+})
 
 /* ── material feedback: topbar gets heavier past the content edge
      (rAF-throttled, interruptible transition) ── */
@@ -1227,7 +1620,9 @@ document.addEventListener('keydown', (e) => {
 })
 
 applyI18n()
+setMode('unknown')
 setInterval(refresh, 3000)
+void detectMode()
 refresh()
 </script>
 </body>

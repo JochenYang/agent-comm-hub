@@ -1,0 +1,36 @@
+# agent-comm-hub — nginx 反代示例（公网 VPS 用 Caddy 更简单，见 Caddyfile.example）
+#
+# 关键点（每一条都对应一个真实踩坑）：
+#   1. proxy_http_version 1.1 + proxy_buffering off  —— SSE 需要逐帧直出，缓冲会让推送
+#      攒到缓冲区满才下发，表现为"消息延迟几分钟才到"。
+#   2. proxy_read_timeout 必须 > hub 心跳间隔（0.7.2 起默认 20s）——给 1h 最省心；
+#      低于 20s 会把 SSE 长连周期性掐断（客户端看门狗会重连，但纯属无谓抖动）。
+#   3. Authorization header 默认透传，无需额外配置；token 只走 TLS（务必 listen 443 ssl）。
+#   4. /healthz 也走同一 location：监控探针不需要 token，hub 端本来就无鉴权开放。
+
+upstream agent_comm_hub {
+    server 127.0.0.1:18764;
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl;
+    server_name agent.example.com;
+
+    # ssl_certificate / ssl_certificate_key 按你的证书路径填写（推荐 certbot 自动签发）
+    # ssl_certificate     /etc/letsencrypt/live/agent.example.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/agent.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://agent_comm_hub;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # SSE: no buffering, long read timeout (hub heartbeats every 20s).
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+    }
+}

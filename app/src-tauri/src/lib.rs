@@ -5,7 +5,7 @@
 mod commands;
 mod herdr_client;
 mod hub_process;
-mod mcp_client;
+pub mod mcp_client; // pub: the tests/ integration suite drives this client against a real hub CLI
 mod sqlite_store;
 
 use std::sync::Arc;

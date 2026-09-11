@@ -9,7 +9,7 @@
 import { useState, useRef, useEffect, useMemo, type FormEvent, type DragEvent } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { usePeersStore } from '@/stores/peersStore'
-import { useMessagesStore } from '@/stores/messagesStore'
+import { useMessagesStore, useVisibleMessages } from '@/stores/messagesStore'
 import { useHubStore } from '@/stores/hubStore'
 import type { PresentedMessage } from '@/lib/tauri'
 import { SELF_PEER_ID } from '@/lib/self'
@@ -67,7 +67,6 @@ function attachmentsToBody(text: string, atts: Attachment[]): string {
 export function MessagesView(): React.JSX.Element {
   const { peers } = usePeersStore()
   const {
-    messages,
     loading,
     error,
     activePeer,
@@ -80,6 +79,9 @@ export function MessagesView(): React.JSX.Element {
     refresh,
     restoreLocal
   } = useMessagesStore()
+  // The store pool is view-agnostic (SSE pushes/polls never drop by view); the list
+  // renders only the current view's slice.
+  const messages = useVisibleMessages()
   const { t } = useTranslation()
   // Error label only shows while the hub is running (a polling failure while stopped is normal, not a red error)
   const hubState = useHubStore((s) => s.status?.state)
@@ -293,7 +295,7 @@ export function MessagesView(): React.JSX.Element {
             </span>
           </span>
           {/* Relay-flow view toggle: lets the admin view all hub relaying (zhangsan↔lisi, group broadcasts)
-              rather than just its own; unread derivation is skipped when enabled (see messagesStore). */}
+              rather than just its own; unread badges keep counting only messages addressed to me (see messagesStore). */}
           <button
             type="button"
             onClick={() => setRelayAll(!relayAll)}
