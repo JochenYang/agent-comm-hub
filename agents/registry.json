@@ -110,12 +110,14 @@
     {
       "id": "dsh",
       "probe": [],
+      "serverName": "agent-comm-hub",
       "configs": [
         {
           "file": "~/.dsh/profiles/*/cordis.patch.yml",
           "section": null,
           "strategy": "dsh",
-          "entry": null
+          "entry": null,
+          "serverName": "agent-comm-hub"
         }
       ],
       "skill": "~/.dsh/skills",

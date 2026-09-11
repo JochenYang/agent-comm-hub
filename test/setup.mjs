@@ -80,7 +80,7 @@ try {
   const dshPatchBefore = dshPatch()
   check(
     'dsh profile patch gets the hub MCP-client insert',
-    dshPatchBefore.includes('- insert:') && dshPatchBefore.includes("name: '@deepseek-ai/dsh-mcp-client'") && dshPatchBefore.includes('serverName: agent-hub') && dshPatchBefore.includes('url: http://127.0.0.1:18764/mcp'),
+    dshPatchBefore.includes('- insert:') && dshPatchBefore.includes("name: '@deepseek-ai/dsh-mcp-client'") && dshPatchBefore.includes('serverName: agent-comm-hub') && dshPatchBefore.includes('url: http://127.0.0.1:18764/mcp'),
     dshPatchBefore,
   )
   check('dsh patch unrelated entries preserved', dshPatchBefore.includes('searchProvider: searxng'))
@@ -165,15 +165,16 @@ try {
   await runSetup({ homeDir: home, skillSrc, url: 'http://127.0.0.1:18999/mcp', ...quiet })
   check('re-run after healing leaves the file byte-identical', readFileSync(patchPath, 'utf8') === healed, readFileSync(patchPath, 'utf8'))
 
-  // Markerless entry + same url must be recognized as configured (no second insert).
+  // Markerless entry + same url + current serverName must be recognized as
+  // configured (no second insert, no rewrite).
   const markerless = `- id: web
   config:
     searchProvider: searxng
 - insert:
-    - id: agent-hub
+    - id: agent-comm-hub
       name: '@deepseek-ai/dsh-mcp-client'
       config:
-        serverName: agent-hub
+        serverName: agent-comm-hub
         transport: streamable-http
         url: http://127.0.0.1:18999/mcp
 `
@@ -189,6 +190,30 @@ try {
   await runSetup({ homeDir: home, skillSrc, remove: true, ...quiet })
   const markerlessRemoved = readFileSync(patchPath, 'utf8')
   check('remove also strips a markerless hub entry', !markerlessRemoved.includes('dsh-mcp-client') && markerlessRemoved.includes('searchProvider: searxng'), markerlessRemoved)
+
+  console.log('== setup: dsh migrates off colliding serverName agent-hub ==')
+  // A profile that still holds the OLD static insert (serverName: agent-hub)
+  // collides with a dynamic MCP-manager mount of the same name. Re-run must
+  // rewrite our block to the distinct `agent-comm-hub` key.
+  writeFileSync(patchPath, `- id: web
+  config:
+    searchProvider: searxng
+# ── agent-comm-hub MCP client (installed by \`agent-comm-hub setup\`; undo with \`setup --remove\`) ─
+- insert:
+    - id: agent-hub
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agent-hub
+        transport: streamable-http
+        url: http://127.0.0.1:18764/mcp
+`)
+  await runSetup({ homeDir: home, skillSrc, ...quiet })
+  const migrated = dshPatch()
+  check(
+    'old serverName agent-hub rewritten to agent-comm-hub',
+    migrated.includes('serverName: agent-comm-hub') && !migrated.includes('serverName: agent-hub') && migrated.split('dsh-mcp-client').length === 2 && migrated.includes('searchProvider: searxng'),
+    migrated,
+  )
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1

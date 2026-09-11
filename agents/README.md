@@ -30,7 +30,7 @@ Codex（TOML 追加）/ zcode（`mcp.servers`）。Claude Code 和 DSH 需手动
 | Codex | `~/.codex/config.toml` | `codex/config.toml` | `~/.codex/skills/agent-comm-hub/SKILL.md` |
 | zcode | `~/.zcode/cli/config.json` | `zcode/config.json` | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
 | Claude Code | 项目根 `.mcp.json`（手动复制；**不碰 `~/.claude.json`**——含凭据且无法安全往返） | `claude-code/.mcp.json` | `~/.claude/skills/agent-comm-hub/SKILL.md` |
-| DeepSeek Harness (DSH) | profile `cordis.patch.yml`（手动合并） | `dsh/cordis.patch.yml`（用 `@deepseek-ai/dsh-mcp-client`，工具名为 `mcp__agent-hub__bridge_*`） | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
+| DeepSeek Harness (DSH) | profile `cordis.patch.yml`（手动合并） | `dsh/cordis.patch.yml`（`@deepseek-ai/dsh-mcp-client`，**serverName: `agent-comm-hub`**，工具名为 `mcp__agent-comm-hub__bridge_*`；刻意不用 `agent-hub`，避免与 MCP 管理器动态挂载同名冲突） | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 
 > 各 agent 对 streamable-http MCP 的支持随版本演进，模板里的字段以官方文档为准；
 > 不支持的版本可退化为 stdio 包装（见下）。

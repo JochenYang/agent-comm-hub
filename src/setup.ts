@@ -230,10 +230,16 @@ async function mergeDshPatch(
     return 'removed'
   }
   // Idempotent + self-healing: exactly ONE hub entry carrying the current
-  // url. Anything else — no entry, stale url, or MULTIPLE entries from an
-  // older buggy run — is rebuilt into that shape.
+  // url AND the current serverName. Anything else — no entry, stale url,
+  // stale serverName (e.g. pre-0.8.1 `agent-hub` that collides with a
+  // dynamic MCP-manager mount), or MULTIPLE entries from an older buggy
+  // run — is rebuilt into that shape.
   const ranges = hubEntryRanges()
-  if (ranges.length === 1 && lines.slice(ranges[0].start, ranges[0].end).some(line => line.includes(`url: ${opts.url}`))) {
+  if (
+    ranges.length === 1
+    && lines.slice(ranges[0].start, ranges[0].end).some(line => line.includes(`url: ${opts.url}`))
+    && lines.slice(ranges[0].start, ranges[0].end).some(line => line.includes(`serverName: ${opts.serverName}`))
+  ) {
     return 'unchanged'
   }
   await backup(file)
@@ -315,13 +321,16 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
 
   for (const agent of targetAgents) {
     for (const config of agent.configs) {
+      // Per-agent server key: DSH must not reuse the generic `agent-hub` name
+      // when an MCP-manager plugin already owns it (profile load crash).
+      const nameFor = config.serverName ?? agent.serverName ?? serverName
       for (const file of expandConfigFile(config.file, home)) {
         try {
           const status = config.strategy === 'json'
-            ? await mergeJsonServer(file, config.section!, substitute(config.entry!, { url, serverName }), { serverName, url, remove })
+            ? await mergeJsonServer(file, config.section!, substitute(config.entry!, { url, serverName: nameFor }), { serverName: nameFor, url, remove })
             : config.strategy === 'toml'
-              ? await mergeTomlSection(file, { serverName, url, remove })
-              : await mergeDshPatch(file, { serverName, url, remove })
+              ? await mergeTomlSection(file, { serverName: nameFor, url, remove })
+              : await mergeDshPatch(file, { serverName: nameFor, url, remove })
           record(status, agent.id, file)
         } catch (error) {
           summary.errors.push(`${agent.id}: ${file} — ${(error as Error).message}`)

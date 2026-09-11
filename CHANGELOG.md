@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.1 (2026-09-06)
+
+- **DSH / MCP-manager collision fix**: `setup` no longer writes
+  `serverName: agent-hub` into DSH profile patches. That name is what a
+  dynamic MCP-manager `mcp-client` mount typically claims; two instances
+  fighting over it aborted the whole DSH plugin tree
+  (`serverName "agent-hub" is already in use by another mcp-client instance`).
+  DSH static inserts now use the distinct key **`agent-comm-hub`** (registry
+  `serverName` override). Re-running `setup` rewrites any older `agent-hub`
+  insert; tools appear as `mcp__agent-comm-hub__bridge_*` after a DSH restart.
+- If the MCP manager owns the hub mount entirely, undo the static insert with
+  `agent-comm-hub setup --remove` and keep the dynamic mount.
+
 ## 0.8.0 (2026-09-06)
 
 - **Task ledger & ACK status**: `bridge_task` now records a hub-side ledger.

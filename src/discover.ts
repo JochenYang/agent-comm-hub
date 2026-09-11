@@ -34,7 +34,13 @@ export interface RegistryEntry {
     section: string | null
     strategy: 'json' | 'toml' | 'dsh'
     entry: Record<string, unknown> | null
+    /** Optional MCP server key override (default: SetupOptions.serverName).
+     * DSH uses a distinct name so a dynamic MCP-manager mount of `agent-hub`
+     * does not collide with the static profile-patch insert. */
+    serverName?: string
   }>
+  /** Optional agent-wide server key override (falls back to config, then default). */
+  serverName?: string
   skill: string | null
   os: Array<'win32' | 'darwin' | 'linux'>
 }
@@ -132,6 +138,9 @@ export function validateRegistry(registry: Registry): void {
     }
     if (agent.skill !== null && (typeof agent.skill !== 'string' || !agent.skill.startsWith('~/'))) {
       throw new Error(`registry: ${agent.id}: skill must be '~'-relative or null`)
+    }
+    if (agent.serverName !== undefined && (typeof agent.serverName !== 'string' || agent.serverName === '')) {
+      throw new Error(`registry: ${agent.id}: serverName must be a non-empty string`)
     }
     if (agent.os !== undefined && (!Array.isArray(agent.os) || agent.os.some(os => !['win32', 'darwin', 'linux'].includes(os)))) {
       throw new Error(`registry: ${agent.id}: invalid os list`)

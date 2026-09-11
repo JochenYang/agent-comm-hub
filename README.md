@@ -226,18 +226,27 @@ Merge into `~/.gemini/settings.json`:
 
 Auto-configured by `agent-comm-hub setup`: it discovers
 `~/.dsh/profiles/*/cordis.patch.yml` and appends the `@deepseek-ai/dsh-mcp-client`
-row, so DSH sessions expose the tools as `mcp__agent-hub__bridge_*` after a dsh
-restart. Manual equivalent (or template for other profiles):
+row with **`serverName: agent-comm-hub`** (not the generic `agent-hub` key other
+agents use). That name is deliberate: a DSH MCP-manager plugin that dynamically
+mounts `serverName: "agent-hub"` would otherwise collide
+(`serverName "agent-hub" is already in use by another mcp-client instance`) and
+fail the whole profile load. DSH sessions expose the tools as
+`mcp__agent-comm-hub__bridge_*` after a dsh restart. Re-running `setup` rewrites
+any older `serverName: agent-hub` insert to the new key. Manual equivalent:
 
 ```yaml
 - insert:
     - id: agent-comm-hub
       name: '@deepseek-ai/dsh-mcp-client'
       config:
-        serverName: agent-hub
+        serverName: agent-comm-hub
         transport: streamable-http
         url: http://127.0.0.1:18764/mcp
 ```
+
+If your MCP manager already owns the hub mount entirely, undo the static insert
+with `agent-comm-hub setup --remove` (or only refresh skills via
+`setup --agent` for other agents) and keep the dynamic mount.
 
 ## Tools
 

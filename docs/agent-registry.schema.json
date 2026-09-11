@@ -44,6 +44,11 @@
                 "entry": {
                   "type": ["object", "null"],
                   "description": "Server entry template; `{url}` / `{serverName}` placeholders are substituted. Null for toml/dsh."
+                },
+                "serverName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Optional MCP server key override for this config (defaults to SetupOptions.serverName). DSH uses agent-comm-hub to avoid colliding with a dynamic MCP-manager mount of agent-hub."
                 }
               }
             }
@@ -51,6 +56,11 @@
           "skill": {
             "type": ["string", "null"],
             "description": "Private skill directory (`~`-relative) for this agent; null = no skill."
+          },
+          "serverName": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional agent-wide MCP server key override (config-level wins if both set)."
           },
           "os": {
             "type": "array",
