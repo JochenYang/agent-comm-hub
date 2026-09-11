@@ -52,11 +52,12 @@ opencode listening loop: bridge_wait() returns → rebuts → … (loop = live d
 "Listening" = the agent loops `bridge_wait` inside its turn. Without a loop,
 messages are not lost — they queue until the agent polls.
 
-## 4. Tools (22, symmetric on every side)
+## 4. Tools (24, symmetric on every side)
 
-Message tools (11): `bridge_register` · `bridge_unregister` · `bridge_rename` ·
+Message tools (13): `bridge_register` · `bridge_unregister` · `bridge_rename` ·
 `bridge_chat` · `bridge_task` · `bridge_ack` · `bridge_wait` · `bridge_poll` ·
-`bridge_status` · `bridge_peers` · `bridge_history`
+`bridge_status` · `bridge_peers` · `bridge_history` · `bridge_tasks` ·
+`bridge_task_status`
 
 herdr control tools (6, when the [herdr](https://herdr.dev) terminal runtime
 is installed): `bridge_agent_list` · `bridge_agent_status` ·
@@ -142,9 +143,9 @@ They coexist: ports 18763 vs 18764.
 
 ## 9. Facts
 
-- Version 0.4.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
-- Test suite 37/37 smoke + 32/32 setup + 11/11 ops + 35/35 herdr + 23/23 discovery: registration/rename/unregister, routing, broadcast, ack routing,
-  filtered waits, connect-time auto-registration, shared identity, SSE
+- Version 0.8.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
+- Test suite 146/146 smoke + 36/36 setup + 11/11 ops + 35/35 herdr + 23/23 discovery + 20/20 e2e: registration/rename/unregister, routing, broadcast, ack routing,
+  task ledger, filtered waits, connect-time auto-registration, shared identity, SSE
   liveness, idle GC, error paths, control-tool argv passthrough, permission
   gating, missing CLI, registry validation, PATH/PATHEXT probing, npm scoped
   dirs, os filtering, per-platform service dry-runs.

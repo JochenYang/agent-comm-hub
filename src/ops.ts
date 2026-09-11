@@ -125,6 +125,7 @@ export function runUpdate(): { ok: boolean; messages: string[] } {
     const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', windowsHide: true })
     messages.push(out.trim())
     messages.push('restart the hub (agent-comm-hub) to pick up the new version')
+    messages.push('refresh installed agent skills: agent-comm-hub setup  (copies the packaged SKILL.md into each agent; npm update alone does not rewrite skill dirs)')
     return { ok: true, messages }
   } catch (error) {
     return { ok: false, messages: [`update failed: ${(error as Error).message}`] }

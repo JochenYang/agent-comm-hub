@@ -5,6 +5,20 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-09-06
+
+### Added
+
+- Works with hub **0.8.0** task ledger: `bridge_tasks` / `bridge_task_status`
+  and `bridge_wait({ref})` are available through the hub the app spawns or
+  connects to (relay / message views pick up acks the same way).
+- Peer roster can remove **offline** identities (same as the web admin).
+
+### Changed
+
+- Default hub `managerPeers` includes `hub-admin` (web console) alongside
+  `agent-hub-cli` (this desktop app).
+
 ## [1.2.0] — 2026-09-01
 
 ### Added

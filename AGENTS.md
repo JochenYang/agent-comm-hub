@@ -28,7 +28,7 @@ Key facts:
   other. Same-name connections share one peer id (N:1) and one mailbox.
 - **Offline-tolerant**: messages queue per peer (max 200, oldest dropped) and
   are delivered on the next `bridge_wait`/`bridge_poll`.
-- Version `0.3.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
+- Version `0.8.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
   manager is **pnpm** (single-package repo; `pnpm-workspace.yaml` only carries
   the pnpm 10 `allowBuilds` approval for esbuild).
 
@@ -42,8 +42,8 @@ layers:
 |---|---|
 | Transport | MCP streamable-http hand-rolled over `node:http`; JSON-RPC + SSE; `Mcp-Session-Id` per connection; `charset=utf-8` on every response; CORS `*`; 1 MB request-body cap |
 | Identity | Auto-registration at `initialize`; `clientInfo.name` → peer id (sanitized, `agent` fallback); `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration |
-| Routing | Per-peer FIFO mailbox + long-poll waiters; `bridge_wait` (default 30 s, server ceiling 60 s); sender-filtered waits; `to: "all"` broadcast; ack routed back to the original sender of `ref` |
-| Protocol | Message `{id, from, to, kind, content, ref?, ts}`; `kind` = `chat` \| `task` \| `notice` \| `ack`; task/ack payloads are JSON-encoded strings decoded by `decodeContent` |
+| Routing | Per-peer FIFO mailbox + long-poll waiters; `bridge_wait` (default 30 s, server ceiling 60 s); sender-filtered waits; `ref`-filtered ack waits; `to: "all"` broadcast; ack routed back to the original sender of `ref` |
+| Protocol | Message `{id, from, to, kind, content, ref?, ts}`; `kind` = `chat` \| `task` \| `notice` \| `ack`; task/ack payloads are JSON-encoded strings decoded by `decodeContent`; `bridge_task` records a task ledger (status + ack timeline) |
 | Lifecycle | Connected = activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC evicts peers idle beyond `peerIdleTimeoutMs` (10 min) — never a peer with a live SSE stream |
 
 ### Code layout
@@ -87,10 +87,11 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 - `index.ts` exports everything public: `startHub`, `AgentHub`,
   `McpStreamableHttpServer`, `SessionRegistry`, `hubTools`, `HerdrCtl`, the
   bridge tool wiring, and `* from './protocol.js'`.
-- The 22 tools (symmetric on every side): the 11 message tools
+- The 24 tools (symmetric on every side): the 13 message tools
   (`bridge_register`, `bridge_unregister`, `bridge_rename`, `bridge_chat`,
   `bridge_task`, `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`,
-  `bridge_peers`, `bridge_history`), 6 herdr agent tools (`bridge_agent_list`,
+  `bridge_peers`, `bridge_history`, `bridge_tasks`, `bridge_task_status`),
+  6 herdr agent tools (`bridge_agent_list`,
   `bridge_agent_status`, `bridge_agent_prompt`, `bridge_agent_wait`,
   `bridge_agent_read`, `bridge_agent_keys`) and 5 herdr pane tools
   (`bridge_pane_list`, `bridge_pane_send`, `bridge_pane_keys`,
@@ -98,7 +99,8 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
   `herdrControlPeers` (default `'all'`) and error out when herdr is not
   enabled — the message tools keep working regardless. Roster management
   (bridge_rename of others, manager kick) is gated by `managerPeers`
-  (default `['agent-hub-cli']`, the desktop GUI identity); the peer id stays
+  (default `['agent-hub-cli', 'hub-admin']` — desktop GUI + web admin);
+  the peer id stays
   the immutable routing key while the alias is a mutable display name held in
   `AgentHub.profiles` (survives unregister/GC). `bridge_rename { peerId }`
   true-renames a registered peer (atomic re-key incl. history rewrite);

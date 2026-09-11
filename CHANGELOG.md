@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.0 (2026-09-06)
+
+- **Task ledger & ACK status**: `bridge_task` now records a hub-side ledger.
+  New tools: `bridge_task_status(ref)` (current state + full ack timeline) and
+  `bridge_tasks({role, status, limit})` (sent / received / all). Status flow:
+  `pending → accepted → done|failed`, or `rejected`.
+- **`bridge_wait({ ref })`**: long-poll specifically for the ack of one task
+  id — other chat/notice traffic no longer steals the slot.
+- **P0 mailbox drain fix**: `bridge_wait` no longer empties the whole queue
+  and drops everything after the first message. Multi-message bursts and
+  reconnect backlogs are fully deliverable via sequential waits.
+- **`bridge_history` schema**: `channel` is now declared in the tool schema
+  (`additionalProperties: false` clients can read group history).
+- **Web admin console**: mode chip (local / remote / limited / offline);
+  identity & onboarding panel (invite → one-shot MCP config snippet);
+  full endpoint URL when the page is static-hosted; in-page dialog instead
+  of `window.prompt` for group send; offline peers can be removed; HTML
+  i18n notes render correctly; `hub-admin` is a default manager peer.
+- **Skill refresh after update**: `agent-comm-hub update` reminds you to
+  re-run `agent-comm-hub setup` — npm replaces the package's `agents/SKILL.md`,
+  but skill files already copied into `~/.agents/skills` and per-agent dirs
+  are **not** rewritten until `setup` runs again.
+- Test suite grows to 271 checks (146 smoke + 36 setup + 11 ops +
+  35 herdr + 23 discovery + 20 e2e). Manual live multi-peer script:
+  `test/live-multi-peer.mjs`.
+
 ## 0.7.2 (2026-09-06)
 
 - **SSE heartbeat**: the hub now sends a `notifications/message` heartbeat
