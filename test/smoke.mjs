@@ -144,6 +144,33 @@ try {
   const drained = await mavis.call('bridge_poll', { from: 'opencode' })
   check('filtered poll drains the queued message', drained.messages.length === 1 && drained.messages[0].content === 'opencode note', JSON.stringify(drained))
 
+  // P0 regression: wait must take ONE queued message, not drain the mailbox.
+  // A multi-message burst used to leave only the first message deliverable.
+  console.log('== multi-message queue + sequential wait ==')
+  await opencode.call('bridge_chat', { to: 'mavis', message: 'burst-1' })
+  await opencode.call('bridge_chat', { to: 'mavis', message: 'burst-2' })
+  await claude.call('bridge_chat', { to: 'mavis', message: 'burst-3' })
+  const w1 = await mavis.call('bridge_wait', { timeoutMs: 2000 })
+  const w2 = await mavis.call('bridge_wait', { timeoutMs: 2000 })
+  const w3 = await mavis.call('bridge_wait', { timeoutMs: 2000 })
+  const burstBodies = [w1, w2, w3].map(w => (w.type === 'message' ? w.message.content : null))
+  check(
+    'sequential waits deliver every queued message (no mailbox drain)',
+    JSON.stringify(burstBodies) === JSON.stringify(['burst-1', 'burst-2', 'burst-3']),
+    JSON.stringify(burstBodies),
+  )
+  // from-filtered wait must not consume other senders' leftovers either.
+  await opencode.call('bridge_chat', { to: 'mavis', message: 'keep-from-opencode' })
+  await claude.call('bridge_chat', { to: 'mavis', message: 'keep-from-claude' })
+  const fromCl = await mavis.call('bridge_wait', { from: 'claude', timeoutMs: 2000 })
+  const fromOp = await mavis.call('bridge_wait', { from: 'opencode', timeoutMs: 2000 })
+  check(
+    'from-filtered wait takes only that sender and leaves the rest',
+    fromCl.type === 'message' && fromCl.message.content === 'keep-from-claude'
+      && fromOp.type === 'message' && fromOp.message.content === 'keep-from-opencode',
+    JSON.stringify({ fromCl, fromOp }),
+  )
+
   console.log('== task + ack routing ==')
   await claude.call('bridge_task', { to: 'mavis', prompt: 'review the hub protocol', deliverable: 'short summary' })
   const task = await mavis.call('bridge_wait', { timeoutMs: 3000 })

@@ -440,7 +440,11 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     {
       name: 'bridge_history',
       description: 'Recent messages involving you (newest first). Use to refresh context after a reconnect. Reading ANOTHER peer\'s conversation — or `peer: "all"` for the unfiltered tail — requires manager rights (hub managerPeers).',
-      inputSchema: schema({ peer: optStr('PeerId whose conversation to inspect; "all" = every peer; default: yourself. Other peers / "all" require manager rights.'), limit: int('How many messages to return (default 20).') }),
+      inputSchema: schema({
+        peer: optStr('PeerId whose conversation to inspect; "all" = every peer; default: yourself. Other peers / "all" require manager rights.'),
+        channel: optStr('Read a group channel history instead of a peer conversation (you must be a member, or a manager).'),
+        limit: int('How many messages to return (default 20).'),
+      }),
       handler: wrap(true, async (args, peer, sessionId) => {
         const limit = Math.min(args.limit === undefined ? 20 : Number(args.limit), 1000)
         const target = args.peer === undefined ? peer : String(args.peer)

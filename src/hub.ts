@@ -574,11 +574,23 @@ export class AgentHub {
    * Long-poll for the next message addressed to `peer`: resolves immediately
    * when a matching one is queued, otherwise waits up to `timeoutMs` (capped
    * by `waitTimeoutMs`) or until `signal` aborts. `from` narrows to one sender.
+   *
+   * Takes ONLY the first matching queued message. Calling poll() here would
+   * drain the whole mailbox and discard every message after the first —
+   * a multi-message burst (or a reconnect with a full queue) would silently
+   * lose messages that never reach wait/poll again.
    */
   wait(peerId: string, timeoutMs: number, from?: string, signal?: AbortSignal): Promise<WaitResult> {
     const startedAt = Date.now()
-    const queued = this.poll(peerId, from)[0]
-    if (queued) return Promise.resolve({ type: 'message', message: queued })
+    const queue = this.queues.get(peerId)
+    if (queue !== undefined && queue.length > 0) {
+      const index = from === undefined ? 0 : queue.findIndex(message => message.from === from)
+      if (index >= 0) {
+        const [queued] = queue.splice(index, 1)
+        this.options.onMailboxesChanged?.()
+        return Promise.resolve({ type: 'message', message: queued })
+      }
+    }
     const budget = Math.max(1, Math.min(Math.floor(timeoutMs), this.options.waitTimeoutMs))
     return new Promise<WaitResult>(resolve => {
       let settled = false
