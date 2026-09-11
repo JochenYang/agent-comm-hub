@@ -28,7 +28,7 @@ Key facts:
   other. Same-name connections share one peer id (N:1) and one mailbox.
 - **Offline-tolerant**: messages queue per peer (max 200, oldest dropped) and
   are delivered on the next `bridge_wait`/`bridge_poll`.
-- Version `0.8.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
+- Version `0.8.2`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
   manager is **pnpm** (single-package repo; `pnpm-workspace.yaml` only carries
   the pnpm 10 `allowBuilds` approval for esbuild).
 

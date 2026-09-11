@@ -143,7 +143,7 @@ They coexist: ports 18763 vs 18764.
 
 ## 9. Facts
 
-- Version 0.8.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
+- Version 0.8.2, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
 - Test suite 146/146 smoke + 36/36 setup + 11/11 ops + 35/35 herdr + 23/23 discovery + 20/20 e2e: registration/rename/unregister, routing, broadcast, ack routing,
   task ledger, filtered waits, connect-time auto-registration, shared identity, SSE
   liveness, idle GC, error paths, control-tool argv passthrough, permission

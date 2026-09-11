@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.2 (2026-09-11)
+
+- **Agent skill frontmatter fix**: the shipped `agents/SKILL.md` (and the
+  MiniMax Code variant) declared `description:` as a bare multi-line scalar
+  whose text contained `Tools:` — a colon YAML reads as a mapping key, so the
+  whole frontmatter failed to parse (`mapping values are not allowed here`).
+  Agents that drop skills with unparseable frontmatter never registered the
+  hub skill at all. The field is now a `>-` folded block. Re-run
+  `agent-comm-hub setup` to refresh already-installed copies — `npm update`
+  alone does not rewrite skill dirs.
+
 ## 0.8.1 (2026-09-06)
 
 - **DSH / MCP-manager collision fix**: `setup` no longer writes
