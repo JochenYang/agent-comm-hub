@@ -117,25 +117,21 @@ Write-Step '- mcode'
 foreach ($f in @((Join-Path $userHome '.minimax\mcp.json'), (Join-Path $userHome '.minimax\mcp\mcp.json'))) {
   Merge-JsonServer 'mcode' $f 'mcpServers' $mcodeEntry
 }
-Sync-Skill 'mcode' (Join-Path $userHome '.minimax\skills\agent-comm-hub')
 
 # ---------- opencode: mcp.<name> in ~/.config/opencode/opencode.json
 $opencodeEntry = [ordered]@{ type = 'remote'; url = $Url; enabled = $true }
 Write-Step '- opencode'
 Merge-JsonServer 'opencode' (Join-Path $userHome '.config\opencode\opencode.json') 'mcp' $opencodeEntry
-Sync-Skill 'opencode' (Join-Path $userHome '.config\opencode\skills\agent-comm-hub')
 
 # ---------- Kimi Code: mcpServers at root of ~/.kimi-code/mcp.json
 $kimiEntry = [ordered]@{ transport = 'http'; url = $Url; startupTimeoutMs = 30000; toolTimeoutMs = 120000 }
 Write-Step '- kimi-code'
 Merge-JsonServer 'kimi-code' (Join-Path $userHome '.kimi-code\mcp.json') 'mcpServers' $kimiEntry
-Sync-Skill 'kimi-code' (Join-Path $userHome '.kimi-code\skills\agent-comm-hub')
 
 # ---------- Gemini CLI: mcpServers in ~/.gemini/settings.json
 $geminiEntry = [ordered]@{ type = 'http'; url = $Url }
 Write-Step '- gemini-cli'
 Merge-JsonServer 'gemini-cli' (Join-Path $userHome '.gemini\settings.json') 'mcpServers' $geminiEntry
-Sync-Skill 'gemini-cli' (Join-Path $userHome '.gemini\skills\agent-comm-hub')
 
 # ---------- Codex: append [mcp_servers.<name>] to ~/.codex/config.toml (incremental append only)
 $codexFile = Join-Path $userHome '.codex\config.toml'

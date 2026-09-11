@@ -10,6 +10,12 @@
   hub skill at all. The field is now a `>-` folded block. Re-run
   `agent-comm-hub setup` to refresh already-installed copies — `npm update`
   alone does not rewrite skill dirs.
+- **Legacy skill directory removed from `install-all.ps1`**: its four
+  hard-coded `Sync-Skill … skills/agent-comm-hub` calls are gone, so the script
+  no longer writes a second copy next to the `…/skills/agent-hub/` install.
+  DSH keeps `agent-comm-hub`, which its registry `serverName` override
+  requires. The agent tables in `README.md`, `README.zh.md` and
+  `agents/README.md` now list the path the installers actually use.
 
 ## 0.8.1 (2026-09-06)
 

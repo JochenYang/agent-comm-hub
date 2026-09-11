@@ -124,13 +124,13 @@ curl -X POST http://127.0.0.1:18764/mcp \
 
 | Agent | 配置文件 | 模板 | Skill 位置 |
 |---|---|---|---|
-| MiniMax Code (mcode) | `~/.minimax/mcp.json`（+ `~/.minimax/mcp/mcp.json`） | [`agents/minimax-code/`](agents/minimax-code/) | `~/.minimax/skills/agent-comm-hub/SKILL.md` |
-| opencode | `~/.config/opencode/opencode.json` | [`agents/opencode/opencode.json`](agents/opencode/opencode.json) | `~/.config/opencode/skills/agent-comm-hub/SKILL.md` |
-| Kimi Code | `~/.kimi-code/mcp.json` | [`agents/kimi-code/mcp-entry.json`](agents/kimi-code/mcp-entry.json) | `~/.kimi-code/skills/agent-comm-hub/SKILL.md` |
-| Gemini CLI | `~/.gemini/settings.json` | [`agents/gemini-cli/settings.json`](agents/gemini-cli/settings.json) | `~/.gemini/skills/agent-comm-hub/SKILL.md` |
-| Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-comm-hub/SKILL.md` |
-| zcode | `~/.zcode/cli/config.json`（`mcp.servers`） | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
-| Claude Code | 项目根 `.mcp.json`（手动；**绝不碰 `~/.claude.json`**——含凭据） | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-comm-hub/SKILL.md` |
+| MiniMax Code (mcode) | `~/.minimax/mcp.json`（+ `~/.minimax/mcp/mcp.json`） | [`agents/minimax-code/`](agents/minimax-code/) | `~/.minimax/skills/agent-hub/SKILL.md` |
+| opencode | `~/.config/opencode/opencode.json` | [`agents/opencode/opencode.json`](agents/opencode/opencode.json) | `~/.config/opencode/skills/agent-hub/SKILL.md` |
+| Kimi Code | `~/.kimi-code/mcp.json` | [`agents/kimi-code/mcp-entry.json`](agents/kimi-code/mcp-entry.json) | `~/.kimi-code/skills/agent-hub/SKILL.md` |
+| Gemini CLI | `~/.gemini/settings.json` | [`agents/gemini-cli/settings.json`](agents/gemini-cli/settings.json) | `~/.gemini/skills/agent-hub/SKILL.md` |
+| Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-hub/SKILL.md` |
+| zcode | `~/.zcode/cli/config.json`（`mcp.servers`） | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-hub/SKILL.md` |
+| Claude Code | 项目根 `.mcp.json`（手动；**绝不碰 `~/.claude.json`**——含凭据） | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-hub/SKILL.md` |
 | DeepSeek Harness (DSH) | profile `cordis.patch.yml`（手动） | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 
 > 各 agent 对 streamable-http 的支持随版本演进；不支持的客户端可加 stdio 包装。

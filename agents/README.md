@@ -23,13 +23,13 @@ Codex（TOML 追加）/ zcode（`mcp.servers`）。Claude Code 和 DSH 需手动
 
 | Agent | 配置文件 | 片段 | Skill 位置 |
 |---|---|---|---|
-| MiniMax Code (mcode) | `~/.minimax/mcp.json` + `~/.minimax/mcp/mcp.json` | `minimax-code/mcp-entry.json` | `~/.minimax/skills/agent-comm-hub/SKILL.md`（或跑 `minimax-code/install-mcode.ps1`） |
-| opencode | `~/.config/opencode/opencode.json` | `opencode/opencode.json` | `~/.config/opencode/skills/agent-comm-hub/SKILL.md` |
-| Kimi Code | `~/.kimi-code/mcp.json` | `kimi-code/mcp-entry.json`（`transport: "http"`，url 自动推断为 http） | `~/.kimi-code/skills/agent-comm-hub/SKILL.md` |
-| Gemini CLI | `~/.gemini/settings.json` | `gemini-cli/settings.json` | `~/.gemini/skills/agent-comm-hub/SKILL.md` |
-| Codex | `~/.codex/config.toml` | `codex/config.toml` | `~/.codex/skills/agent-comm-hub/SKILL.md` |
-| zcode | `~/.zcode/cli/config.json` | `zcode/config.json` | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
-| Claude Code | 项目根 `.mcp.json`（手动复制；**不碰 `~/.claude.json`**——含凭据且无法安全往返） | `claude-code/.mcp.json` | `~/.claude/skills/agent-comm-hub/SKILL.md` |
+| MiniMax Code (mcode) | `~/.minimax/mcp.json` + `~/.minimax/mcp/mcp.json` | `minimax-code/mcp-entry.json` | `~/.minimax/skills/agent-hub/SKILL.md`（或跑 `minimax-code/install-mcode.ps1`） |
+| opencode | `~/.config/opencode/opencode.json` | `opencode/opencode.json` | `~/.config/opencode/skills/agent-hub/SKILL.md` |
+| Kimi Code | `~/.kimi-code/mcp.json` | `kimi-code/mcp-entry.json`（`transport: "http"`，url 自动推断为 http） | `~/.kimi-code/skills/agent-hub/SKILL.md` |
+| Gemini CLI | `~/.gemini/settings.json` | `gemini-cli/settings.json` | `~/.gemini/skills/agent-hub/SKILL.md` |
+| Codex | `~/.codex/config.toml` | `codex/config.toml` | `~/.codex/skills/agent-hub/SKILL.md` |
+| zcode | `~/.zcode/cli/config.json` | `zcode/config.json` | `~/.zcode/skills/agent-hub/SKILL.md` |
+| Claude Code | 项目根 `.mcp.json`（手动复制；**不碰 `~/.claude.json`**——含凭据且无法安全往返） | `claude-code/.mcp.json` | `~/.claude/skills/agent-hub/SKILL.md` |
 | DeepSeek Harness (DSH) | profile `cordis.patch.yml`（手动合并） | `dsh/cordis.patch.yml`（`@deepseek-ai/dsh-mcp-client`，**serverName: `agent-comm-hub`**，工具名为 `mcp__agent-comm-hub__bridge_*`；刻意不用 `agent-hub`，避免与 MCP 管理器动态挂载同名冲突） | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 
 > 各 agent 对 streamable-http MCP 的支持随版本演进，模板里的字段以官方文档为准；

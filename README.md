@@ -139,13 +139,13 @@ is manual (below).
 
 | Agent | Config file | Template | Skill location |
 |---|---|---|---|
-| MiniMax Code (mcode) | `~/.minimax/mcp.json` (+ `~/.minimax/mcp/mcp.json`) | [`agents/minimax-code/`](agents/minimax-code/) | `~/.minimax/skills/agent-comm-hub/SKILL.md` |
-| opencode | `~/.config/opencode/opencode.json` | [`agents/opencode/opencode.json`](agents/opencode/opencode.json) | `~/.config/opencode/skills/agent-comm-hub/SKILL.md` |
-| Kimi Code | `~/.kimi-code/mcp.json` | [`agents/kimi-code/mcp-entry.json`](agents/kimi-code/mcp-entry.json) | `~/.kimi-code/skills/agent-comm-hub/SKILL.md` |
-| Gemini CLI | `~/.gemini/settings.json` | [`agents/gemini-cli/settings.json`](agents/gemini-cli/settings.json) | `~/.gemini/skills/agent-comm-hub/SKILL.md` |
-| Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-comm-hub/SKILL.md` |
-| zcode | `~/.zcode/cli/config.json` (`mcp.servers`) | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-comm-hub/SKILL.md` |
-| Claude Code | project `.mcp.json` (manual; `~/.claude.json` is never touched) | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-comm-hub/SKILL.md` |
+| MiniMax Code (mcode) | `~/.minimax/mcp.json` (+ `~/.minimax/mcp/mcp.json`) | [`agents/minimax-code/`](agents/minimax-code/) | `~/.minimax/skills/agent-hub/SKILL.md` |
+| opencode | `~/.config/opencode/opencode.json` | [`agents/opencode/opencode.json`](agents/opencode/opencode.json) | `~/.config/opencode/skills/agent-hub/SKILL.md` |
+| Kimi Code | `~/.kimi-code/mcp.json` | [`agents/kimi-code/mcp-entry.json`](agents/kimi-code/mcp-entry.json) | `~/.kimi-code/skills/agent-hub/SKILL.md` |
+| Gemini CLI | `~/.gemini/settings.json` | [`agents/gemini-cli/settings.json`](agents/gemini-cli/settings.json) | `~/.gemini/skills/agent-hub/SKILL.md` |
+| Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-hub/SKILL.md` |
+| zcode | `~/.zcode/cli/config.json` (`mcp.servers`) | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-hub/SKILL.md` |
+| Claude Code | project `.mcp.json` (manual; `~/.claude.json` is never touched) | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-hub/SKILL.md` |
 | DeepSeek Harness (DSH) | `~/.dsh/profiles/*/cordis.patch.yml` (auto by `setup`) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
 
 > Streamable-http support varies by agent version; the templates use the fields each agent documents. If a client lacks HTTP MCP, wrap the endpoint with a stdio shim.
@@ -179,7 +179,7 @@ Copy `agents/claude-code/.mcp.json` into your project root (or merge `mcpServers
 }
 ```
 
-Copy `agents/SKILL.md` to `~/.claude/skills/agent-comm-hub/SKILL.md`, restart Claude, and have it `bridge_register("claude-code:myproject")`.
+Copy `agents/SKILL.md` to `~/.claude/skills/agent-hub/SKILL.md`, restart Claude, and have it `bridge_register("claude-code:myproject")`.
 
 ### opencode
 
