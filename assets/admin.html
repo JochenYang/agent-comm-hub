@@ -397,6 +397,56 @@
   .toast.warn { border-left-color: var(--warn); }
   @keyframes slide-in { from { opacity: 0; transform: translateX(14px); } }
 
+  /* ── inline send box (replaces window.prompt) ── */
+  .send-box {
+    flex: 1 1 100%;
+    display: flex; gap: 8px; align-items: flex-end;
+    padding: 10px 12px; margin-top: 6px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm);
+    animation: row-in .16s ease-out;
+  }
+  .send-box textarea {
+    flex: 1; min-width: 0; min-height: 64px; resize: vertical;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+    padding: 8px 10px; font: 12px/1.5 var(--font-ui);
+  }
+  .send-box textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
+  }
+  .send-box .col { display: flex; flex-direction: column; gap: 6px; }
+
+  /* ── confirm dialog (replaces window.prompt for destructive / input) ── */
+  .dialog-backdrop {
+    position: fixed; inset: 0; z-index: 40;
+    background: rgba(0, 0, 0, .55);
+    display: grid; place-items: center;
+    animation: fade-in .12s ease-out;
+  }
+  .dialog-backdrop.hidden { display: none; }
+  @keyframes fade-in { from { opacity: 0; } }
+  .dialog {
+    width: min(420px, calc(100vw - 32px));
+    background: var(--surface); border: 1px solid var(--line-strong);
+    border-radius: var(--radius); box-shadow: var(--shadow-toast);
+    padding: 16px; display: grid; gap: 12px;
+    animation: slide-in .16s ease-out;
+  }
+  .dialog h3 { margin: 0; font-size: 13px; font-weight: 600; }
+  .dialog p { margin: 0; font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+  .dialog input, .dialog textarea {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+    padding: 8px 10px; font: 12px/1.5 var(--font-ui);
+  }
+  .dialog textarea { min-height: 96px; resize: vertical; }
+  .dialog input:focus, .dialog textarea:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-wash);
+  }
+  .dialog .row { display: flex; gap: 8px; justify-content: flex-end; }
+
   /* ── responsive / motion ────────────────────────────────────────────── */
   @media (max-width: 980px) {
     .workspace { grid-template-columns: 1fr; }
@@ -583,6 +633,19 @@
 
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
+<!-- in-page dialog (replaces native prompt/confirm) -->
+<div class="dialog-backdrop hidden" id="dialog-backdrop" role="presentation">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <h3 id="dialog-title"></h3>
+    <p id="dialog-body" hidden></p>
+    <textarea id="dialog-input" hidden rows="4"></textarea>
+    <div class="row">
+      <button type="button" id="dialog-cancel"></button>
+      <button type="button" class="primary" id="dialog-ok"></button>
+    </div>
+  </div>
+</div>
+
 <script>
 'use strict'
 /* ── i18n: tiny dictionary, zh/en; language persisted in localStorage ── */
@@ -690,8 +753,11 @@ const I18N = {
     groupDeleted: '已删除 #{name}',
     groupDelNote: '删除群 <b>{name}</b>？（消息历史保留）',
     groupDelYes: '确认删除',
-    groupSend: '发到 #{name}：',
+    groupSend: '发到 #{name}',
     groupSent: '已发送到 #{name}',
+    groupSendPh: '输入要发到该群组的消息…',
+    dialogOk: '确定',
+    dialogCancel: '取消',
     groupRemoved: '已移除 {peer}',
     groupRemoveTitle: '移除 {peer}',
     groupAdded: '已添加 {peer} → #{group}',
@@ -809,8 +875,11 @@ const I18N = {
     groupDeleted: 'deleted #{name}',
     groupDelNote: 'Delete group <b>{name}</b>? (message history is kept)',
     groupDelYes: 'Delete',
-    groupSend: 'Send to #{name}: ',
+    groupSend: 'Send to #{name}',
     groupSent: 'sent to #{name}',
+    groupSendPh: 'Message to this group…',
+    dialogOk: 'OK',
+    dialogCancel: 'Cancel',
     groupRemoved: 'removed {peer}',
     groupRemoveTitle: 'Remove {peer}',
     groupAdded: 'added {peer} → #{group}',
@@ -918,6 +987,46 @@ async function ensureSession() {
   await rpc('notifications/initialized')
 }
 async function call(tool, args) { await ensureSession(); return rpc('tools/call', { name: tool, arguments: args ?? {} }) }
+
+/* ── in-page prompt/confirm (never window.prompt — native dialogs break
+   the console's layout and block the event loop) ── */
+function promptDialog({ title, body, placeholder, multiline = true, okLabel, cancelLabel }) {
+  return new Promise(resolve => {
+    const backdrop = $('dialog-backdrop')
+    const titleEl = $('dialog-title')
+    const bodyEl = $('dialog-body')
+    const input = $('dialog-input')
+    const ok = $('dialog-ok')
+    const cancel = $('dialog-cancel')
+    titleEl.textContent = title ?? ''
+    if (body) { bodyEl.hidden = false; bodyEl.textContent = body } else { bodyEl.hidden = true; bodyEl.textContent = '' }
+    input.hidden = false
+    input.value = ''
+    input.placeholder = placeholder ?? ''
+    ok.textContent = okLabel ?? t('dialogOk')
+    cancel.textContent = cancelLabel ?? t('dialogCancel')
+    backdrop.classList.remove('hidden')
+    const close = (value) => {
+      backdrop.classList.add('hidden')
+      ok.onclick = null
+      cancel.onclick = null
+      input.onkeydown = null
+      backdrop.onclick = null
+      resolve(value)
+    }
+    ok.onclick = () => close(input.value.trim())
+    cancel.onclick = () => close(null)
+    backdrop.onclick = (e) => { if (e.target === backdrop) close(null) }
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter' && (multiline === false || e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        close(input.value.trim())
+      }
+      if (e.key === 'Escape') { e.preventDefault(); close(null) }
+    }
+    queueMicrotask(() => input.focus())
+  })
+}
 
 /* ── toast feedback: four states (info/ok/warn/err), aria-live broadcast ── */
 function toast(msg, kind = '') {
@@ -1250,7 +1359,9 @@ function rosterRow(p) {
   const actions = document.createElement('div')
   actions.className = 'actions'
   actions.append(mkBtn(t('actionRename'), 'ghost', () => { editingId = p.id; confirmingId = null; renderRoster(lastPeers) }))
-  if (p.connected) actions.append(mkBtn(t('actionKick'), 'ghost danger', () => { confirmingId = p.id; editingId = null; renderRoster(lastPeers) }))
+  // Offline peers stay registered until kicked or idle-GC'd — always offer
+  // remove so a stuck offline identity can be cleared from the roster.
+  actions.append(mkBtn(t('actionKick'), 'ghost danger', () => { confirmingId = p.id; editingId = null; renderRoster(lastPeers) }))
 
   row.append(presence, who, chip, state, badge, actions)
   return row
@@ -1398,7 +1509,11 @@ function groupRow(g) {
     renderGroups(lastGroups)
   }))
   actions.append(mkBtn(t('actionSend'), 'ghost', async () => {
-    const text = prompt(t('groupSend', { name: g.name ?? g.id }))
+    const text = await promptDialog({
+      title: t('groupSend', { name: g.name ?? g.id }),
+      placeholder: t('groupSendPh'),
+      multiline: true,
+    })
     if (!text) return
     try { await call('bridge_group_send', { group: g.id, message: text }); toast(t('groupSent', { name: g.name ?? g.id }), 'ok') }
     catch (e) { toast(String(e.message ?? e), 'err') }

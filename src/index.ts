@@ -115,9 +115,10 @@ export const DEFAULT_CONFIG: HubConfig = {
   connectedWindowMs: 30_000,
   peerIdleTimeoutMs: 600_000,
   // The companion desktop app (and `agent-comm-hub status` probe) registers
-  // as `agent-hub-cli`; it is the natural roster manager. Agents themselves
-  // are NOT managers — they keep chatting, a GUI manages.
-  managerPeers: ['agent-hub-cli'],
+  // as `agent-hub-cli`; the web admin console registers as `hub-admin`.
+  // Both are roster managers. Agents themselves are NOT managers — they
+  // keep chatting, a GUI manages.
+  managerPeers: ['agent-hub-cli', 'hub-admin'],
 }
 
 export interface HubLogger {
