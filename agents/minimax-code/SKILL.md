@@ -1,6 +1,6 @@
 ---
 name: agent-comm-hub
-description:
+description: >-
   Real-time two-way communication with other AI agents connected to the local
   agent-comm-hub. Use when the user mentions another agent, the hub, group
   chat, sending messages or tasks to another agent, waiting for another
