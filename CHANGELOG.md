@@ -13,9 +13,11 @@
 - **Legacy skill directory removed from `install-all.ps1`**: its four
   hard-coded `Sync-Skill … skills/agent-comm-hub` calls are gone, so the script
   no longer writes a second copy next to the `…/skills/agent-hub/` install.
-  DSH keeps `agent-comm-hub`, which its registry `serverName` override
-  requires. The agent tables in `README.md`, `README.zh.md` and
-  `agents/README.md` now list the path the installers actually use.
+  Every agent, DSH included, takes its skill directory from the global
+  `--server-name` option (default `agent-hub`); DSH's registry `serverName`
+  override only renames its MCP key. The agent tables in `README.md`,
+  `README.zh.md` and `agents/README.md` now list the path the installers
+  actually use.
 
 ## 0.8.1 (2026-09-06)
 

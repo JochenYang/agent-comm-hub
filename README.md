@@ -146,7 +146,7 @@ is manual (below).
 | Codex | `~/.codex/config.toml` | [`agents/codex/config.toml`](agents/codex/config.toml) | `~/.codex/skills/agent-hub/SKILL.md` |
 | zcode | `~/.zcode/cli/config.json` (`mcp.servers`) | [`agents/zcode/config.json`](agents/zcode/config.json) | `~/.zcode/skills/agent-hub/SKILL.md` |
 | Claude Code | project `.mcp.json` (manual; `~/.claude.json` is never touched) | [`agents/claude-code/.mcp.json`](agents/claude-code/.mcp.json) | `~/.claude/skills/agent-hub/SKILL.md` |
-| DeepSeek Harness (DSH) | `~/.dsh/profiles/*/cordis.patch.yml` (auto by `setup`) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-comm-hub/SKILL.md` |
+| DeepSeek Harness (DSH) | `~/.dsh/profiles/*/cordis.patch.yml` (auto by `setup`) | [`agents/dsh/cordis.patch.yml`](agents/dsh/cordis.patch.yml) | `$DSH_HOME/skills/agent-hub/SKILL.md` |
 
 > Streamable-http support varies by agent version; the templates use the fields each agent documents. If a client lacks HTTP MCP, wrap the endpoint with a stdio shim.
 
