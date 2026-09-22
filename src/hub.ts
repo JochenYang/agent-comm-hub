@@ -8,11 +8,17 @@ import { randomUUID } from 'node:crypto'
 import {
   BROADCAST,
   KINDS,
+  MAX_HOP,
   PEER_ID_PATTERN,
   TERMINAL_TASK_STATUSES,
+  aggregateTaskStatus,
+  nextTaskStatus,
   type AckContent,
+  type AckStatus,
+  type AssigneeState,
   type BridgeMessage,
   type MessageKind,
+  type TaskAckEvent,
   type TaskContent,
   type TaskRecord,
   type TaskStatus,
@@ -31,6 +37,8 @@ interface Waiter {
   from?: string
   /** Optional ack-ref filter: only `ack` messages whose `ref` matches. */
   ref?: string
+  /** Optional thread filter: only messages carrying this threadId match. */
+  threadId?: string
 }
 
 export interface HubOptions {
@@ -60,6 +68,8 @@ export interface HubOptions {
   /** Called when a group channel changes (create/delete or a membership
    * edit) — the persistence hook for the remote-mode SQLite store. */
   onGroupsChanged?: () => void
+  /** Called when a task ledger row is created/updated (ack, timeout, delivery). */
+  onTaskChanged?: (task: TaskRecord) => void
   /** Called when the idle GC evicts a peer. */
   onPeerGc?: (peerId: string) => void
   /** Live-channel check: peers returning true are skipped by the idle GC. */
@@ -135,6 +145,8 @@ export class AgentHub {
   private readonly groups = new Map<string, GroupState>()
   /** Task ledger: task message id → record (status + ack timeline). */
   private readonly taskLedger = new Map<string, TaskRecord>()
+  /** SLA timers keyed by task id (cleared when the task turns terminal). */
+  private readonly taskTimers = new Map<string, NodeJS.Timeout>()
   private readonly gcTimer: NodeJS.Timeout | undefined
 
   constructor(private readonly options: HubOptions) {
@@ -150,6 +162,8 @@ export class AgentHub {
   /** Stop the idle GC (call when the hub shuts down). */
   dispose(): void {
     if (this.gcTimer !== undefined) clearInterval(this.gcTimer)
+    for (const timer of this.taskTimers.values()) clearTimeout(timer)
+    this.taskTimers.clear()
   }
 
   private gcTick(idleTimeoutMs: number): void {
@@ -338,32 +352,55 @@ export class AgentHub {
   }
 
   /** Send a chat/notice text message to `to` (or {@link BROADCAST}). */
-  send(from: string, to: string, kind: 'chat' | 'notice', content: string): BridgeMessage {
-    return this.route(from, to, kind, content)
+  send(from: string, to: string, kind: 'chat' | 'notice', content: string, opts?: { ref?: string; threadId?: string }): BridgeMessage {
+    return this.route(from, to, kind, content, opts?.ref, opts?.threadId)
   }
 
-  /** Send a structured task message to `to` (or {@link BROADCAST}). Records
-   * a ledger entry so the sender can later query status / wait for acks. */
-  sendTask(from: string, to: string, task: { prompt: string; context?: string; deliverable?: string }): BridgeMessage {
-    const message = this.route(from, to, 'task', JSON.stringify(task))
+  /** Send a structured task message to `to` (peer, {@link BROADCAST}, or a
+   * group id). Records a ledger entry so the sender can later query status /
+   * wait for acks. */
+  sendTask(from: string, to: string, task: TaskContent): BridgeMessage {
+    const threadId = task.threadId
+    const message = this.route(from, to, 'task', JSON.stringify(task), undefined, threadId)
     this.recordTask(message, task)
     return message
   }
 
   /** Send an acknowledgement back to the sender of `ref`. Updates the task
-   * ledger when `ref` is a known task; chat/notice refs still route. */
-  sendAck(from: string, ref: string, ack: { status: 'accepted' | 'rejected' | 'done' | 'failed'; note?: string }): BridgeMessage {
-    const original = this.historyRing.findLast(message => message.id === ref)
-    if (!original) throw new Error(`cannot ack unknown message: ${ref}`)
-    const message = this.route(from, original.from, 'ack', JSON.stringify(ack), ref)
+   * ledger when `ref` is a known task (looked up in the ledger first, so acks
+   * survive history-ring eviction); chat/notice refs still route via history. */
+  sendAck(from: string, ref: string, ack: { status: AckStatus; note?: string; progress?: number }): BridgeMessage {
+    const task = this.taskLedger.get(ref)
+    let target: string
+    if (task !== undefined) {
+      target = task.from
+    } else {
+      const original = this.historyRing.findLast(message => message.id === ref)
+      if (!original) throw new Error(`cannot ack unknown message: ${ref}`)
+      target = original.from
+    }
+    const message = this.route(from, target, 'ack', JSON.stringify(ack), ref)
     this.applyAckToLedger(message, from, ref, ack)
     return message
+  }
+
+  /** Resolve the peer ids a task is assigned to (broadcast / group fan-out). */
+  private resolveAssignees(from: string, to: string): string[] {
+    if (to === BROADCAST) return this.peers().filter(peer => peer !== from)
+    const group = this.groups.get(to)
+    if (group !== undefined) return group.members.filter(member => member !== from)
+    return [to]
   }
 
   /** Create or refresh the ledger row for a newly sent task. */
   private recordTask(message: BridgeMessage, task: TaskContent): void {
     const now = message.ts
-    this.taskLedger.set(message.id, {
+    const assigneeIds = this.resolveAssignees(message.from, message.to)
+    const assignees: AssigneeState[] = assigneeIds.map(peerId => ({ peerId, status: 'pending', acks: [] }))
+    const timeoutMs = typeof task.timeoutMs === 'number' && Number.isFinite(task.timeoutMs) && task.timeoutMs > 0
+      ? Math.floor(task.timeoutMs)
+      : undefined
+    const record: TaskRecord = {
       id: message.id,
       from: message.from,
       to: message.to,
@@ -372,31 +409,125 @@ export class AgentHub {
       ...(task.deliverable !== undefined ? { deliverable: task.deliverable } : {}),
       status: 'pending',
       acks: [],
+      assignees,
+      ...(timeoutMs !== undefined ? { timeoutMs, deadlineAt: now + timeoutMs } : {}),
+      ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
       createdAt: now,
       updatedAt: now,
-    })
+    }
+    this.taskLedger.set(message.id, record)
+    this.scheduleTaskTimeout(record)
     this.evictOverflowTasks()
+    this.options.onTaskChanged?.(this.taskOf(record.id)!)
   }
 
-  /** Fold an ack into the task's timeline and status. Unknown refs are a
-   * no-op (chat/notice can be acked for routing without a ledger row). */
+  /** Arm the SLA timer for a task that supplied `timeoutMs`. */
+  private scheduleTaskTimeout(record: TaskRecord): void {
+    if (record.deadlineAt === undefined) return
+    const delay = Math.max(0, record.deadlineAt - Date.now())
+    const timer = setTimeout(() => this.fireTaskTimeout(record.id), delay)
+    timer.unref?.()
+    this.taskTimers.set(record.id, timer)
+  }
+
+  /** Mark a non-terminal task `timeout` and leave a system timeline event. */
+  private fireTaskTimeout(taskId: string): void {
+    this.taskTimers.delete(taskId)
+    const record = this.taskLedger.get(taskId)
+    if (record === undefined) return
+    if (TERMINAL_TASK_STATUSES.includes(record.status)) return
+    const now = Date.now()
+    const event: TaskAckEvent = {
+      from: record.to,
+      status: 'failed',
+      note: `task timed out after ${record.timeoutMs ?? 0}ms without a terminal ack`,
+      ts: now,
+      messageId: `timeout-${record.id}`,
+      applied: true,
+      system: true,
+    }
+    record.acks.push(event)
+    for (const assignee of record.assignees) {
+      if (!TERMINAL_TASK_STATUSES.includes(assignee.status)) {
+        assignee.status = 'timeout'
+        assignee.acks.push({ ...event })
+      }
+    }
+    record.status = 'timeout'
+    record.updatedAt = now
+    this.clearTaskTimer(taskId)
+    this.options.onTaskChanged?.(this.taskOf(taskId)!)
+  }
+
+  private clearTaskTimer(taskId: string): void {
+    const timer = this.taskTimers.get(taskId)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      this.taskTimers.delete(taskId)
+    }
+  }
+
+  /** Note that `target` has taken delivery of a task (waiter handoff / queue). */
+  private markTaskDelivered(taskId: string, target: string, ts: number): void {
+    const record = this.taskLedger.get(taskId)
+    if (record === undefined) return
+    const assignee = record.assignees.find(a => a.peerId === target)
+    if (assignee === undefined || assignee.deliveredMs !== undefined) return
+    assignee.deliveredMs = ts
+    record.updatedAt = ts
+    this.options.onTaskChanged?.(this.taskOf(taskId)!)
+  }
+
+  /**
+   * Fold an ack into the task's timeline and (when legal) its status.
+   * - Unknown refs are a no-op (chat/notice can be acked for routing without a ledger row).
+   * - Terminal tasks keep the event on the timeline with `applied: false`.
+   * - Broadcast / group tasks update the acking assignee first, then re-aggregate.
+   */
   private applyAckToLedger(
     message: BridgeMessage,
     from: string,
     ref: string,
-    ack: { status: AckContent['status']; note?: string },
+    ack: { status: AckStatus; note?: string; progress?: number },
   ): void {
     const record = this.taskLedger.get(ref)
     if (record === undefined) return
-    record.acks.push({
+    const next = nextTaskStatus(record.status, ack.status)
+    // For multi-assignee tasks the transition is judged per assignee; the
+    // aggregate status is recomputed afterwards. Single-target tasks use the
+    // aggregate (== the one assignee) as the gate.
+    const assignee = record.assignees.find(a => a.peerId === from)
+    const assigneeNext = assignee === undefined ? null : nextTaskStatus(assignee.status, ack.status)
+    const applied = record.assignees.length <= 1
+      ? next !== null
+      : assigneeNext !== null
+
+    const event: TaskAckEvent = {
       from,
       status: ack.status,
       ...(ack.note !== undefined ? { note: ack.note } : {}),
+      ...(typeof ack.progress === 'number' && Number.isFinite(ack.progress)
+        ? { progress: Math.max(0, Math.min(100, ack.progress)) }
+        : {}),
       ts: message.ts,
       messageId: message.id,
-    })
-    record.status = ack.status as TaskStatus
+      applied,
+    }
+    record.acks.push(event)
+
+    if (assignee !== undefined && assigneeNext !== null) {
+      assignee.status = assigneeNext
+      assignee.acks.push({ ...event })
+    }
+
+    if (record.assignees.length <= 1) {
+      if (next !== null) record.status = next
+    } else {
+      record.status = aggregateTaskStatus(record.assignees)
+    }
     record.updatedAt = message.ts
+    if (TERMINAL_TASK_STATUSES.includes(record.status)) this.clearTaskTimer(record.id)
+    this.options.onTaskChanged?.(this.taskOf(record.id)!)
   }
 
   /** Keep the ledger bounded: drop oldest terminal tasks first. */
@@ -408,39 +539,131 @@ export class AgentHub {
     let overflow = this.taskLedger.size - MAX_TASKS
     for (const record of evictable) {
       if (overflow <= 0) break
+      this.clearTaskTimer(record.id)
       this.taskLedger.delete(record.id)
       overflow--
     }
   }
 
-  /** One task by message id (the ack `ref`). */
+  /** Deep-ish copy of one task by message id (the ack `ref`). */
   taskOf(ref: string): TaskRecord | undefined {
     const record = this.taskLedger.get(ref)
-    return record === undefined ? undefined : { ...record, acks: record.acks.map(a => ({ ...a })) }
+    if (record === undefined) return undefined
+    return {
+      ...record,
+      acks: record.acks.map(a => ({ ...a })),
+      assignees: record.assignees.map(a => ({ ...a, acks: a.acks.map(e => ({ ...e })) })),
+    }
   }
 
   /**
    * Tasks involving `peer`. `role`:
    * - `sent` — tasks this peer delegated (`from`)
-   * - `received` — tasks addressed to this peer (or broadcast)
+   * - `received` — tasks addressed to this peer, a group they are in, or broadcast
    * - `all` (default) — either side
    * Optional `status` filter matches the ledger's current status.
    */
-  listTasks(peerId: string, options?: { role?: 'sent' | 'received' | 'all'; status?: TaskStatus; limit?: number }): TaskRecord[] {
+  listTasks(peerId: string | 'all', options?: { role?: 'sent' | 'received' | 'all'; status?: TaskStatus; limit?: number }): TaskRecord[] {
     const role = options?.role ?? 'all'
     const limit = Math.max(1, options?.limit ?? 50)
     const out: TaskRecord[] = []
     for (const record of this.taskLedger.values()) {
-      const isSent = record.from === peerId
-      const isReceived = record.to === peerId || record.to === BROADCAST
-      if (role === 'sent' && !isSent) continue
-      if (role === 'received' && !isReceived) continue
-      if (role === 'all' && !isSent && !isReceived) continue
+      if (peerId !== 'all') {
+        const isSent = record.from === peerId
+        const isReceived = record.to === peerId
+          || record.to === BROADCAST
+          || record.assignees.some(a => a.peerId === peerId)
+          || (this.groups.get(record.to)?.members.includes(peerId) ?? false)
+        if (role === 'sent' && !isSent) continue
+        if (role === 'received' && !isReceived) continue
+        if (role === 'all' && !isSent && !isReceived) continue
+      }
       if (options?.status !== undefined && record.status !== options.status) continue
-      out.push({ ...record, acks: record.acks.map(a => ({ ...a })) })
+      const copy = this.taskOf(record.id)
+      if (copy !== undefined) out.push(copy)
     }
     out.sort((a, b) => b.updatedAt - a.updatedAt)
     return out.slice(0, limit)
+  }
+
+  /** Snapshot of every task (persistence). */
+  exportTasks(): TaskRecord[] {
+    return [...this.taskLedger.values()].map(record => this.taskOf(record.id)!).filter(Boolean)
+  }
+
+  /** Restore the task ledger at boot (and re-arm SLA timers). */
+  importTasks(tasks: unknown): number {
+    if (!Array.isArray(tasks)) return 0
+    let count = 0
+    for (const raw of tasks) {
+      if (typeof raw !== 'object' || raw === null) continue
+      const t = raw as Record<string, unknown>
+      if (typeof t.id !== 'string' || typeof t.from !== 'string' || typeof t.to !== 'string' || typeof t.prompt !== 'string') continue
+      if (typeof t.status !== 'string' || !(TERMINAL_TASK_STATUSES as readonly string[]).includes(t.status) && t.status !== 'pending' && t.status !== 'accepted' && t.status !== 'working') continue
+      const acks: TaskAckEvent[] = Array.isArray(t.acks)
+        ? t.acks.flatMap(rawAck => {
+            if (typeof rawAck !== 'object' || rawAck === null) return []
+            const a = rawAck as Record<string, unknown>
+            if (typeof a.from !== 'string' || typeof a.status !== 'string' || typeof a.ts !== 'number' || typeof a.messageId !== 'string') return []
+            return [{
+              from: a.from,
+              status: a.status as AckStatus,
+              ...(typeof a.note === 'string' ? { note: a.note } : {}),
+              ...(typeof a.progress === 'number' ? { progress: a.progress } : {}),
+              ts: a.ts,
+              messageId: a.messageId,
+              applied: a.applied !== false,
+              ...(a.system === true ? { system: true as const } : {}),
+            }]
+          })
+        : []
+      const assignees: AssigneeState[] = Array.isArray(t.assignees) && t.assignees.length > 0
+        ? t.assignees.flatMap(rawA => {
+            if (typeof rawA !== 'object' || rawA === null) return []
+            const a = rawA as Record<string, unknown>
+            if (typeof a.peerId !== 'string' || typeof a.status !== 'string') return []
+            return [{
+              peerId: a.peerId,
+              status: a.status as TaskStatus,
+              ...(typeof a.deliveredMs === 'number' ? { deliveredMs: a.deliveredMs } : {}),
+              acks: Array.isArray(a.acks) ? a.acks.flatMap(rawE => {
+                if (typeof rawE !== 'object' || rawE === null) return []
+                const e = rawE as Record<string, unknown>
+                if (typeof e.from !== 'string' || typeof e.status !== 'string' || typeof e.ts !== 'number' || typeof e.messageId !== 'string') return []
+                return [{
+                  from: e.from,
+                  status: e.status as AckStatus,
+                  ...(typeof e.note === 'string' ? { note: e.note } : {}),
+                  ts: e.ts,
+                  messageId: e.messageId,
+                  applied: e.applied !== false,
+                }]
+              }) : [],
+            }]
+          })
+        : [{ peerId: t.to, status: t.status as TaskStatus, acks: [] }]
+      const record: TaskRecord = {
+        id: t.id,
+        from: t.from,
+        to: t.to,
+        prompt: t.prompt,
+        ...(typeof t.context === 'string' ? { context: t.context } : {}),
+        ...(typeof t.deliverable === 'string' ? { deliverable: t.deliverable } : {}),
+        status: t.status as TaskStatus,
+        acks,
+        assignees,
+        ...(typeof t.timeoutMs === 'number' ? { timeoutMs: t.timeoutMs } : {}),
+        ...(typeof t.deadlineAt === 'number' ? { deadlineAt: t.deadlineAt } : {}),
+        ...(typeof t.threadId === 'string' ? { threadId: t.threadId } : {}),
+        createdAt: typeof t.createdAt === 'number' ? t.createdAt : Date.now(),
+        updatedAt: typeof t.updatedAt === 'number' ? t.updatedAt : Date.now(),
+      }
+      this.taskLedger.set(record.id, record)
+      this.scheduleTaskTimeout(record)
+      count++
+    }
+    this.evictOverflowTasks()
+    return count
   }
 
   /** Recent messages involving `peer` (inbound and outbound, plus group
@@ -536,20 +759,7 @@ export class AgentHub {
     const group = this.groups.get(groupId)
     if (group === undefined) throw new Error(`unknown group: ${groupId}`)
     if (!group.members.includes(from)) throw new Error(`peer '${from}' is not a member of group '${groupId}'`)
-    const message: BridgeMessage = {
-      id: randomUUID(),
-      from,
-      to: groupId,
-      kind: 'chat',
-      content,
-      channel: groupId,
-      ts: Date.now(),
-    }
-    this.lastSeen.set(from, message.ts)
-    for (const member of group.members) {
-      if (member !== from && this.lastSeen.has(member)) this.deliver(member, message)
-    }
-    return message
+    return this.route(from, groupId, 'chat', content)
   }
 
   /** Snapshot of every group for persistence. */
@@ -601,6 +811,7 @@ export class AgentHub {
         content: m.content,
         ...(typeof m.ref === 'string' ? { ref: m.ref } : {}),
         ...(typeof m.channel === 'string' ? { channel: m.channel } : {}),
+        ...(typeof m.threadId === 'string' ? { threadId: m.threadId } : {}),
         ts: m.ts,
       })
     }
@@ -636,6 +847,7 @@ export class AgentHub {
           content: m.content,
           ...(typeof m.ref === 'string' ? { ref: m.ref } : {}),
           ...(typeof m.channel === 'string' ? { channel: m.channel } : {}),
+          ...(typeof m.threadId === 'string' ? { threadId: m.threadId } : {}),
           ts: m.ts,
         })
       }
@@ -690,11 +902,12 @@ export class AgentHub {
    * a multi-message burst (or a reconnect with a full queue) would silently
    * lose messages that never reach wait/poll again.
    */
-  wait(peerId: string, timeoutMs: number, from?: string, signal?: AbortSignal, ref?: string): Promise<WaitResult> {
+  wait(peerId: string, timeoutMs: number, from?: string, signal?: AbortSignal, ref?: string, threadId?: string): Promise<WaitResult> {
     const startedAt = Date.now()
     const matches = (message: BridgeMessage): boolean => {
       if (from !== undefined && message.from !== from) return false
       if (ref !== undefined && !(message.kind === 'ack' && message.ref === ref)) return false
+      if (threadId !== undefined && message.threadId !== threadId) return false
       return true
     }
     const queue = this.queues.get(peerId)
@@ -740,15 +953,30 @@ export class AgentHub {
         onAbort,
         ...(from !== undefined ? { from } : {}),
         ...(ref !== undefined ? { ref } : {}),
+        ...(threadId !== undefined ? { threadId } : {}),
       })
       this.waiters.set(peerId, list)
     })
   }
 
-  /** Create a message from `from` addressed to `to` and deliver it. */
-  private route(from: string, to: string, kind: MessageKind, content: string, ref?: string): BridgeMessage {
+  /** Create a message from `from` addressed to `to` and deliver it. `to` may
+   *  be a peer id, {@link BROADCAST}, or a group id. */
+  private route(from: string, to: string, kind: MessageKind, content: string, ref?: string, threadId?: string): BridgeMessage {
     if (!this.lastSeen.has(from)) throw new Error(`sender not registered: ${from}`)
-    if (to !== BROADCAST && !this.lastSeen.has(to)) throw new Error(`unknown recipient: ${to} (registered peers: ${this.peers().join(', ') || 'none'})`)
+    const group = this.groups.get(to)
+    if (to !== BROADCAST && group === undefined && !this.lastSeen.has(to)) {
+      throw new Error(`unknown recipient: ${to} (registered peers: ${this.peers().join(', ') || 'none'})`)
+    }
+    // Hop = chain depth along a ref parent (reply / ack / re-delegation).
+    // Caps runaway A→B→C→… loops at MAX_HOP (same idea as MiMo session-chat).
+    let hop = 0
+    if (ref !== undefined) {
+      const parent = this.historyRing.findLast(m => m.id === ref)
+      hop = (parent?.hop ?? 0) + 1
+      if (hop > MAX_HOP) {
+        throw new Error(`hop limit exceeded (max ${MAX_HOP}): start a new task/thread instead of extending this chain`)
+      }
+    }
     const message: BridgeMessage = {
       id: randomUUID(),
       from,
@@ -756,12 +984,26 @@ export class AgentHub {
       kind,
       content,
       ...(ref !== undefined ? { ref } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
+      ...(group !== undefined ? { channel: group.id } : {}),
+      ...(hop > 0 ? { hop } : {}),
       ts: Date.now(),
     }
     this.lastSeen.set(from, message.ts)
+    // Record ONCE per message at send time (not once per recipient): broadcast
+    // and group fan-out used to call remember() inside every deliver(), which
+    // duplicated history rows and multi-fired onMessage/pushRelay. Recording
+    // here also means manager SSE sees traffic when it is SENT — not when a
+    // recipient's waiter finally drains it (the desktop "only after the other
+    // agent picks it up" lag).
+    this.remember(message)
     if (to === BROADCAST) {
       for (const peer of this.peers()) {
         if (peer !== from) this.deliver(peer, message)
+      }
+    } else if (group !== undefined) {
+      for (const member of group.members) {
+        if (member !== from) this.deliver(member, message)
       }
     } else {
       this.deliver(to, message)
@@ -769,21 +1011,25 @@ export class AgentHub {
     return message
   }
 
-  /** Queue or hand off a message; wake the first matching waiter for its target. */
+  /** Queue or hand off a message; wake the first matching waiter for its target.
+   *  History / onMessage are recorded by the caller (route / sendToGroup) —
+   *  exactly once per message, never per fan-out target. */
   private deliver(target: string, message: BridgeMessage): void {
     const list = this.waiters.get(target) ?? []
     const index = list.findIndex(waiter => {
       if (waiter.from !== undefined && waiter.from !== message.from) return false
       if (waiter.ref !== undefined && !(message.kind === 'ack' && message.ref === waiter.ref)) return false
+      if (waiter.threadId !== undefined && message.threadId !== waiter.threadId) return false
       return true
     })
+    // Task delivery bookkeeping runs for both handoff and queue paths.
+    if (message.kind === 'task') this.markTaskDelivered(message.id, target, message.ts)
     if (index >= 0) {
       const [waiter] = list.splice(index, 1)
       this.waiters.set(target, list)
       // Do NOT run waiter.onAbort here — it would settle the waiter as a
       // timeout first; a later abort is a harmless no-op (settle is idempotent).
       clearTimeout(waiter.timer)
-      this.remember(message)
       waiter.resolve({ type: 'message', message })
       return
     }
@@ -791,16 +1037,11 @@ export class AgentHub {
     if (queue.length >= this.options.maxQueue) queue.shift()
     queue.push(message)
     this.queues.set(target, queue)
-    // Queue-path messages enter the history ring HERE, not at drain: the
-    // ring is the archive of everything SENT (queued or handed to a waiter,
-    // exactly once per message), which is also what makes history survive a
-    // restart when the recipient never drained before shutdown.
-    this.remember(message)
     this.options.onQueued?.(message, target)
   }
 
-  /** Append a delivered message to the history ring (and fire the
-   * persistence hook — one call per message, delivered or queued). */
+  /** Append a sent message to the history ring (and fire the persistence /
+   * relay hooks). Exactly one call per message — see route() / sendToGroup(). */
   private remember(message: BridgeMessage): void {
     this.historyRing.push(message)
     if (this.historyRing.length > this.options.historyLimit) this.historyRing.splice(0, this.historyRing.length - this.options.historyLimit)

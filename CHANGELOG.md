@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.9.0 (2026-09-22)
+
+- **Task ledger state machine**: `bridge_ack` gains a non-terminal `working`
+  status plus an optional `progress` (0-100), so a long-running task reports
+  intermediate beats instead of one terminal jump. The four original statuses
+  keep working; illegal transitions and any ack after a terminal status are
+  still recorded on the timeline with `applied: false` and never reopen the
+  task. `bridge_task_status` / `bridge_tasks` show the new `working` state,
+  the progress of each ack, and a per-assignee row (status, first-delivery
+  time, its own ack slice) for broadcast and group tasks.
+- **Soft task SLA (`timeoutMs`)**: `bridge_task` accepts an optional
+  `timeoutMs`. When it expires without a terminal ack the hub moves a
+  still-open task to the new `timeout` status and appends a hub-synthesized
+  timeline event (`system: true`); terminal tasks are left alone. SLA timers
+  are re-armed when the ledger is restored, so a restart does not silently
+  drop a running deadline.
+- **Threads and hop-limited reply chains**: messages now carry an optional
+  `threadId` — settable on `bridge_chat` (which also accepts a `ref` for
+  replies) and `bridge_task`, and filterable in `bridge_wait({ threadId })` —
+  so a multi-turn A2A dialog no longer has to share one mailbox slot with
+  unrelated traffic. `ref` chains are capped at `MAX_HOP` (5) hops: the 6th
+  send is rejected at send time with a `hop limit exceeded` error instead of
+  letting two agents ping-pong forever.
+- **Ack routing survives history eviction**: `bridge_ack` resolves its target
+  from the task ledger first and only falls back to the history ring, so a
+  late ack or progress beat still reaches the original sender after a busy
+  hub has evicted the task message. `bridge_chat` may also address a group id
+  directly.
+- **Duplicate history / relay fix**: broadcast and group fan-out used to call
+  the history append once per recipient, so one broadcast produced N history
+  rows with the same id and fired N SSE relay pushes. A message is now
+  recorded exactly once, at send time — group messages enter history and the
+  relay view like any other, and the desktop relay shows a message when it is
+  sent rather than when a recipient finally drains its waiter.
+- **Reliable state persistence**: a message, an offline mailbox change, or a
+  task-ledger transition (new task, ack, SLA timeout, first delivery) now
+  schedules a state save through the same 500 ms debounce. Previously only
+  roster and group events did, so a crash between two such events could lose
+  the ledger the admin board reads back. Remote mode also persists the ledger
+  to SQLite (new `tasks` table plus `thread_id` columns, migrated in place),
+  restoring it — and any pending SLA — on boot.
+- **Admin console rewritten**: `/admin` is now a single self-contained React
+  page (Tailwind + beui components, built by `npm run build:admin` into
+  `assets/admin.html`) in place of the old hand-written HTML. It shows the
+  roster with client name/version, source IP and a `walk-in` marker for
+  unclaimed anonymous identities; a members-and-tokens panel that issues,
+  revokes, and toggles plaintext tokens (the same table as the CLI `auth`
+  commands, manager token only); a copyable MCP configuration snippet
+  (generic HTTP + opencode + curl probe) generated right after issuing a
+  token; a task ledger board; groups; and a read-only message trace. Tables
+  size themselves to their contents up to a cap and only scroll internally
+  beyond it.
+- Compatibility: every field and status added here is optional or additive, so
+  agents running an already-installed 0.8.x `SKILL.md` keep working unchanged.
+  Test suite grows to 282 checks (156 smoke + 37 setup + 11 ops + 35 herdr +
+  23 discovery + 20 e2e).
+
 ## 0.8.2 (2026-09-11)
 
 - **Agent skill frontmatter fix**: the shipped `agents/SKILL.md` (and the

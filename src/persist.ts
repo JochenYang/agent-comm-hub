@@ -1,23 +1,24 @@
 /**
  * SQLite persistence for remote-mode hubs (`--db <file>`), backed by the
  * Node built-in `node:sqlite` — the only way to keep the zero-dependency
- * invariant while surviving server restarts. Persists four things:
- * history ring, offline mailboxes, peer profiles (user info), and groups.
+ * invariant while surviving server restarts. Persists five things:
+ * history ring, offline mailboxes, peer profiles (user info), groups, and
+ * the task ledger.
  *
  * Write strategy: message inserts are buffered and flushed on a debounce
- * (plus an explicit flush on shutdown); mailboxes/profiles/groups are
+ * (plus an explicit flush on shutdown); mailboxes/profiles/groups/tasks are
  * re-snapshotted wholesale on every flush — at team scale these are tens of
  * rows, so correctness beats incremental bookkeeping.
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { BridgeMessage, MessageKind } from './protocol.js'
+import type { BridgeMessage, MessageKind, TaskRecord } from './protocol.js'
 import type { GroupState, PeerProfile } from './hub.js'
 
 const KIND_NAMES: readonly string[] = ['chat', 'task', 'notice', 'ack']
 
 function messageToRow(message: BridgeMessage): (string | number | null)[] {
-  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.ts]
+  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts]
 }
 
 function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
@@ -37,6 +38,7 @@ function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
     content,
     ...(typeof row.ref === 'string' && row.ref !== '' ? { ref: row.ref } : {}),
     ...(typeof row.channel === 'string' && row.channel !== '' ? { channel: row.channel } : {}),
+    ...(typeof row.thread_id === 'string' && row.thread_id !== '' ? { threadId: row.thread_id } : {}),
     ts,
   }
 }
@@ -46,6 +48,7 @@ export interface PersistedState {
   messages: BridgeMessage[]
   mailboxes: Record<string, BridgeMessage[]>
   groups: GroupState[]
+  tasks: TaskRecord[]
 }
 
 /** SQLite-backed state store. All methods are synchronous — the hub core is
@@ -67,16 +70,27 @@ export class SQLiteStateStore {
       );
       CREATE TABLE IF NOT EXISTS messages (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, ts INTEGER NOT NULL
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS mailboxes (
         peer TEXT NOT NULL, seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, ts INTEGER NOT NULL
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS groups (
         id TEXT PRIMARY KEY, name TEXT, members TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY, body TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
     `)
+    // Migrate pre-thread_id databases in place (additive, never destructive).
+    for (const table of ['messages', 'mailboxes']) {
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN thread_id TEXT`)
+      } catch {
+        // column already present
+      }
+    }
     log.info(`sqlite state open: ${file}`)
   }
 
@@ -85,17 +99,17 @@ export class SQLiteStateStore {
     this.buffer.push(message)
   }
 
-  /** Insert buffered messages and re-snapshot mailboxes/profiles/groups. */
-  flush(snapshot: { mailboxes: Record<string, BridgeMessage[]>; profiles: PeerProfile[]; groups: GroupState[] }): void {
+  /** Insert buffered messages and re-snapshot mailboxes/profiles/groups/tasks. */
+  flush(snapshot: { mailboxes: Record<string, BridgeMessage[]>; profiles: PeerProfile[]; groups: GroupState[]; tasks: TaskRecord[] }): void {
     const insert = this.db.prepare(
-      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const message of this.buffer.splice(0, this.buffer.length)) {
       insert.run(...messageToRow(message))
     }
     this.db.exec('DELETE FROM mailboxes')
     const insertMail = this.db.prepare(
-      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const [peer, queue] of Object.entries(snapshot.mailboxes)) {
       for (const message of queue) insertMail.run(peer, ...messageToRow(message))
@@ -113,6 +127,13 @@ export class SQLiteStateStore {
     )
     for (const group of snapshot.groups) {
       insertGroup.run(group.id, group.name ?? null, JSON.stringify(group.members), group.createdBy, group.createdAt)
+    }
+    this.db.exec('DELETE FROM tasks')
+    const insertTask = this.db.prepare(
+      'INSERT INTO tasks (id, body, updated_at) VALUES (?, ?, ?)',
+    )
+    for (const task of snapshot.tasks) {
+      insertTask.run(task.id, JSON.stringify(task), task.updatedAt)
     }
     // Keep the ring bounded on disk too (headroom for concurrent readers).
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number | bigint }
@@ -164,7 +185,17 @@ export class SQLiteStateStore {
         // corrupted row: skip
       }
     }
-    return { profiles, messages, mailboxes, groups }
+    const tasks: TaskRecord[] = []
+    for (const row of this.db.prepare('SELECT * FROM tasks').all() as Array<Record<string, unknown>>) {
+      if (typeof row.body !== 'string') continue
+      try {
+        const parsed = JSON.parse(row.body) as unknown
+        if (typeof parsed === 'object' && parsed !== null) tasks.push(parsed as TaskRecord)
+      } catch {
+        // corrupted row: skip
+      }
+    }
+    return { profiles, messages, mailboxes, groups, tasks }
   }
 
   /** Final flush + close (hub shutdown). */

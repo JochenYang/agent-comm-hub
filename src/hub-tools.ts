@@ -20,11 +20,13 @@ export const DEFAULT_WAIT_MS = 30_000
 export type PresentedMessage = Omit<BridgeMessage, 'content'> & { content: string | TaskContent | AckContent }
 
 export function present(message: BridgeMessage): PresentedMessage {
-  const { ref, channel, ...rest } = message
+  const { ref, channel, threadId, hop, ...rest } = message
   return {
     ...rest,
     ...(ref !== undefined ? { ref } : {}),
     ...(channel !== undefined ? { channel } : {}),
+    ...(threadId !== undefined ? { threadId } : {}),
+    ...(hop !== undefined ? { hop } : {}),
     content: decodeContent(message.kind, message.content),
   }
 }
@@ -191,7 +193,10 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     from: message.from,
     to: message.to,
     kind: message.kind,
+    ...(message.ref !== undefined ? { ref: message.ref } : {}),
     ...(message.channel !== undefined ? { channel: message.channel } : {}),
+    ...(message.threadId !== undefined ? { threadId: message.threadId } : {}),
+    ...(message.hop !== undefined ? { hop: message.hop } : {}),
     ts: message.ts,
   })
 
@@ -365,22 +370,32 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_chat',
-      description: 'Send a chat message to another agent on the hub. Use bridge_wait (long-poll) or bridge_poll to receive replies. `to` is the target peerId, or "all" to broadcast.',
+      description: 'Send a chat message to another agent on the hub. Use bridge_wait (long-poll) or bridge_poll to receive replies. `to` is the target peerId, a group id, or "all" to broadcast. Optional `threadId` groups multi-turn dialogs; optional `ref` marks a reply-to.',
       inputSchema: schema(
-        { to: str('Target peerId, or "all" to broadcast.'), message: str('The message text.') },
+        {
+          to: str('Target peerId, group id, or "all" to broadcast.'),
+          message: str('The message text.'),
+          threadId: optStr('Optional conversation / workflow thread id.'),
+          ref: optStr('Optional reply-to message id.'),
+        },
         ['to', 'message'],
       ),
-      handler: wrap(true, async (args, peer) => receipt(hub.send(peer, String(args.to), 'chat', String(args.message)))),
+      handler: wrap(true, async (args, peer) => receipt(hub.send(peer, String(args.to), 'chat', String(args.message), {
+        ...(args.threadId !== undefined ? { threadId: String(args.threadId) } : {}),
+        ...(args.ref !== undefined ? { ref: String(args.ref) } : {}),
+      }))),
     },
     {
       name: 'bridge_task',
-      description: 'Delegate a structured task to another agent. The receiving agent decides whether to accept; expect an ack (accepted/rejected/done/failed) via bridge_wait / bridge_poll. Track progress with bridge_task_status(ref) or bridge_tasks; wait specifically for the ack with bridge_wait({ ref }).',
+      description: 'Delegate a structured task to another agent (peer, group, or "all"). The assignee acks with accepted | working | rejected | done | failed (bridge_ack). Track with bridge_task_status(ref) / bridge_tasks; wait for the ack with bridge_wait({ ref }). Optional timeoutMs marks the task `timeout` when the SLA expires without a terminal ack.',
       inputSchema: schema(
         {
-          to: str('Target peerId, or "all" to broadcast.'),
+          to: str('Target peerId, group id, or "all" to broadcast.'),
           prompt: str('What the receiving agent should do.'),
           context: optStr('Optional background information for the task.'),
           deliverable: optStr('Optional expected deliverable description.'),
+          timeoutMs: int('Optional soft SLA in ms; hub marks the task timeout when it expires.'),
+          threadId: optStr('Optional conversation / workflow thread id.'),
         },
         ['to', 'prompt'],
       ),
@@ -388,47 +403,60 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         prompt: String(args.prompt),
         ...(args.context !== undefined ? { context: String(args.context) } : {}),
         ...(args.deliverable !== undefined ? { deliverable: String(args.deliverable) } : {}),
+        ...(args.timeoutMs !== undefined ? { timeoutMs: Number(args.timeoutMs) } : {}),
+        ...(args.threadId !== undefined ? { threadId: String(args.threadId) } : {}),
       }))),
     },
     {
       name: 'bridge_ack',
-      description: 'Acknowledge a message received from another agent (usually a delegated task): accepted | rejected | done | failed. The ack is routed back to the original sender of `ref` and updates the hub task ledger (see bridge_task_status / bridge_tasks).',
+      description: 'Acknowledge a message received from another agent (usually a delegated task): accepted | working | rejected | done | failed. The ack is routed back to the original sender of `ref` and updates the hub task ledger (see bridge_task_status / bridge_tasks). `working` + `progress` (0-100) report intermediate state without finishing the task. Terminal statuses lock the task; later acks are recorded but do not reopen it.',
       inputSchema: schema(
         {
           ref: str('The id of the message being acknowledged.'),
-          status: { type: 'string', enum: ['accepted', 'rejected', 'done', 'failed'], description: 'acknowledgement status.' },
+          status: { type: 'string', enum: ['accepted', 'working', 'rejected', 'done', 'failed'], description: 'acknowledgement status.' },
           note: optStr('Optional explanation for the acknowledgement.'),
+          progress: int('Optional 0-100 progress (meaningful with status=working).'),
         },
         ['ref', 'status'],
       ),
       handler: wrap(true, async (args, peer) => {
         const status = String(args.status)
-        const valid: AckContent['status'][] = ['accepted', 'rejected', 'done', 'failed']
+        const valid: AckContent['status'][] = ['accepted', 'working', 'rejected', 'done', 'failed']
         if (!valid.includes(status as AckContent['status'])) {
           throw new Error(`invalid ack status: ${status} (expected ${valid.join(' | ')})`)
         }
-        return receipt(hub.sendAck(peer, String(args.ref), { status: status as AckContent['status'], ...(args.note !== undefined ? { note: String(args.note) } : {}) }))
+        return receipt(hub.sendAck(peer, String(args.ref), {
+          status: status as AckContent['status'],
+          ...(args.note !== undefined ? { note: String(args.note) } : {}),
+          ...(args.progress !== undefined ? { progress: Number(args.progress) } : {}),
+        }))
       }),
     },
     {
       name: 'bridge_tasks',
-      description: 'List delegated tasks involving you, newest first. role=sent = tasks you assigned; role=received = tasks assigned to you (or broadcast); status filters the ledger state (pending/accepted/rejected/done/failed). Each row carries the full ack timeline.',
+      description: 'List delegated tasks involving you, newest first. role=sent = tasks you assigned; role=received = tasks assigned to you (or broadcast/group); status filters the ledger state (pending/accepted/working/rejected/done/failed/timeout). Each row carries the full ack timeline and per-assignee state.',
       inputSchema: schema({
         role: { type: 'string', enum: ['sent', 'received', 'all'], description: 'Which side of the task to list (default all).' },
-        status: { type: 'string', enum: ['pending', 'accepted', 'rejected', 'done', 'failed'], description: 'Only tasks whose current ledger status matches.' },
+        status: { type: 'string', enum: ['pending', 'accepted', 'working', 'rejected', 'done', 'failed', 'timeout'], description: 'Only tasks whose current ledger status matches.' },
+        peer: optStr('Manager only: "all" or another peerId for the admin board.'),
         limit: int('How many tasks to return (default 50).'),
       }),
-      handler: wrap(true, async (args, peer) => {
+      handler: wrap(true, async (args, peer, sessionId) => {
         const role = args.role === undefined ? undefined : String(args.role)
         if (role !== undefined && role !== 'sent' && role !== 'received' && role !== 'all') {
           throw new Error(`invalid role: ${role} (expected sent | received | all)`)
         }
         const status = args.status === undefined ? undefined : String(args.status)
-        const validStatus: TaskStatus[] = ['pending', 'accepted', 'rejected', 'done', 'failed']
+        const validStatus: TaskStatus[] = ['pending', 'accepted', 'working', 'rejected', 'done', 'failed', 'timeout']
         if (status !== undefined && !validStatus.includes(status as TaskStatus)) {
           throw new Error(`invalid status: ${status} (expected ${validStatus.join(' | ')})`)
         }
-        const tasks = hub.listTasks(peer, {
+        let target: string = peer
+        if (args.peer !== undefined) {
+          target = String(args.peer)
+          if (target !== peer) requireManager(peer, `listing tasks of '${target}'`, sessionId)
+        }
+        const tasks = hub.listTasks(target === 'all' ? 'all' : target, {
           ...(role !== undefined ? { role: role as 'sent' | 'received' | 'all' } : {}),
           ...(status !== undefined ? { status: status as TaskStatus } : {}),
           ...(args.limit !== undefined ? { limit: Number(args.limit) } : {}),
@@ -438,7 +466,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_task_status',
-      description: 'Status of one delegated task: current ledger state (pending → accepted → done/failed, or rejected), the original prompt/context/deliverable, and every ack event (who, status, note, when). Use the task message id (the same id you pass as bridge_ack ref).',
+      description: 'Status of one delegated task: current ledger state (pending → accepted/working → done/failed/timeout, or rejected), the original prompt/context/deliverable, per-assignee state, and every ack event (who, status, note, progress, when). Use the task message id (the same id you pass as bridge_ack ref).',
       inputSchema: schema({ ref: str('Task message id (the id returned by bridge_task, also used as ack ref).') }, ['ref']),
       handler: wrap(true, async (args, peer, sessionId) => {
         const ref = String(args.ref)
@@ -454,10 +482,11 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_wait',
-      description: 'Wait (long-poll) for the next message addressed to you. Resolves immediately when one is queued; otherwise blocks until one arrives or the timeout fires. `from` narrows to one sender. `ref` waits specifically for the ack of that task id. Loop this tool to hold a real-time conversation.',
+      description: 'Wait (long-poll) for the next message addressed to you. Resolves immediately when one is queued; otherwise blocks until one arrives or the timeout fires. `from` narrows to one sender. `ref` waits specifically for the ack of that task id. `threadId` narrows to one conversation thread. Loop this tool to hold a real-time conversation.',
       inputSchema: schema({
         from: optStr('Only wait for messages from this peerId.'),
         ref: optStr('Only wait for the ack of this task message id (bridge_task id).'),
+        threadId: optStr('Only wait for messages carrying this threadId.'),
         timeoutMs: int(`Max wait in milliseconds (default ${DEFAULT_WAIT_MS}, ceiling is server waitTimeoutMs).`),
       }),
       handler: wrap(true, async (args, peer) => presentWait(await hub.wait(
@@ -466,6 +495,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         args.from === undefined ? undefined : String(args.from),
         undefined,
         args.ref === undefined ? undefined : String(args.ref),
+        args.threadId === undefined ? undefined : String(args.threadId),
       ))),
     },
     {

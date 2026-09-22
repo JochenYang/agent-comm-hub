@@ -315,7 +315,8 @@ history attribution move atomically — queued messages and acks stay
 continuous. Renaming yourself is open to everyone; renaming/kicking
 **another** peer (`bridge_unregister { peer }`) or reading another peer's
 history (`bridge_history { peer }` / `peer: "all"`) requires the **manager**
-role (`--manager-peers`, default `agent-hub-cli` — the desktop GUI identity).
+role (`--manager-peers`, default `agent-hub-cli,hub-admin` — the desktop GUI
+and the web console identities).
 This is a convention on top of the loopback trust model, not authentication.
 
 Rosters persist: `--state-file` (default `~/.agent-comm-hub/roster.json`,
@@ -351,7 +352,7 @@ agent-comm-hub service install|uninstall [options]   one-shot auto-start
                          (default herdr, resolved via PATH)
 --herdr-timeout-ms <n>   Default cap for one herdr call in ms (default 30000)
 --manager-peers <ids>    Comma-separated roster managers, or "all"
-                         (default agent-hub-cli — the desktop GUI identity)
+                         (default agent-hub-cli,hub-admin — desktop GUI + web console)
 --state-file <path>      Roster persistence file
                          (default ~/.agent-comm-hub/roster.json; "off" = memory only)
 --url <u> / --server-name <n> / --remove / --dry-run   (setup/service/status)
@@ -429,7 +430,8 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (263 checks: 138 smoke + 36 setup + 11 ops + 35 herdr + 23 discover + 20 e2e)
+pnpm test             # test suite (282 checks: 156 smoke + 37 setup + 11 ops + 35 herdr + 23 discover + 20 e2e)
+npm run build:admin   # admin/ workspace (npm) → single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
 ```
@@ -479,4 +481,4 @@ Tests cover registration, duplicate rejection, chat routing, sender-filtered wai
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 64-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
+MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 282-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).

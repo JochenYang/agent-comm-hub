@@ -1,0 +1,131 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* shadcn semantic tokens (dark). beui / shadcn components read these through
+   tailwind.config.js (`hsl(var(--x))`), so every one of them must stay a
+   space-separated HSL triplet. Nothing outside this block may redefine them —
+   the console's own colours live in the `--brand*` scale below, which is why
+   that scale is not called `--accent` anymore. */
+@layer base {
+  :root {
+    --background: 222 22% 5%;
+    --foreground: 210 20% 95%;
+    --card: 222 20% 7%;
+    --card-foreground: 210 20% 95%;
+    --popover: 222 20% 7%;
+    --popover-foreground: 210 20% 95%;
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 11%;
+    --secondary: 217 19% 15%;
+    --secondary-foreground: 210 20% 95%;
+    --muted: 217 19% 15%;
+    --muted-foreground: 215 12% 65%;
+    --accent: 217 19% 15%;
+    --accent-foreground: 210 20% 95%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 20% 98%;
+    --success: 142 71% 45%;
+    --border: 217 19% 18%;
+    --input: 217 19% 18%;
+    --ring: 217 91% 60%;
+    --radius: 8px;
+  }
+  /* Project chrome only: scoped to the console shell so the utilities beui
+     renders inside it (button / input in the topbar, toasts, tables) keep
+     their own geometry instead of inheriting these. */
+  .app {
+    font: 400 13px/1.55 var(--font-ui);
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    min-height: 100%;
+    font: 400 13px/1.55 var(--font-ui);
+  }
+}
+
+/* Project tokens: primitives, then the semantic layers built on them. */
+:root {
+  color-scheme: dark;
+  --n-0: #0b0d10;
+  --n-1: #11141a;
+  --n-2: #171b22;
+  --n-3: #1e2430;
+  --n-4: #272e3c;
+  --n-5: #343c4d;
+  --n-7: #7b879c;
+  --n-8: #a8b3c7;
+  --n-9: #e8ecf4;
+  --blue-500: #3b82f6;
+  --blue-400: #60a5fa;
+  --green-500: #22c55e;
+  --amber-500: #f59e0b;
+  --red-500: #ef4444;
+  --cyan-500: #22d3ee;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-18: 18px;
+  --t-fast: 120ms;
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --radius-sm: 4px;
+  --radius-lg: var(--radius);
+  --radius-pill: 999px;
+  --bg: var(--n-0);
+  --surface: var(--n-1);
+  --surface-2: var(--n-2);
+  --surface-3: var(--n-3);
+  --line: #222a36;
+  --line-strong: var(--n-4);
+  --line-hover: var(--n-5);
+  --text: var(--n-9);
+  --text-dim: var(--n-8);
+  --text-faint: var(--n-7);
+  --brand: var(--blue-500);
+  --brand-strong: var(--blue-400);
+  --brand-wash: rgba(59, 130, 246, .14);
+  --brand-line: rgba(59, 130, 246, .38);
+  --ok: var(--green-500);
+  --ok-wash: rgba(34, 197, 94, .12);
+  --ok-line: rgba(34, 197, 94, .36);
+  --warn: var(--amber-500);
+  --warn-wash: rgba(245, 158, 11, .12);
+  --warn-line: rgba(245, 158, 11, .36);
+  --danger: var(--red-500);
+  --danger-wash: rgba(239, 68, 68, .12);
+  --danger-line: rgba(239, 68, 68, .36);
+  --info: var(--cyan-500);
+  --focus-ring: 0 0 0 3px var(--brand-wash);
+  --panel-header-bg: var(--surface-2);
+  /* --color-* is the namespace beui's own files reference (the table's active
+     column shadow reads var(--color-primary) from an inline style). Tailwind's
+     theme mapping above is a separate thing; both have to exist. */
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-success: hsl(var(--success));
+  --color-destructive: hsl(var(--destructive));
+  --color-border: hsl(var(--border));
+  --color-border-strong: var(--n-5);
+}
+
+::selection {
+  background: var(--brand-wash);
+}

@@ -33,7 +33,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.8.2'
+export const SERVER_VERSION = '0.9.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -252,7 +252,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     if (dbDirty && dbStore !== undefined) {
       dbDirty = false
       try {
-        dbStore.flush({ mailboxes: hub.exportMailboxes(), profiles: hub.exportProfiles(), groups: hub.exportGroups() })
+        dbStore.flush({ mailboxes: hub.exportMailboxes(), profiles: hub.exportProfiles(), groups: hub.exportGroups(), tasks: hub.exportTasks() })
       } catch (error) {
         log.warn(`sqlite flush failed: ${(error as Error).message}`)
       }
@@ -282,6 +282,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       if (dbStore !== undefined) {
         dbStore.appendMessage(message)
         dbDirty = true
+        scheduleSave()
       }
       try {
         pushRelay(message)
@@ -292,6 +293,15 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     onMailboxesChanged: () => {
       if (dbStore === undefined) return
       dbDirty = true
+      scheduleSave()
+    },
+    // Task ledger transitions (ack folding, SLA timeout, first delivery) are
+    // their own persistence trigger: without it a crash between two roster
+    // events loses the ledger state the admin board reads back.
+    onTaskChanged: () => {
+      if (dbStore === undefined) return
+      dbDirty = true
+      scheduleSave()
     },
     onGroupsChanged: () => {
       if (dbStore === undefined) return
@@ -345,6 +355,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       const restoredMessages = hub.importHistory(state.messages)
       const restoredQueued = hub.importMailboxes(state.mailboxes)
       const restoredGroups = hub.importGroups(state.groups)
+      const restoredTasks = hub.importTasks(state.tasks)
       if (restoredMessages + restoredQueued + restoredGroups > 0) {
         log.info(`state restored from ${resolved.db}: ${restoredMessages} message(s), ${restoredQueued} queued, ${restoredGroups} group(s)`)
         dbDirty = true
@@ -459,7 +470,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       flushSaves()
       if (dbStore !== undefined) {
         try {
-          dbStore.close({ mailboxes: hub.exportMailboxes(), profiles: hub.exportProfiles(), groups: hub.exportGroups() })
+          dbStore.close({ mailboxes: hub.exportMailboxes(), profiles: hub.exportProfiles(), groups: hub.exportGroups(), tasks: hub.exportTasks() })
         } catch (error) {
           log.warn(`sqlite close failed: ${(error as Error).message}`)
         }

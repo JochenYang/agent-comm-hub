@@ -238,6 +238,11 @@ try {
   check('broadcast reaches claude', claudeBroadcast.type === 'message' && claudeBroadcast.message.to === 'all' && claudeBroadcast.message.content === 'attention everyone', JSON.stringify(claudeBroadcast))
   const opencodeSelf = await opencode.call('bridge_poll')
   check('broadcast does not echo to sender', opencodeSelf.messages.length === 0, JSON.stringify(opencodeSelf))
+  // Fan-out used to call remember() once per recipient — history held N copies
+  // of the same id and manager SSE fired N times. Lock the once-per-message rule.
+  const histAfterBc = await mavis.call('bridge_history', { peer: 'all', limit: 50 })
+  const bcRows = histAfterBc.messages.filter(m => m.content === 'attention everyone')
+  check('broadcast recorded exactly once in history', bcRows.length === 1, JSON.stringify(bcRows.map(m => ({ id: m.id, from: m.from }))))
 
   console.log('== status / peers / history ==')
   const status = await mavis.call('bridge_status')
@@ -729,6 +734,58 @@ try {
     hubGrp.close()
   }
 
+  console.log('== task state machine (working / terminal lock / timeout / thread) ==')
+  const hubSm = startHub({ port: 19012, waitTimeoutMs: 2000, maxQueue: 200, historyLimit: 100, connectedWindowMs: 60_000 }, { info: () => {}, warn: () => {} })
+  try {
+    const smA = makeClient('sm-a', `http://127.0.0.1:19012/mcp`)
+    const smB = makeClient('sm-b', `http://127.0.0.1:19012/mcp`)
+    await smA.init()
+    await smB.init()
+    const liveTask = await smA.call('bridge_task', { to: 'sm-b', prompt: 'state machine', threadId: 'thread-1' })
+    await smB.call('bridge_ack', { ref: liveTask.id, status: 'working', progress: 40, note: 'halfway' })
+    let liveStatus = await smA.call('bridge_task_status', { ref: liveTask.id })
+    check('working+progress applied', liveStatus.task.status === 'working' && liveStatus.task.acks.at(-1).progress === 40 && liveStatus.task.threadId === 'thread-1', JSON.stringify(liveStatus.task))
+    await smB.call('bridge_ack', { ref: liveTask.id, status: 'done', note: 'shipped' })
+    liveStatus = await smA.call('bridge_task_status', { ref: liveTask.id })
+    check('done applied after working', liveStatus.task.status === 'done', JSON.stringify(liveStatus.task))
+    await smB.call('bridge_ack', { ref: liveTask.id, status: 'accepted', note: 'late' })
+    liveStatus = await smA.call('bridge_task_status', { ref: liveTask.id })
+    const late = liveStatus.task.acks.at(-1)
+    check('terminal lock: late ack recorded but not applied', liveStatus.task.status === 'done' && late.applied === false && late.status === 'accepted', JSON.stringify({ status: liveStatus.task.status, late }))
+
+    const thrWait = smB.call('bridge_wait', { threadId: 'thread-missing', timeoutMs: 400 })
+    await smA.call('bridge_chat', { to: 'sm-b', message: 'off-thread' })
+    const thrRes = await thrWait
+    check('threadId filter ignores other threads', thrRes.type === 'timeout', JSON.stringify(thrRes))
+    await smB.call('bridge_poll')
+
+    const timed = await smA.call('bridge_task', { to: 'sm-b', prompt: 'will time out', timeoutMs: 200 })
+    await new Promise(r => setTimeout(r, 350))
+    const timedStatus = await smA.call('bridge_task_status', { ref: timed.id })
+    check('timeoutMs marks the task timeout', timedStatus.task.status === 'timeout' && timedStatus.task.acks.some(a => a.system === true), JSON.stringify(timedStatus.task))
+
+    const floodTask = await smA.call('bridge_task', { to: 'sm-b', prompt: 'survive eviction' })
+    for (let i = 0; i < 120; i++) await smA.call('bridge_chat', { to: 'sm-b', message: `flood-${i}` })
+    await smB.call('bridge_poll')
+    await smB.call('bridge_ack', { ref: floodTask.id, status: 'accepted' })
+    const floodStatus = await smA.call('bridge_task_status', { ref: floodTask.id })
+    check('ack routes via ledger after history eviction', floodStatus.task.status === 'accepted', JSON.stringify(floodStatus.task.status))
+
+    // hop limit: reply chains deeper than MAX_HOP are rejected
+    let hopMsg = await smA.call('bridge_chat', { to: 'sm-b', message: 'hop-0' })
+    for (let i = 1; i <= 5; i++) {
+      hopMsg = await smB.call('bridge_chat', { to: 'sm-a', message: `hop-${i}`, ref: hopMsg.id })
+    }
+    check('hop chain of 5 is allowed', hopMsg.hop === 5, JSON.stringify(hopMsg))
+    let hopErr = null
+    try {
+      await smA.call('bridge_chat', { to: 'sm-b', message: 'hop-6', ref: hopMsg.id })
+    } catch (e) { hopErr = String(e.message ?? e) }
+    check('hop limit rejects the 6th hop', hopErr !== null && /hop limit/i.test(hopErr), String(hopErr))
+  } finally {
+    hubSm.close()
+  }
+
   console.log('== persistence (sqlite db) ==')
   const dbFile = `${tmpdir()}/hub-state-test-${Date.now()}.db`
   const hubDbA = startHub({ port: 19008, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000, db: dbFile }, { info: () => {}, warn: () => {} })
@@ -743,6 +800,7 @@ try {
     const carol = makeClient('carol', base)
     await carol.init()
     await alice.call('bridge_group_add_member', { group: 'ops', member: 'carol' })
+    await alice.call('bridge_task', { to: 'bob', prompt: '重启后还在', threadId: 'db-thread' })
     // bob never polls → the message stays queued; close flushes everything.
   } finally {
     hubDbA.close()
@@ -764,10 +822,12 @@ try {
     const history = await alice.call('bridge_history', { limit: 10 })
     check('history restored from sqlite', history.messages.some(m => m.content === '重启前的话'), JSON.stringify(history.messages.map(m => m.content)))
     const bobMail = await bob.call('bridge_poll')
-    check('offline mailbox restored from sqlite', bobMail.messages.length === 1 && bobMail.messages[0].content === '重启前的话', JSON.stringify(bobMail))
+    check('offline mailbox restored from sqlite', bobMail.messages.some(m => m.content === '重启前的话') && bobMail.messages.every(m => m.from === 'alice'), JSON.stringify(bobMail))
     const groups = await alice.call('bridge_group_list')
     check('groups restored from sqlite', groups.groups.some(g => g.id === 'ops' && g.members.includes('bob')), JSON.stringify(groups))
     check('group membership edit restored from sqlite', groups.groups.some(g => g.id === 'ops' && g.members.includes('carol')), JSON.stringify(groups))
+    const tasks = await alice.call('bridge_tasks', { role: 'sent' })
+    check('task ledger restored from sqlite', tasks.tasks.some(t => t.prompt === '重启后还在' && t.status === 'pending' && t.threadId === 'db-thread'), JSON.stringify(tasks.tasks.map(t => ({ p: t.prompt, s: t.status }))))
   } finally {
     hubDbB.close()
     rmSync(dbFile, { force: true })

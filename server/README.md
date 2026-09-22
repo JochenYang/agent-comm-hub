@@ -41,8 +41,9 @@ agent-comm-hub auth gen                                           # 只生成一
   服务器敲命令。
 - **`--allow-join`（可选，内网/局域网推荐；公网务必关闭）**：允许无 token
   的 agent 直接加入。每个匿名接入生成唯一的 `join-<ip>` peer id + 记录来源
-  IP（两次同机/同名 kimi-code 是不同 id，互不串台、互不可读），管理台出现
-  “待认领”视图：看 IP 改名为张三(kimi)、或给他签发正式 token 转正。默认关闭。
+  IP（两次同机/同名 kimi-code 是不同 id，互不串台、互不可读），管理台花名册
+  会把这些连接标成 `walk-in 未认领` 并显示来源 IP；改名/认领目前走 CLI 或桌面
+  GUI（管理台只读展示）。默认关闭。
 - `peer`：路由 id，**token 与 peer 一一绑定**——这就是"多人同叫 kimi-code
   也能区分"的机制：张三/李四的 token 分别映射到 `zhangsan` / `lisi`，同名
   client 各得各的信箱。
@@ -119,28 +120,40 @@ MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorizat
 ## 4. 管理台
 
 网页版管理台已内置：`/admin`（与 MCP 同一端口，需带 manager token 访问，本机可
-免 token）。面板按运行形态自动标注 **本机 / 远程鉴权 / 只读**，并提供：
+免 token）。它是单文件 React 页面（Tailwind + beui 组件，`npm run build:admin`
+产出 `assets/admin.html`），页头显示连接状态与 `local` / `remote` 标记，并提供：
 
-- **身份与接入**：一人一 token = 一个 peer 的映射图；签发后即时生成可复制的
-  MCP 配置片段（HTTP + opencode 两种形态 + curl 探测），用于分发给团队成员。
-- **成员与令牌**：签发/吊销/明文切换（与 CLI `auth` 等价）。
-- **花名册**：client 名/版本/来源 IP、改名/踢人、认领 `join-*` 匿名身份；
-  页头展示队列上限 / 历史上限 / peer 数。
-- **群组**与**消息尾迹**。
+- **概览导航**：在线数 / 花名册、已签发 token、任务台账、群组、消息尾迹五项计数。
+- **身份与接入**：`人/机器 → 专属 token → 独立 peer` 的映射说明；签发 token 后
+  即时生成可复制的一段 MCP 配置片段（通用 HTTP `.mcp.json` + opencode + curl
+  探测），用于分发给团队成员。
+- **成员与令牌**：签发（peer / role / owner）、吊销、明文/打码切换（与 CLI
+  `auth` 等价）。本机模式没有 token 表，该面板显示不可用。
+- **花名册**：peer id 与显示别名、online/offline、客户端名/版本、来源 IP、最近
+  活动；匿名连接带 `walk-in 未认领` 标记。**只读**——改名、踢人、认领匿名身份
+  目前仍走 CLI 或桌面 GUI（`bridge_rename` / `bridge_unregister { peer }`）。
+- **任务台账**：状态、流向（含 thread 与 SLA）、prompt、最近 ack 时间线（含
+  progress 与 `(ignored)` 标记）。
+- **群组**与**消息尾迹**（只读，5 秒轮询）。
 
 此外仍支持：
 
 - **桌面 GUI**：以 `agent-hub-cli` 连入。本机场景开箱即用；远程场景在设置面板把
   Hub 监听地址/端口指向服务器，并在「访问 token（远程）」填入 manager token 即可
-  （保存并重启后生效，之后所有请求与 SSE 长连都携带 Bearer）。
+  （保存并重启后生效，之后所有请求与 SSE 长连都携带 Bearer）。GUI 以 host + port
+  拼地址，不接受完整 URL——TLS 反代场景见第 5 节的已知边界。
 - **任意 MCP 客户端**：用 manager token 连入后即拥有 `bridge_rename` /
   `bridge_unregister { peer }` / `bridge_history { peer: "all" }` 全量管理能力。
 
 ## 5. 已知边界（诚实清单）
 
+- **桌面 GUI 不支持 https**：客户端固定拼 `http://{host}:{port}{path}`
+  （`app/src-tauri/src/mcp_client.rs`），没有 scheme 选项。走 TLS 反代的团队目前
+  只能用普通 MCP 客户端接入；需要 GUI 时得直连 http 端口，或等客户端补上
+  scheme 字段。
 - token 走 HTTP header：个别极简 MCP 客户端若不支持自定义 header，接不进远程
   模式（本地模式不受影响）；需要按各家 agent 实测支持度。
-- 消息历史/离线信箱/花名册/群组持久化到 SQLite（`--db`，CLI 默认开启）；
+- 消息历史/离线信箱/花名册/群组/任务台账持久化到 SQLite（`--db`，CLI 默认开启）；
   0.6 的 roster.json 在首启时一次性迁移后仅作镜像。
 - 群聊：全员广播用 `to: "all"`；部分成员群用 `bridge_group_*`。群成员在创建
   时指定，之后可随时用 `bridge_group_add_member` / `bridge_group_remove_member`

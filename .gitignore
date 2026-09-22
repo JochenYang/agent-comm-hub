@@ -7,3 +7,6 @@ test/setup-entry.mjs
 test/ops-entry.mjs
 test/herdr-entry.mjs
 test/discover-entry.mjs
+
+# local scratch (verification scripts, throwaway hub state)
+.tmp/
