@@ -261,7 +261,9 @@ useMessagesStore.subscribe((s) => {
 // ---- Module-level background tasks (started once, shared across the whole app) ----
 
 /** SQLite record → PresentedMessage: content is the full message JSON (written via v.to_string()),
- *  from which the real content / id / from / to / kind / ref / ts are parsed. */
+ *  from which the real content / id / from / to / kind / ref / ts are parsed.
+ *  channel / threadId have their own columns (schema v3); `full` stays the fallback for rows written
+ *  before them (and for older databases the column read yields null). */
 function recordToMessage(r: LocalMessageRecord): PresentedMessage {
   let content: unknown = r.content
   let id = r.id
@@ -269,6 +271,8 @@ function recordToMessage(r: LocalMessageRecord): PresentedMessage {
   let to = r.to
   let kind = r.kind
   let ref: string | undefined = r.ref ?? undefined
+  let channel: string | undefined = r.channel ?? undefined
+  let threadId: string | undefined = r.threadId ?? undefined
   let ts = r.ts
   try {
     const full: Record<string, unknown> = JSON.parse(r.content)
@@ -279,6 +283,8 @@ function recordToMessage(r: LocalMessageRecord): PresentedMessage {
       if (typeof full.to === 'string') to = full.to
       if (typeof full.kind === 'string') kind = full.kind
       if (typeof full.ref === 'string') ref = full.ref
+      if (typeof full.channel === 'string') channel = full.channel
+      if (typeof full.threadId === 'string') threadId = full.threadId
       if (typeof full.ts === 'number') ts = full.ts
     }
   } catch {
@@ -291,6 +297,8 @@ function recordToMessage(r: LocalMessageRecord): PresentedMessage {
     kind: kind as PresentedMessage['kind'],
     content: content as PresentedMessage['content'],
     ...(ref !== undefined ? { ref } : {}),
+    ...(channel !== undefined && channel !== '' ? { channel } : {}),
+    ...(threadId !== undefined && threadId !== '' ? { threadId } : {}),
     ts
   }
 }

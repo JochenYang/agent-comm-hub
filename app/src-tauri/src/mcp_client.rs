@@ -66,8 +66,9 @@ enum ConnState {
 /// MCP client.
 /// The process holds a single instance; shared across threads via `Arc<McpClient>`.
 pub struct McpClient {
-    base_url: String,
-    mcp_path: String,
+    /// Full MCP endpoint URL, resolved once at construction by `resolve_endpoint` (the host may or
+    /// may not carry a scheme / port / path of its own).
+    endpoint: String,
     /// Request-response calls (initialize / tools/call): a 45s total timeout. Sized for the
     /// bridge_wait long-poll: the frontend uses a 25s budget and the hub's default server-side
     /// budget is 30s, so a 30s cap raced the wait itself — a full-budget wait arrived as an HTTP
@@ -93,6 +94,39 @@ pub struct McpClient {
     auth_token: Option<String>,
 }
 
+/// Resolve the hub's MCP endpoint from the settings fields (`host` / `port` / `path`).
+///
+/// Backward compatible with the historical form: a host without a scheme is still assembled
+/// byte-for-byte as `http://{host}:{port}{path}`, which is how the GUI reaches a loopback / LAN hub.
+///
+/// A host that already carries a scheme — `https://hub.example.com/mcp`, the URL
+/// server/TEAM-DEPLOY.md hands to remote members — is used as-is. Its scheme, port and path all come
+/// from the field: a TLS reverse proxy is simply unreachable through a hard-coded `http://`, and the
+/// separate `port` field cannot describe a 443 endpoint behind such a proxy. `path` keeps its meaning
+/// wherever the URL carries no path of its own (`https://hub.example.com` → `.../mcp`).
+fn resolve_endpoint(host: &str, port: u16, path: &str) -> String {
+    let Some(scheme_end) = host.find("://") else {
+        return format!("http://{host}:{port}{path}");
+    };
+    // Split the scheme off first so trimming trailing slashes can never eat the "//" separator.
+    let scheme = &host[..scheme_end + 3];
+    let rest = host[scheme_end + 3..].trim_end_matches('/');
+    // Whatever follows the authority's first '/' is the URL's own path; a bare authority
+    // (`https://hub.example.com`, with or without a trailing slash) has none.
+    let url_has_path = rest.split_once('/').is_some_and(|(_, p)| !p.is_empty());
+    if url_has_path {
+        // Trailing slashes were dropped above: the hub routes on an exact path, so `.../mcp/`
+        // addresses the same endpoint as `.../mcp` and the slashless form is the one that works.
+        return format!("{scheme}{rest}");
+    }
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        format!("{scheme}{rest}")
+    } else {
+        format!("{scheme}{rest}/{path}")
+    }
+}
+
 impl McpClient {
     pub fn new(host: &str, port: u16, path: &str, client_info: ClientInfo, auth_token: Option<String>) -> Self {
         let http = reqwest::Client::builder()
@@ -105,8 +139,7 @@ impl McpClient {
             .build()
             .expect("reqwest sse client build");
         Self {
-            base_url: format!("http://{}:{}", host, port),
-            mcp_path: path.to_string(),
+            endpoint: resolve_endpoint(host, port, path),
             http,
             sse_http,
             session_id: Arc::new(RwLock::new(None)),
@@ -119,7 +152,7 @@ impl McpClient {
 
     /// The hub's MCP endpoint (full assembled URL).
     pub fn endpoint_url(&self) -> String {
-        format!("{}{}", self.base_url, self.mcp_path)
+        self.endpoint.clone()
     }
 
     /// The current session id (present only after a successful initialize).
@@ -300,6 +333,39 @@ mod tests {
     fn endpoint_url_format() {
         let c = McpClient::new("127.0.0.1", 18764, "/mcp", ClientInfo::new("x", "0"), None);
         assert_eq!(c.endpoint_url(), "http://127.0.0.1:18764/mcp");
+    }
+
+    /// A host carrying its own scheme is used as-is: the URL's scheme, port and path all win over
+    /// the separate `port` / `path` fields (this is what makes a TLS reverse-proxied hub reachable).
+    #[test]
+    fn endpoint_url_keeps_scheme_qualified_host() {
+        let cases = [
+            // Exactly the URL server/TEAM-DEPLOY.md §3 hands to remote members.
+            ("https://hub.example.com/mcp", 80, "/mcp", "https://hub.example.com/mcp"),
+            ("https://hub.example.com:8443/mcp", 18764, "/mcp", "https://hub.example.com:8443/mcp"),
+            ("http://127.0.0.1:18764/mcp", 1, "/mcp", "http://127.0.0.1:18764/mcp"),
+            // A path inside the URL is authoritative — the path field must not duplicate it.
+            ("https://hub.example.com/api/mcp", 443, "/mcp", "https://hub.example.com/api/mcp"),
+            // The hub routes on an exact path: a trailing slash is not part of the endpoint.
+            ("https://hub.example.com/mcp/", 443, "/mcp", "https://hub.example.com/mcp"),
+        ];
+        for (host, port, path, expected) in cases {
+            let c = McpClient::new(host, port, path, ClientInfo::new("x", "0"), None);
+            assert_eq!(c.endpoint_url(), expected, "host={host}");
+        }
+    }
+
+    /// `path` (default `/mcp`) still decides the endpoint when the URL has no path of its own, and
+    /// the scheme-less form is unchanged.
+    #[test]
+    fn endpoint_url_appends_path_when_host_has_none() {
+        for host in ["https://hub.example.com", "https://hub.example.com/"] {
+            let c = McpClient::new(host, 443, "/mcp", ClientInfo::new("x", "0"), None);
+            assert_eq!(c.endpoint_url(), "https://hub.example.com/mcp", "host={host}");
+        }
+        // A path without a leading slash still joins with exactly one '/'.
+        let c = McpClient::new("https://hub.example.com", 443, "mcp", ClientInfo::new("x", "0"), None);
+        assert_eq!(c.endpoint_url(), "https://hub.example.com/mcp");
     }
 
     #[test]

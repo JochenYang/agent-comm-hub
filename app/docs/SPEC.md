@@ -220,7 +220,9 @@ CREATE TABLE messages (
   to_peer TEXT NOT NULL,
   kind TEXT NOT NULL,           -- chat / task / ack / notice
   content TEXT NOT NULL,        -- JSON 字符串
-  ref TEXT,
+  ref_id TEXT,                  -- 被确认 / 回复的消息 id
+  channel TEXT,                 -- v3 追加（群组频道 id），群消息才非 NULL
+  thread_id TEXT,               -- v3 追加（会话 / 工作流线程 id）
   ts INTEGER NOT NULL,
   involved_me INTEGER NOT NULL DEFAULT 0  -- 1 表示 from/to 包含 agent-hub-cli
 );

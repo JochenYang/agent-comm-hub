@@ -6,7 +6,8 @@
 //! Schema (SPEC §5.3):
 //! - config(key, value, updated_at)
 //! - peers(peer_id, last_seen, online, client_name, created_at) + v2 adds alias, client_version
-//! - messages(id, from_peer, to_peer, kind, content, ref_id, ts, involved_me) + ts DESC index + involved_me index
+//! - messages(id, from_peer, to_peer, kind, content, ref_id, channel, thread_id, ts, involved_me) + ts DESC index + involved_me index
+//!   (channel / thread_id arrive with v3)
 //! - unread(peer_id, count, last_read_ts)
 //! - schema_version(version) — migration log (one row per version; current version = MAX(version),
 //!   reads must not use a bare LIMIT 1 — unordered reads over multiple rows can pick an old
@@ -66,6 +67,10 @@ pub struct MessageRecord {
     pub kind: String,
     pub content: String,
     pub ref_id: Option<String>,
+    /// Group channel id of a group-routed message (hub >= 0.6); None for direct / broadcast traffic.
+    pub channel: Option<String>,
+    /// Conversation / workflow thread id (hub >= 0.9); None when the sender set none.
+    pub thread_id: Option<String>,
     pub ts: i64,
     pub involved_me: bool,
 }
@@ -179,6 +184,28 @@ impl Store {
                 "#,
             )?;
         }
+        if current < 3 {
+            // v3: messages gain channel / thread_id. The GUI's message type carries both
+            // (app/src/lib/tauri.ts PresentedMessage) and messagesStore counts group unread by
+            // channel: without the columns a GUI restart lost which group a message was sent to
+            // and broke A2A thread linking. Existing columns (incl. ref_id) are untouched.
+            //
+            // Each ALTER is gated on a PRAGMA table_info probe rather than on the version log
+            // alone. ADD COLUMN has no IF NOT EXISTS, so a database whose log and real schema
+            // disagree (a partially applied migration, or a build that added the column without
+            // logging it) would abort migrate() with "duplicate column name" — the app could not
+            // open its store at all. Probing makes the add idempotent by construction and lets
+            // migrate() heal the log.
+            for (column, ddl) in [
+                ("channel", "ALTER TABLE messages ADD COLUMN channel TEXT;"),
+                ("thread_id", "ALTER TABLE messages ADD COLUMN thread_id TEXT;"),
+            ] {
+                if !Self::column_exists(&tx, "messages", column)? {
+                    tx.execute_batch(ddl)?;
+                }
+            }
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (3);")?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -256,8 +283,8 @@ impl Store {
         let conn = self.conn.lock()?;
         conn.execute(
             "INSERT OR REPLACE INTO messages
-                (id, from_peer, to_peer, kind, content, ref_id, ts, involved_me)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (id, from_peer, to_peer, kind, content, ref_id, channel, thread_id, ts, involved_me)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 msg.id,
                 msg.from_peer,
@@ -265,6 +292,8 @@ impl Store {
                 msg.kind,
                 msg.content,
                 msg.ref_id,
+                msg.channel,
+                msg.thread_id,
                 msg.ts,
                 msg.involved_me as i64
             ],
@@ -279,7 +308,7 @@ impl Store {
         // into every conversation's archive restore — and still missed pure
         // agent↔agent rows when /history asked for a full pull.
         let mut stmt = conn.prepare(
-            "SELECT id, from_peer, to_peer, kind, content, ref_id, ts, involved_me
+            "SELECT id, from_peer, to_peer, kind, content, ref_id, channel, thread_id, ts, involved_me
              FROM messages
              WHERE from_peer = ?1 OR to_peer = ?1 OR to_peer = 'all'
              ORDER BY ts DESC LIMIT ?2",
@@ -292,8 +321,10 @@ impl Store {
                 kind: row.get(3)?,
                 content: row.get(4)?,
                 ref_id: row.get(5)?,
-                ts: row.get(6)?,
-                involved_me: row.get::<_, i64>(7)? != 0,
+                channel: row.get(6)?,
+                thread_id: row.get(7)?,
+                ts: row.get(8)?,
+                involved_me: row.get::<_, i64>(9)? != 0,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -307,7 +338,7 @@ impl Store {
     pub fn list_all_messages(&self, limit: i64) -> Result<Vec<MessageRecord>> {
         let conn = self.conn.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, from_peer, to_peer, kind, content, ref_id, ts, involved_me
+            "SELECT id, from_peer, to_peer, kind, content, ref_id, channel, thread_id, ts, involved_me
              FROM messages
              ORDER BY ts DESC LIMIT ?1",
         )?;
@@ -319,8 +350,10 @@ impl Store {
                 kind: row.get(3)?,
                 content: row.get(4)?,
                 ref_id: row.get(5)?,
-                ts: row.get(6)?,
-                involved_me: row.get::<_, i64>(7)? != 0,
+                channel: row.get(6)?,
+                thread_id: row.get(7)?,
+                ts: row.get(8)?,
+                involved_me: row.get::<_, i64>(9)? != 0,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -402,6 +435,23 @@ impl Store {
             params![key, value, updated_at],
         )?;
         Ok(())
+    }
+
+    /// Whether `table` already carries a column named `column` (used to make ADD COLUMN idempotent).
+    ///
+    /// The table name is interpolated rather than bound: SQLite accepts no parameter in
+    /// `PRAGMA table_info(...)`, and every caller passes a compile-time constant, so there is no
+    /// injection surface.
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -591,7 +641,7 @@ mod tests {
     }
 
     /// Migration is idempotent (the app-restart reopen scenario): calling migrate repeatedly doesn't
-    /// replay or error. schema_version is a migration log (one row for v1, one for v2);
+    /// replay or error. schema_version is a migration log (one row per version, v1..v3);
     /// current version = MAX(version).
     #[test]
     fn migrate_is_idempotent_on_reopen() {
@@ -606,7 +656,142 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!((n, v), (2, 2));
+        assert_eq!((n, v), (3, 3));
+    }
+
+    /// The v3 migration applies to an existing v2 database: rolling the version log back and dropping
+    /// the channel / thread_id columns makes migrate() re-add them without touching the stored rows.
+    #[test]
+    fn migrate_v3_adds_channel_columns() {
+        let store = fresh();
+        store
+            .insert_message(&MessageRecord {
+                id: "legacy".into(),
+                from_peer: "alice".into(),
+                to_peer: "grp-team".into(),
+                kind: "chat".into(),
+                content: r#"{"text":"hi"}"#.into(),
+                ref_id: Some("m0".into()),
+                channel: Some("grp-team".into()),
+                thread_id: Some("thr-1".into()),
+                ts: 1000,
+                involved_me: true,
+            })
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // Simulate a legacy v2 database: the log stops at 2 and the v3 columns don't exist yet.
+            conn.execute("DELETE FROM schema_version", []).unwrap();
+            conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])
+                .unwrap();
+            conn.execute("ALTER TABLE messages DROP COLUMN channel", []).unwrap();
+            conn.execute("ALTER TABLE messages DROP COLUMN thread_id", [])
+                .unwrap();
+        }
+        store.migrate().unwrap();
+        let msgs = store.list_all_messages(10).unwrap();
+        assert_eq!(msgs.len(), 1);
+        // The v2 row survives; the re-added columns are NULL for it and ref_id is untouched.
+        assert_eq!(msgs[0].id, "legacy");
+        assert_eq!(msgs[0].ref_id.as_deref(), Some("m0"));
+        assert_eq!(msgs[0].channel, None);
+        assert_eq!(msgs[0].thread_id, None);
+        let conn = store.conn.lock().unwrap();
+        let v: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+    }
+
+    /// A database whose version log disagrees with its real schema (a partially applied migration, or
+    /// a log rolled back by hand) must still open: the v3 probe skips the ALTERs instead of aborting
+    /// migrate() with "duplicate column name".
+    #[test]
+    fn migrate_v3_tolerates_columns_without_version_row() {
+        let store = fresh();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DELETE FROM schema_version", []).unwrap();
+            conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])
+                .unwrap();
+        }
+        // channel / thread_id still exist from the migrate() in open_in_memory.
+        store.migrate().unwrap();
+        let conn = store.conn.lock().unwrap();
+        assert!(Store::column_exists(&conn, "messages", "channel").unwrap());
+        assert!(Store::column_exists(&conn, "messages", "thread_id").unwrap());
+        let v: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+    }
+
+    /// File-backed variant of the v2 → v3 upgrade: the real app path is `Store::open` on an existing
+    /// database file (WAL, sidecar files, rows already on disk), which the in-memory tests don't
+    /// reach. The existing database must stay usable after the upgrade.
+    #[test]
+    fn open_upgrades_existing_v2_database_file() {
+        let path = std::env::temp_dir().join(format!("ach-store-v3-{}.sqlite", std::process::id()));
+        let file = path.to_string_lossy().into_owned();
+        let cleanup = || {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{file}{suffix}"));
+            }
+        };
+        cleanup();
+        {
+            // A v2-shaped database holding one row.
+            let store = Store::open(&path).unwrap();
+            store
+                .insert_message(&MessageRecord {
+                    id: "legacy-file".into(),
+                    from_peer: "alice".into(),
+                    to_peer: "grp-team".into(),
+                    kind: "chat".into(),
+                    content: r#"{"text":"hi","channel":"grp-team"}"#.into(),
+                    ref_id: None,
+                    channel: Some("grp-team".into()),
+                    thread_id: Some("thr-9".into()),
+                    ts: 1000,
+                    involved_me: true,
+                })
+                .unwrap();
+            let conn = store.conn.lock().unwrap();
+            conn.execute("DELETE FROM schema_version", []).unwrap();
+            conn.execute("INSERT INTO schema_version (version) VALUES (2)", [])
+                .unwrap();
+            conn.execute("ALTER TABLE messages DROP COLUMN channel", []).unwrap();
+            conn.execute("ALTER TABLE messages DROP COLUMN thread_id", [])
+                .unwrap();
+        }
+        // Reopen: the migration adds the columns and the stored row survives.
+        let store = Store::open(&path).unwrap();
+        let msgs = store.list_all_messages(10).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].id, "legacy-file");
+        assert_eq!(msgs[0].channel, None);
+        assert_eq!(msgs[0].thread_id, None);
+        // New rows on the upgraded file carry the values again.
+        store
+            .insert_message(&MessageRecord {
+                id: "fresh".into(),
+                from_peer: "alice".into(),
+                to_peer: "grp-team".into(),
+                kind: "chat".into(),
+                content: r#"{"text":"hi"}"#.into(),
+                ref_id: None,
+                channel: Some("grp-team".into()),
+                thread_id: Some("thr-10".into()),
+                ts: 2000,
+                involved_me: true,
+            })
+            .unwrap();
+        let msgs = store.list_all_messages(10).unwrap();
+        assert_eq!(msgs[0].id, "fresh");
+        assert_eq!(msgs[0].channel.as_deref(), Some("grp-team"));
+        assert_eq!(msgs[0].thread_id.as_deref(), Some("thr-10"));
+        drop(store);
+        cleanup();
     }
 
     #[test]
@@ -621,6 +806,8 @@ mod tests {
                     kind: "chat".into(),
                     content: r#"{"text":"hi"}"#.into(),
                     ref_id: None,
+                    channel: if i == 0 { Some("grp-alpha".into()) } else { None },
+                    thread_id: Some(format!("thr-{i}")),
                     ts: 1000 + i,
                     involved_me: i % 2 == 1,
                 })
@@ -630,6 +817,16 @@ mod tests {
         assert_eq!(msgs.len(), 5);
         // ORDER BY ts DESC, the first row is ts=1004
         assert_eq!(msgs[0].ts, 1004);
+        // channel / thread_id survive the write-read round trip (v3 columns).
+        assert_eq!(msgs[0].channel, None);
+        assert_eq!(msgs[0].thread_id.as_deref(), Some("thr-4"));
+        let oldest = msgs.iter().find(|m| m.id == "m0").unwrap();
+        assert_eq!(oldest.channel.as_deref(), Some("grp-alpha"));
+        assert_eq!(oldest.thread_id.as_deref(), Some("thr-0"));
+        // The unfiltered archive view reads the same two columns back.
+        let all = store.list_all_messages(10).unwrap();
+        assert_eq!(all[4].id, "m0");
+        assert_eq!(all[4].channel.as_deref(), Some("grp-alpha"));
         assert_eq!(store.count_messages().unwrap(), 5);
     }
 

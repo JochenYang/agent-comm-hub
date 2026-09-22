@@ -143,6 +143,10 @@ export interface LocalMessageRecord {
   kind: string
   content: string
   ref: string | null
+  /** Group channel id (schema v3; null for direct / broadcast rows). */
+  channel: string | null
+  /** Conversation / workflow thread id (schema v3; null when the sender set none). */
+  threadId: string | null
   ts: number
 }
 

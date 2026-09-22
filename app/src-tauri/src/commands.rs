@@ -693,6 +693,11 @@ pub async fn history_local(
                 "kind": r.kind,
                 "content": r.content,
                 "ref": r.ref_id,
+                // Lifted out of the body so a restore keeps the group channel a message belongs to
+                // and its A2A thread even for rows whose body predates v3 (those carry them only
+                // inside the JSON content, which the frontend still parses as a fallback).
+                "channel": r.channel,
+                "threadId": r.thread_id,
                 "ts": r.ts,
             })
         })
@@ -709,6 +714,11 @@ fn json_to_message_record(v: &Value, _now: i64) -> Option<MessageRecord> {
         kind: v.get("kind")?.as_str()?.to_string(),
         content: v.to_string(), // serialize the whole message as a JSON string
         ref_id: v.get("ref").and_then(|r| r.as_str()).map(|s| s.to_string()),
+        // channel / threadId are lifted into their own columns (schema v3) so a GUI restart keeps
+        // group membership and A2A thread linking; the content JSON carries a second copy, which is
+        // all a row written by an older build has.
+        channel: v.get("channel").and_then(|c| c.as_str()).map(|s| s.to_string()),
+        thread_id: v.get("threadId").and_then(|t| t.as_str()).map(|s| s.to_string()),
         ts: v.get("ts")?.as_i64()?,
         involved_me: v.get("from")?.as_str() == Some(SELF_PEER_ID)
             || v.get("to")?.as_str() == Some(SELF_PEER_ID)
@@ -746,6 +756,17 @@ fn persist_receipt(state: &AppState, receipt: &Value, body: Value, ref_id: Optio
     if let Some(r) = &ref_id {
         message.insert("ref".into(), json!(r));
     }
+    // channel / threadId come back on the receipt (group sends carry the channel, sends with a
+    // threadId carry the thread). The frontend restores a PresentedMessage out of this body, and
+    // the v3 columns below need the same two values, so read them once here.
+    let channel = receipt.get("channel").and_then(Value::as_str).filter(|c| !c.is_empty());
+    let thread_id = receipt.get("threadId").and_then(Value::as_str).filter(|t| !t.is_empty());
+    if let Some(ch) = channel {
+        message.insert("channel".into(), json!(ch));
+    }
+    if let Some(th) = thread_id {
+        message.insert("threadId".into(), json!(th));
+    }
     message.insert("ts".into(), json!(ts));
     let message = Value::Object(message);
     let rec = MessageRecord {
@@ -755,6 +776,8 @@ fn persist_receipt(state: &AppState, receipt: &Value, body: Value, ref_id: Optio
         kind: kind.to_string(),
         content: message.to_string(),
         ref_id,
+        channel: channel.map(|c| c.to_string()),
+        thread_id: thread_id.map(|t| t.to_string()),
         ts,
         involved_me: from == SELF_PEER_ID || to == SELF_PEER_ID || to == "all",
     };

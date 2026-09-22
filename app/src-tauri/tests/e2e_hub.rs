@@ -199,3 +199,38 @@ async fn e2e_gui_client_bearer_token_against_auth_hub() {
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
+
+/// The settings `host` field may carry a full URL (`https://hub.example.com/mcp` in
+/// server/TEAM-DEPLOY.md §3, or its plain-http equivalent). Assert the resolved endpoint really is
+/// the hub's MCP route — not `.../mcp/mcp` — by driving a real hub through such a host.
+#[tokio::test]
+async fn e2e_client_connects_with_full_url_host() {
+    let Some(mut hub) = spawn_hub(19033, &["--db", "off"]) else {
+        eprintln!("SKIP: node or lib/cli.js not available (run `pnpm build` in the repo root first)");
+        return;
+    };
+    let result = async {
+        assert!(wait_healthz(19033).await, "hub did not become healthy");
+        // The port / path fields are deliberately wrong for this URL: the URL wins.
+        let gui = McpClient::new(
+            "http://127.0.0.1:19033/mcp",
+            1,
+            "/nope",
+            ClientInfo::new("agent-hub-cli", "test"),
+            None,
+        );
+        assert_eq!(gui.endpoint_url(), "http://127.0.0.1:19033/mcp");
+        gui.initialize().await.expect("initialize through a full-URL host");
+        // A follow-up tools/call proves the same URL serves the request-response path too. The
+        // returned value is the raw MCP envelope (content[0].text), so match on its serialized form.
+        let peers = gui.tools_call("bridge_peers", json!({})).await.expect("bridge_peers");
+        assert!(
+            peers.to_string().contains("agent-hub-cli"),
+            "bridge_peers result: {peers}"
+        );
+    }
+    .await;
+    let _ = hub.kill();
+    let _ = hub.wait();
+    result
+}
