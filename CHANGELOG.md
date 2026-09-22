@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.1 (2026-09-22)
+
+- **Task delivery time is recorded**: the ledger row is now written before the
+  task is dispatched, so the per-assignee `deliveredMs` (first handoff or queue
+  drain) is actually filled in instead of staying empty.
+- **Long SLAs are honoured**: a `timeoutMs` beyond ~24.8 days used to be
+  truncated by the timer limit and fire immediately. The deadline is re-armed
+  in segments, so any positive duration behaves as written — cold restarts
+  included.
+- **`hop` survives a restart**: the reply-chain depth is persisted with the
+  message, so a restart can no longer let a chain slip past the `MAX_HOP` cap.
+  Older state files load unchanged (a missing depth counts as chain start).
+- **`bridge_task_status` is readable by the assignee**: the assignee of a group
+  task — and any member of its group — can read the task they were handed;
+  every other peer still needs manager rights.
+- CLI: `--help` reports the real `--manager-peers` default
+  (`agent-hub-cli,hub-admin`).
+
 ## 0.9.0 (2026-09-22)
 
 - **Task ledger state machine**: `bridge_ack` gains a non-terminal `working`
