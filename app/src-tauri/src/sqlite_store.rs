@@ -274,10 +274,14 @@ impl Store {
 
     pub fn list_messages_for_peer(&self, peer_id: &str, limit: i64) -> Result<Vec<MessageRecord>> {
         let conn = self.conn.lock()?;
+        // Only this peer's traffic + hub-wide broadcasts. The previous
+        // `OR involved_me = 1` leaked every message the GUI ever sent/received
+        // into every conversation's archive restore — and still missed pure
+        // agent↔agent rows when /history asked for a full pull.
         let mut stmt = conn.prepare(
             "SELECT id, from_peer, to_peer, kind, content, ref_id, ts, involved_me
              FROM messages
-             WHERE from_peer = ?1 OR to_peer = ?1 OR involved_me = 1
+             WHERE from_peer = ?1 OR to_peer = ?1 OR to_peer = 'all'
              ORDER BY ts DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![peer_id, limit], |row| {

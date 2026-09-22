@@ -47,7 +47,8 @@ interface MessagesState {
   sendAck: (
     refId: string,
     status: AckContent['status'],
-    note?: string
+    note?: string,
+    progress?: number
   ) => Promise<boolean>
   markPeerRead: (peerId: string, ts: number) => void
   unreadCountFor: (peerId: string) => number
@@ -62,7 +63,7 @@ interface MessagesState {
 }
 
 const POLL_INTERVAL_MS = 3_000
-const HISTORY_LIMIT = 100
+const HISTORY_LIMIT = 500
 
 /** Pool size cap. Matches the hub's history-ring default so the 3s poll can
  * always re-supply anything evicted. */
@@ -77,15 +78,16 @@ function capPool(messages: PresentedMessage[]): PresentedMessage[] {
 }
 
 /** Whether a message belongs to the current view — applied at RENDER time via
- * useVisibleMessages; the pool itself is never filtered. relayAll = relay-flow view, no
- * message is filtered; otherwise the default filters: no conversation = only messages
- * involving self + broadcasts (mirroring the hub's history filtering semantics); a
- * conversation = that peer's send/receive + broadcasts. */
+ * useVisibleMessages; the pool itself is never filtered.
+ * - relayAll: no filtering (admin watches the whole hub).
+ * - no conversation selected: show the full live stream (this is the admin
+ *   default). Previously this filtered to self+broadcast, which hid every
+ *   agent↔agent message until the 3s poll + a view switch — the "sent, but I
+ *   only see it after the other side picks it up" lag.
+ * - conversation selected: that peer's send/receive + broadcasts. */
 function belongsToView(relayAll: boolean, activePeer: string | null, msg: { from: string; to: string }): boolean {
   if (relayAll) return true
-  if (activePeer === null) {
-    return msg.from === SELF_PEER_ID || msg.to === SELF_PEER_ID || msg.to === 'all'
-  }
+  if (activePeer === null) return true
   return msg.from === activePeer || msg.to === activePeer || msg.to === 'all'
 }
 
@@ -109,6 +111,9 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
       to: receipt.to,
       kind: receipt.kind as PresentedMessage['kind'],
       content: content as PresentedMessage['content'],
+      // Keep ref so the ACK timeline can correlate without waiting for refresh.
+      ...(receipt.ref !== undefined && receipt.ref !== '' ? { ref: receipt.ref } : {}),
+      ...(receipt.channel !== undefined && receipt.channel !== '' ? { channel: receipt.channel } : {}),
       ts: receipt.ts
     })
   }
@@ -151,8 +156,8 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
         // Pull peer="all" (the unfiltered ring tail) rather than only the current conversation: a single poll serves
         // two purposes at once — the pool every view filters from + SQLite archiving (the Rust side writes
         // its own stream was pulled, so other agents' inter-chats never made it into SQLite. Ring cap is 1000, pulling
-        // 200 per call, which covers the delta between polls at a normal conversation density.
-        const result = await tauri.invoke.bridgeHistory('all', 200)
+        // 500 per call, which covers the delta between polls even under bursty multi-agent traffic.
+        const result = await tauri.invoke.bridgeHistory('all', 500)
         const base = Array.isArray(result?.messages) ? result.messages : []
         // Merge rather than replace: optimistically appended local messages aren't in history, so a full replace would wipe out what was just sent.
         set((s) => {
@@ -195,14 +200,15 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
       }
     },
 
-    sendAck: async (refId, status, note) => {
+    sendAck: async (refId, status, note, progress) => {
       try {
-        const receipt = await tauri.invoke.bridgeAck(refId, status, note)
+        const receipt = await tauri.invoke.bridgeAck(refId, status, note, progress)
         const content: AckContent = {
           status,
-          ...(note !== undefined && note !== '' ? { note } : {})
+          ...(note !== undefined && note !== '' ? { note } : {}),
+          ...(progress !== undefined ? { progress } : {})
         }
-        appendLocal(receipt, content)
+        appendLocal({ ...receipt, ref: receipt.ref ?? refId }, content)
         void get().refresh()
         return true
       } catch (e) {
@@ -326,8 +332,9 @@ void tauri.event.onHubMessage((msg) => {
 })
 
 /** View filter applied at RENDER time: relayAll shows everything; no conversation selected
- * shows messages involving self + broadcasts; a conversation shows that peer's traffic +
- * broadcasts. The pool itself keeps everything (push paths never drop by view). */
+ * shows the full live stream (admin default — including agent↔agent traffic); a conversation
+ * shows that peer's traffic + broadcasts. The pool itself keeps everything (push paths never
+ * drop by view). */
 export function useVisibleMessages(): PresentedMessage[] {
   const messages = useMessagesStore((s) => s.messages)
   const activePeer = useMessagesStore((s) => s.activePeer)

@@ -581,12 +581,14 @@ pub async fn bridge_status(state: State<'_, AppState>) -> CmdResult<Value> {
 
 /// `bridge_wait`: long-poll for the next message (the core of the frontend message stream's
 /// continuous listening — this was previously missing, so the UI never received replies from
-/// other peers; the hub's history is only recorded when a waiter/poll hits).
+/// other peers). History is recorded by the hub at send/route time regardless of wait/poll.
 #[tauri::command]
 pub async fn bridge_wait(
     state: State<'_, AppState>,
     timeout_ms: Option<u32>,
     from: Option<String>,
+    r#ref: Option<String>,
+    thread_id: Option<String>,
 ) -> CmdResult<Value> {
     let mut args = serde_json::Map::new();
     if let Some(t) = timeout_ms {
@@ -594,6 +596,12 @@ pub async fn bridge_wait(
     }
     if let Some(f) = from {
         args.insert("from".into(), json!(f));
+    }
+    if let Some(r) = r#ref {
+        args.insert("ref".into(), json!(r));
+    }
+    if let Some(th) = thread_id {
+        args.insert("threadId".into(), json!(th));
     }
     tools_call_checked(&state, "bridge_wait", Value::Object(args)).await
 }
@@ -649,7 +657,7 @@ pub async fn history_local(
     peer: Option<String>,
     limit: Option<u32>,
 ) -> CmdResult<Value> {
-    let limit = limit.unwrap_or(100).min(1000) as i64;
+    let limit = limit.unwrap_or(500).min(1000) as i64;
     let records = match peer.as_deref() {
         Some("all") => state.store.list_all_messages(limit),
         Some(p) => state.store.list_messages_for_peer(p, limit),
@@ -703,7 +711,8 @@ fn json_to_message_record(v: &Value, _now: i64) -> Option<MessageRecord> {
         ref_id: v.get("ref").and_then(|r| r.as_str()).map(|s| s.to_string()),
         ts: v.get("ts")?.as_i64()?,
         involved_me: v.get("from")?.as_str() == Some(SELF_PEER_ID)
-            || v.get("to")?.as_str() == Some(SELF_PEER_ID),
+            || v.get("to")?.as_str() == Some(SELF_PEER_ID)
+            || v.get("to")?.as_str() == Some("all"),
     })
 }
 
@@ -717,16 +726,28 @@ fn now_ms() -> i64 {
 /// `bridge_chat`: send a chat to a given peer.
 /// Returns a receipt (the hub end also wraps it in the MCP content envelope; unwrapped here uniformly).
 /// Persist the receipt message into SQLite on success (optimistic message persistence).
-/// The hub's history is only recorded when a waiter/poll hits, while what bridge_history
-/// writes into SQLite is the "pulled" messages — if nobody consumes a sent message, it's
-/// neither in the hub history nor pulled, and is lost on restart. So we persist on the send path.
+/// The hub already records every sent message into its history ring at route time
+/// (queued or handed to a waiter); this write covers GUI-sent traffic that may not
+/// round-trip through a later bridge_history pull before the app restarts.
 fn persist_receipt(state: &AppState, receipt: &Value, body: Value, ref_id: Option<String>) {
     let Some(id) = receipt.get("id").and_then(Value::as_str) else { return };
     let Some(from) = receipt.get("from").and_then(Value::as_str) else { return };
     let Some(to) = receipt.get("to").and_then(Value::as_str) else { return };
     let Some(kind) = receipt.get("kind").and_then(Value::as_str) else { return };
     let ts = receipt.get("ts").and_then(Value::as_i64).unwrap_or_else(now_ms);
-    let message = json!({ "id": id, "from": from, "to": to, "kind": kind, "content": body, "ts": ts });
+    // Keep `ref` in the stored JSON body too — restoreLocal parses the body back
+    // into a PresentedMessage and the ACK timeline correlates on `ref`.
+    let mut message = serde_json::Map::new();
+    message.insert("id".into(), json!(id));
+    message.insert("from".into(), json!(from));
+    message.insert("to".into(), json!(to));
+    message.insert("kind".into(), json!(kind));
+    message.insert("content".into(), body);
+    if let Some(r) = &ref_id {
+        message.insert("ref".into(), json!(r));
+    }
+    message.insert("ts".into(), json!(ts));
+    let message = Value::Object(message);
     let rec = MessageRecord {
         id: id.to_string(),
         from_peer: from.to_string(),
@@ -735,7 +756,7 @@ fn persist_receipt(state: &AppState, receipt: &Value, body: Value, ref_id: Optio
         content: message.to_string(),
         ref_id,
         ts,
-        involved_me: from == SELF_PEER_ID || to == SELF_PEER_ID,
+        involved_me: from == SELF_PEER_ID || to == SELF_PEER_ID || to == "all",
     };
     if let Err(e) = state.store.insert_message(&rec) {
         log::warn!("persist_receipt failed: {e}");
@@ -747,13 +768,15 @@ pub async fn bridge_chat(
     state: State<'_, AppState>,
     to: String,
     message: String,
+    thread_id: Option<String>,
 ) -> CmdResult<Value> {
-    let result = tools_call_checked(
-        &state,
-        "bridge_chat",
-        json!({ "to": to, "message": message }),
-    )
-    .await?;
+    let mut args = serde_json::Map::new();
+    args.insert("to".into(), json!(to));
+    args.insert("message".into(), json!(message.clone()));
+    if let Some(th) = &thread_id {
+        args.insert("threadId".into(), json!(th));
+    }
+    let result = tools_call_checked(&state, "bridge_chat", Value::Object(args)).await?;
     persist_receipt(&state, &result, json!(message), None);
     Ok(result)
 }
@@ -766,6 +789,8 @@ pub async fn bridge_task(
     prompt: String,
     context: Option<String>,
     deliverable: Option<String>,
+    timeout_ms: Option<u64>,
+    thread_id: Option<String>,
 ) -> CmdResult<Value> {
     let mut args = serde_json::Map::new();
     args.insert("to".into(), json!(to.clone()));
@@ -776,6 +801,12 @@ pub async fn bridge_task(
     if let Some(d) = &deliverable {
         args.insert("deliverable".into(), json!(d));
     }
+    if let Some(t) = timeout_ms {
+        args.insert("timeoutMs".into(), json!(t));
+    }
+    if let Some(th) = &thread_id {
+        args.insert("threadId".into(), json!(th));
+    }
     let result = tools_call_checked(&state, "bridge_task", Value::Object(args)).await?;
     let mut body = serde_json::Map::new();
     body.insert("prompt".into(), json!(prompt));
@@ -785,17 +816,24 @@ pub async fn bridge_task(
     if let Some(d) = deliverable {
         body.insert("deliverable".into(), json!(d));
     }
+    if let Some(t) = timeout_ms {
+        body.insert("timeoutMs".into(), json!(t));
+    }
+    if let Some(th) = thread_id {
+        body.insert("threadId".into(), json!(th));
+    }
     persist_receipt(&state, &result, Value::Object(body), None);
     Ok(result)
 }
 
-/// `bridge_ack`: ack a task (or other message). status: accepted/rejected/done/failed.
+/// `bridge_ack`: ack a task (or other message). status: accepted/working/rejected/done/failed.
 #[tauri::command]
 pub async fn bridge_ack(
     state: State<'_, AppState>,
     ref_id: String,
     status: String,
     note: Option<String>,
+    progress: Option<u32>,
 ) -> CmdResult<Value> {
     let mut args = serde_json::Map::new();
     args.insert("ref".into(), json!(ref_id.clone()));
@@ -803,14 +841,47 @@ pub async fn bridge_ack(
     if let Some(n) = &note {
         args.insert("note".into(), json!(n));
     }
+    if let Some(p) = progress {
+        args.insert("progress".into(), json!(p));
+    }
     let result = tools_call_checked(&state, "bridge_ack", Value::Object(args)).await?;
     let mut body = serde_json::Map::new();
     body.insert("status".into(), json!(status));
     if let Some(n) = note {
         body.insert("note".into(), json!(n));
     }
+    if let Some(p) = progress {
+        body.insert("progress".into(), json!(p));
+    }
     persist_receipt(&state, &result, Value::Object(body), Some(ref_id));
     Ok(result)
+}
+
+/// `bridge_tasks`: list the hub task ledger rows involving this peer.
+#[tauri::command]
+pub async fn bridge_tasks(
+    state: State<'_, AppState>,
+    role: Option<String>,
+    status: Option<String>,
+    limit: Option<u32>,
+) -> CmdResult<Value> {
+    let mut args = serde_json::Map::new();
+    if let Some(r) = role {
+        args.insert("role".into(), json!(r));
+    }
+    if let Some(s) = status {
+        args.insert("status".into(), json!(s));
+    }
+    if let Some(l) = limit {
+        args.insert("limit".into(), json!(l));
+    }
+    tools_call_checked(&state, "bridge_tasks", Value::Object(args)).await
+}
+
+/// `bridge_task_status`: one task's ledger state + full ack timeline + assignees.
+#[tauri::command]
+pub async fn bridge_task_status(state: State<'_, AppState>, ref_id: String) -> CmdResult<Value> {
+    tools_call_checked(&state, "bridge_task_status", json!({ "ref": ref_id })).await
 }
 
 // -------- Auto-start on login (PRD F-13 / SPEC AC-9) --------

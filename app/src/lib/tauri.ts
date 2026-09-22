@@ -74,6 +74,8 @@ export interface PresentedMessage {
   ref?: string
   /** Group channel id (present on group-routed messages; hub >= 0.6). */
   channel?: string
+  /** Conversation / workflow thread id (hub >= 0.9). */
+  threadId?: string
   ts: number
 }
 
@@ -81,11 +83,52 @@ export interface TaskContent {
   prompt: string
   context?: string
   deliverable?: string
+  timeoutMs?: number
+  threadId?: string
 }
 
+export type AckStatus = 'accepted' | 'working' | 'rejected' | 'done' | 'failed'
+export type TaskStatus = 'pending' | 'accepted' | 'working' | 'rejected' | 'done' | 'failed' | 'timeout'
+
 export interface AckContent {
-  status: 'accepted' | 'rejected' | 'done' | 'failed'
+  status: AckStatus
   note?: string
+  progress?: number
+}
+
+export interface TaskAckEvent {
+  from: string
+  status: AckStatus
+  note?: string
+  progress?: number
+  ts: number
+  messageId: string
+  applied: boolean
+  system?: boolean
+}
+
+export interface AssigneeState {
+  peerId: string
+  status: TaskStatus
+  deliveredMs?: number
+  acks: TaskAckEvent[]
+}
+
+export interface TaskRecord {
+  id: string
+  from: string
+  to: string
+  prompt: string
+  context?: string
+  deliverable?: string
+  status: TaskStatus
+  acks: TaskAckEvent[]
+  assignees: AssigneeState[]
+  timeoutMs?: number
+  deadlineAt?: number
+  threadId?: string
+  createdAt: number
+  updatedAt: number
 }
 
 export interface BridgeHistoryResult {
@@ -116,6 +159,12 @@ export interface ChatReceipt {
   from: string
   to: string
   kind: string
+  /** Present on ack receipts (the acknowledged message id). */
+  ref?: string
+  /** Present on group-send receipts. */
+  channel?: string
+  /** Present when the send carried a thread id. */
+  threadId?: string
   ts: number
 }
 
@@ -212,10 +261,12 @@ export const tauri = {
     rosterForget: (peerId: string) =>
       tauriInvoke<void>('roster_forget', { peerId }),
     bridgeStatus: () => tauriInvoke<unknown>('bridge_status'),
-    bridgeWait: (timeoutMs?: number, from?: string) =>
+    bridgeWait: (timeoutMs?: number, from?: string, ref?: string, threadId?: string) =>
       tauriInvoke<WaitResult>('bridge_wait', {
         timeoutMs: timeoutMs ?? null,
-        from: from ?? null
+        from: from ?? null,
+        ref: ref ?? null,
+        threadId: threadId ?? null
       }),
     bridgeHistory: (peer?: string, limit?: number) =>
       tauriInvoke<BridgeHistoryResult>('bridge_history', {
@@ -227,26 +278,39 @@ export const tauri = {
         peer: peer ?? null,
         limit: limit ?? null
       }),
-    bridgeChat: (to: string, message: string) =>
-      tauriInvoke<ChatReceipt>('bridge_chat', { to, message }),
+    bridgeChat: (to: string, message: string, threadId?: string) =>
+      tauriInvoke<ChatReceipt>('bridge_chat', { to, message, threadId: threadId ?? null }),
     bridgeTask: (
       to: string,
       prompt: string,
       context?: string,
-      deliverable?: string
+      deliverable?: string,
+      timeoutMs?: number,
+      threadId?: string
     ) =>
       tauriInvoke<ChatReceipt>('bridge_task', {
         to,
         prompt,
         context: context ?? null,
-        deliverable: deliverable ?? null
+        deliverable: deliverable ?? null,
+        timeoutMs: timeoutMs ?? null,
+        threadId: threadId ?? null
       }),
-    bridgeAck: (refId: string, status: AckContent['status'], note?: string) =>
+    bridgeAck: (refId: string, status: AckContent['status'], note?: string, progress?: number) =>
       tauriInvoke<ChatReceipt>('bridge_ack', {
         refId,
         status,
-        note: note ?? null
+        note: note ?? null,
+        progress: progress ?? null
       }),
+    bridgeTasks: (role?: 'sent' | 'received' | 'all', status?: TaskStatus, limit?: number) =>
+      tauriInvoke<{ tasks: TaskRecord[] }>('bridge_tasks', {
+        role: role ?? null,
+        status: status ?? null,
+        limit: limit ?? null
+      }),
+    bridgeTaskStatus: (ref: string) =>
+      tauriInvoke<{ task: TaskRecord }>('bridge_task_status', { refId: ref }),
     configGet: () => tauriInvoke<Record<string, unknown>>('config_get'),
     configSet: (values: Record<string, unknown>) =>
       tauriInvoke<void>('config_set', { values }),

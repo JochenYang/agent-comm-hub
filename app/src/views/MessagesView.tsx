@@ -14,7 +14,7 @@ import { useHubStore } from '@/stores/hubStore'
 import type { PresentedMessage } from '@/lib/tauri'
 import { SELF_PEER_ID } from '@/lib/self'
 import { Markdown } from '@/lib/markdown'
-import { CommandPalette, tryExecuteServerSide, COMMAND_HELP_LINES, type CommandResult } from '@/components/CommandPalette'
+import { CommandPalette, COMMAND_HELP_LINES, type CommandResult } from '@/components/CommandPalette'
 import { useTranslation } from '@/i18n'
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
@@ -51,7 +51,10 @@ function parseCommand(raw: string): CommandResult | null {
   const rest = spaceIdx === -1 ? '' : stripped.slice(spaceIdx + 1).trim()
   if (cmd === 'peers') return { kind: 'list_peers' }
   if (cmd === 'broadcast') return rest === '' ? { kind: 'noop' } : { kind: 'broadcast', text: rest }
-  if (cmd === 'history') return { kind: 'history', limit: rest !== '' ? Number(rest) : undefined }
+  if (cmd === 'history') {
+    const n = rest === '' ? undefined : Number(rest)
+    return { kind: 'history', limit: Number.isFinite(n) && (n as number) > 0 ? Math.floor(n as number) : undefined }
+  }
   if (cmd === 'clear') return { kind: 'clear' }
   if (cmd === 'help') return { kind: 'help' }
   return { kind: 'noop' }
@@ -195,25 +198,23 @@ export function MessagesView(): React.JSX.Element {
 
   const handleCommand = async (result: CommandResult): Promise<void> => {
     if (result.kind === 'broadcast') {
-      const online = peers.filter((p) => p.connected && p.id !== SELF_PEER_ID)
-      if (online.length === 0) {
-        setFeedback(t('messages.no_online_peers'))
-        return
-      }
-      const results = await Promise.all(online.map((p) => sendChat(p.id, result.text)))
-      setFeedback(
-        results.every((r) => r)
-          ? t('messages.broadcast_ok', { n: online.length })
-          : t('messages.send_failed')
-      )
+      // One hub broadcast (`to: "all"`) — offline peers still queue, and the
+      // sender is not echoed back. The old loop-of-bridge_chat skipped offline
+      // peers and created N independent messages with no shared identity.
+      const ok = await sendChat('all', result.text)
+      setFeedback(ok ? t('messages.broadcast_ok', { n: 1 }) : t('messages.send_failed'))
     } else if (result.kind === 'history') {
       // Fetch full history: hub memory (refresh) + SQLite archive (restoreLocal), merged.
       // After a hub restart the in-memory history is cleared, so refresh alone won't pull archives — that's exactly
       // the /history command's job (the user expects to "pull history before the database").
-      // Archive queries follow the current view: relayAll flow (no conversation) pulls everything — SQLite stores
-      // all traffic, but querying by peer would filter out others' inter-chats; the conversation view queries by conversation peer.
+      // Archive queries follow the current view: the live stream / relay pulls everything
+      // (`all`); a conversation pulls that peer's traffic. The previous default
+      // (undefined → self-only) dropped every agent↔agent row from /history.
+      const limit = Number.isFinite(result.limit) && result.limit !== undefined && result.limit > 0
+        ? Math.floor(result.limit)
+        : undefined
       await refresh()
-      await restoreLocal(result.limit, relayAll ? 'all' : (activePeer ?? undefined))
+      await restoreLocal(limit, activePeer === null || relayAll ? 'all' : activePeer)
       setFeedback(t('messages.history_ok'))
     } else if (result.kind === 'list_peers') {
       // Make the result visible: no longer just written to console (users previously reported "command invalid")
@@ -588,9 +589,4 @@ function MessageItem({
       )}
     </li>
   )
-}
-
-/** Lets the messages body be called outside the form submit path (e.g. individually by CmdPalette) */
-export async function handleExternalSubmit(raw: string, clear: () => void): Promise<void> {
-  await tryExecuteServerSide(raw, clear)
 }

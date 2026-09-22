@@ -12,6 +12,7 @@ interface Props {
 
 const ACK_TONE: Record<AckContent['status'], string> = {
   accepted: 'bg-info/15 text-info ring-info/30',
+  working: 'bg-info/15 text-info ring-info/30',
   done: 'bg-success/15 text-success ring-success/30',
   rejected: 'bg-warning/15 text-warning ring-warning/30',
   failed: 'bg-destructive/15 text-destructive ring-destructive/30'
@@ -61,16 +62,25 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
 
   const tsLabel = new Date(selected.ts).toLocaleString()
   const isMine = selected.from === selfPeerId
-  const alreadyAcked = messages.some(
-    (m) => m.kind === 'ack' && m.from === selfPeerId && m.ref === selected.id
-  )
+  // Multi-step ack: accepted/working can still advance to done/failed/rejected.
+  // Terminal acks (done/rejected/failed) close the button row — matching the
+  // hub ledger's terminal lock (later acks are recorded but never reopen).
+  const myAcks = messages
+    .filter((m) => m.kind === 'ack' && m.from === selfPeerId && m.ref === selected.id)
+    .sort((a, b) => a.ts - b.ts)
+  const lastAck = myAcks.at(-1)
+  const lastStatus: AckContent['status'] | null =
+    lastAck !== undefined && typeof lastAck.content === 'object' && lastAck.content !== null && 'status' in lastAck.content
+      ? (lastAck.content as AckContent).status
+      : null
+  const terminalAcked = lastStatus === 'done' || lastStatus === 'rejected' || lastStatus === 'failed'
   const canAck =
-    selected.kind === 'task' && selected.to === selfPeerId && !isMine && !alreadyAcked
+    selected.kind === 'task' && (selected.to === selfPeerId || selected.to === 'all') && !isMine && !terminalAcked
 
-  const handleAck = async (status: AckContent['status']): Promise<void> => {
+  const handleAck = async (status: AckContent['status'], progress?: number): Promise<void> => {
     setAckSending(status)
     try {
-      await sendAck(selected.id, status, ackNote.trim() === '' ? undefined : ackNote.trim())
+      await sendAck(selected.id, status, ackNote.trim() === '' ? undefined : ackNote.trim(), progress)
       setAckNote('')
     } finally {
       setAckSending(null)
@@ -190,12 +200,12 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
               className="mb-2 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             />
             <div className="flex flex-wrap gap-1.5">
-              {(['accepted', 'rejected', 'done', 'failed'] as const).map((s) => (
+              {(['accepted', 'working', 'rejected', 'done', 'failed'] as const).map((s) => (
                 <button
                   key={s}
                   type="button"
                   disabled={ackSending !== null}
-                  onClick={() => void handleAck(s)}
+                  onClick={() => void handleAck(s, s === 'working' ? 50 : undefined)}
                   className={`rounded-md px-2 py-1 font-mono text-[11px] uppercase tracking-wider ring-1 transition-colors hover:brightness-110 disabled:opacity-50 ${
                     ACK_TONE[s]
                   }`}

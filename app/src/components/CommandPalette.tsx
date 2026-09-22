@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useTranslation } from '@/i18n'
-import { tauri, type Peer } from '@/lib/tauri'
+import type { Peer } from '@/lib/tauri'
 
 interface CommandPaletteProps {
   open: boolean
@@ -67,10 +67,13 @@ export function CommandPalette({
       {
         cmd: 'history',
         label: t('commands.help_history'),
-        build: (args) => ({
-          kind: 'history' as const,
-          limit: args[0] !== undefined && args[0] !== '' ? Number(args[0]) : undefined
-        })
+        build: (args) => {
+          const n = args[0] !== undefined && args[0] !== '' ? Number(args[0]) : NaN
+          return {
+            kind: 'history' as const,
+            limit: Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined
+          }
+        }
       },
       {
         cmd: 'clear',
@@ -208,44 +211,6 @@ export const COMMAND_HELP_LINES = (t: (k: string) => string): string[] => [
   t('commands.help_clear'),
   t('commands.help_help')
 ]
-
-/**
- * Generic helper: parses a "/"-prefixed user input into a command; returns noop if it does not start with "/".
- * Lets MessagesView quickly decide before form submit.
- */
-export async function tryExecuteServerSide(
-  raw: string,
-  onClear: () => void
-): Promise<{ consumed: boolean }> {
-  const q = raw.trim()
-  if (!q.startsWith('/')) return { consumed: false }
-  const stripped = q.slice(1)
-  const spaceIdx = stripped.indexOf(' ')
-  const cmd = (spaceIdx === -1 ? stripped : stripped.slice(0, spaceIdx)).toLowerCase()
-  const rest = spaceIdx === -1 ? '' : stripped.slice(spaceIdx + 1).trim()
-
-  if (cmd === 'peers') {
-    const result = await tauri.invoke.bridgePeers()
-    console.info('[bridge_peers]', result?.peers ?? [])
-  } else if (cmd === 'broadcast' && rest !== '') {
-    // The backend has no broadcast bridge; the frontend loops calling bridge_chat to each online peer.
-    const list = (await tauri.invoke.bridgePeers())?.peers ?? []
-    const peers = list.filter((p) => p.connected)
-    await Promise.all(
-      peers.map((p) => tauri.invoke.bridgeChat(p.id, rest).catch(() => null))
-    )
-  } else if (cmd === 'history') {
-    const limit = rest !== '' ? Number(rest) : undefined
-    await tauri.invoke.bridgeHistory(undefined, limit ?? undefined)
-  } else if (cmd === 'clear') {
-    onClear()
-  } else if (cmd === 'help') {
-    console.info(COMMAND_HELP_LINES((k: string) => k).join('\n'))
-  } else {
-    return { consumed: false }
-  }
-  return { consumed: true }
-}
 
 // Re-export React.FormEvent for external form handling
 export type { FormEvent }

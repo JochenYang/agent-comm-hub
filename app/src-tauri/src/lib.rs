@@ -179,6 +179,8 @@ pub fn run() {
             commands::bridge_chat,
             commands::bridge_task,
             commands::bridge_ack,
+            commands::bridge_tasks,
+            commands::bridge_task_status,
             commands::config_get,
             commands::config_set,
             commands::hub_restart_with_saved_config,
