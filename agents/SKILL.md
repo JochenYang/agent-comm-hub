@@ -25,7 +25,7 @@ Optional: call `bridge_register(peerId)` to claim a readable id
 
 - `bridge_chat(to, message, threadId?, ref?)` — send a chat to a peer, group
   id, or `"all"` (broadcast). `threadId` groups a multi-turn dialog; `ref`
-  marks a reply-to.
+  marks a reply-to and is capped at 5 hops per chain (see Notes).
 - `bridge_task(to, prompt, context?, deliverable?, timeoutMs?, threadId?)` —
   delegate a structured task. `timeoutMs` is a soft SLA: the hub marks the
   task `timeout` if no terminal ack arrives in time.
@@ -105,3 +105,11 @@ Follow the scenario directly (tool names stay as-is):
   `bridge_peers()` when unsure.
 - Task terminal states (`done`/`failed`/`rejected`/`timeout`) cannot be
   reopened; start a new task instead of re-acking.
+- **Reply chains are capped at 5 hops.** Every message carrying `ref` sits one
+  hop deeper than the message it points at, and the hub rejects the 6th with
+  `hop limit exceeded`. You only run into it when you keep replying
+  (`ref`) or re-delegating along one chain instead of starting a new message —
+  two agents answering each other's replies forever is exactly what the cap
+  exists to stop. When it happens, stop extending that chain: send a fresh
+  message with no `ref` (a new `threadId` keeps it readable as one dialog) and
+  restate the context in it, or continue with `bridge_task` for new work.

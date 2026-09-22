@@ -18,7 +18,7 @@ import type { GroupState, PeerProfile } from './hub.js'
 const KIND_NAMES: readonly string[] = ['chat', 'task', 'notice', 'ack']
 
 function messageToRow(message: BridgeMessage): (string | number | null)[] {
-  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts]
+  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts, message.hop ?? null]
 }
 
 function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
@@ -39,6 +39,9 @@ function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
     ...(typeof row.ref === 'string' && row.ref !== '' ? { ref: row.ref } : {}),
     ...(typeof row.channel === 'string' && row.channel !== '' ? { channel: row.channel } : {}),
     ...(typeof row.thread_id === 'string' && row.thread_id !== '' ? { threadId: row.thread_id } : {}),
+    // Chain depth: rows written before the hop column restore without it
+    // (treated as a chain origin by importHistory — never as a bogus depth).
+    ...(typeof row.hop === 'number' && Number.isFinite(row.hop) && row.hop > 0 ? { hop: row.hop } : {}),
     ts,
   }
 }
@@ -70,11 +73,11 @@ export class SQLiteStateStore {
       );
       CREATE TABLE IF NOT EXISTS messages (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER
       );
       CREATE TABLE IF NOT EXISTS mailboxes (
         peer TEXT NOT NULL, seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER
       );
       CREATE TABLE IF NOT EXISTS groups (
         id TEXT PRIMARY KEY, name TEXT, members TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -83,12 +86,16 @@ export class SQLiteStateStore {
         id TEXT PRIMARY KEY, body TEXT NOT NULL, updated_at INTEGER NOT NULL
       );
     `)
-    // Migrate pre-thread_id databases in place (additive, never destructive).
+    // Migrate pre-thread_id / pre-hop databases in place (additive, never
+    // destructive). A column that already exists throws — the normal path on
+    // every boot after the one that added it.
     for (const table of ['messages', 'mailboxes']) {
-      try {
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN thread_id TEXT`)
-      } catch {
-        // column already present
+      for (const column of ['thread_id TEXT', 'hop INTEGER']) {
+        try {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`)
+        } catch {
+          // column already present
+        }
       }
     }
     log.info(`sqlite state open: ${file}`)
@@ -102,14 +109,14 @@ export class SQLiteStateStore {
   /** Insert buffered messages and re-snapshot mailboxes/profiles/groups/tasks. */
   flush(snapshot: { mailboxes: Record<string, BridgeMessage[]>; profiles: PeerProfile[]; groups: GroupState[]; tasks: TaskRecord[] }): void {
     const insert = this.db.prepare(
-      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const message of this.buffer.splice(0, this.buffer.length)) {
       insert.run(...messageToRow(message))
     }
     this.db.exec('DELETE FROM mailboxes')
     const insertMail = this.db.prepare(
-      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const [peer, queue] of Object.entries(snapshot.mailboxes)) {
       for (const message of queue) insertMail.run(peer, ...messageToRow(message))

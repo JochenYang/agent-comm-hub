@@ -276,7 +276,7 @@ const hub = startHub({ port: 18764 }, console) // 返回 { hub, registry, server
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit（strict）
-pnpm test             # 测试套件（282 项：156 冒烟 + 37 安装器 + 11 运维 + 35 herdr + 23 发现 + 20 e2e）
+pnpm test             # 测试套件（291 项：165 冒烟 + 37 安装器 + 11 运维 + 35 herdr + 23 发现 + 20 e2e）
 npm run build:admin   # admin/ 工作区（用 npm）→ 单文件 assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js（零依赖）
 pnpm pack             # 构建 + npm pack（发布产物）

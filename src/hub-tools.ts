@@ -387,14 +387,14 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_task',
-      description: 'Delegate a structured task to another agent (peer, group, or "all"). The assignee acks with accepted | working | rejected | done | failed (bridge_ack). Track with bridge_task_status(ref) / bridge_tasks; wait for the ack with bridge_wait({ ref }). Optional timeoutMs marks the task `timeout` when the SLA expires without a terminal ack.',
+      description: 'Delegate a structured task to another agent (peer, group, or "all"). The assignee acks with accepted | working | rejected | done | failed (bridge_ack). Track with bridge_task_status(ref) / bridge_tasks; wait for the ack with bridge_wait({ ref }). Optional timeoutMs marks the task `timeout` when the SLA expires without a terminal ack; any positive duration is honored, including multi-day deadlines (the hub re-arms its timer instead of overflowing it).',
       inputSchema: schema(
         {
           to: str('Target peerId, group id, or "all" to broadcast.'),
           prompt: str('What the receiving agent should do.'),
           context: optStr('Optional background information for the task.'),
           deliverable: optStr('Optional expected deliverable description.'),
-          timeoutMs: int('Optional soft SLA in ms; hub marks the task timeout when it expires.'),
+          timeoutMs: int('Optional soft SLA in ms from now (e.g. 30000). No upper bound — a deadline past ~24.8 days is honored as well.'),
           threadId: optStr('Optional conversation / workflow thread id.'),
         },
         ['to', 'prompt'],
@@ -466,15 +466,22 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_task_status',
-      description: 'Status of one delegated task: current ledger state (pending → accepted/working → done/failed/timeout, or rejected), the original prompt/context/deliverable, per-assignee state, and every ack event (who, status, note, progress, when). Use the task message id (the same id you pass as bridge_ack ref).',
+      description: 'Status of one delegated task: current ledger state (pending → accepted/working → done/failed/timeout, or rejected), the original prompt/context/deliverable, per-assignee state, and every ack event (who, status, note, progress, when). Use the task message id (the same id you pass as bridge_ack ref). Readable by the sender, by an assignee (a group task carries the GROUP id in `to`, so its assignees read it through their assignee row) and by a group member; everyone else needs manager rights.',
       inputSchema: schema({ ref: str('Task message id (the id returned by bridge_task, also used as ack ref).') }, ['ref']),
       handler: wrap(true, async (args, peer, sessionId) => {
         const ref = String(args.ref)
         const task = hub.taskOf(ref)
         if (task === undefined) throw new Error(`unknown task: ${ref}`)
-        // Sender always sees their own task; the assignee sees it too.
-        // Anyone else needs manager rights (same gate as reading history).
-        if (task.from !== peer && task.to !== peer && task.to !== BROADCAST) {
+        // Sender always sees their own task; so does an assignee — a group
+        // task is addressed to the group, so its assignees (peerId !== to)
+        // would otherwise be locked out of the task they were handed, even
+        // though bridge_tasks lists it for them. Group membership is checked
+        // live (a member added after the send sees it too, mirroring
+        // listTasks) and anyone else needs manager rights (same gate as
+        // reading history).
+        const isAssignee = task.assignees.some(assignee => assignee.peerId === peer)
+        const isGroupMember = hub.groupOf(task.to)?.members.includes(peer) ?? false
+        if (task.from !== peer && task.to !== peer && task.to !== BROADCAST && !isAssignee && !isGroupMember) {
           requireManager(peer, `reading task '${ref}'`, sessionId)
         }
         return { task }

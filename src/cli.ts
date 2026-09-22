@@ -103,7 +103,8 @@ Hub options:
   --herdr-timeout-ms <n>     Default cap for one herdr call in ms (default 30000)
   --manager-peers <ids>      Comma-separated peer ids allowed to manage the
                              roster (rename others / kick), or "all".
-                             (default agent-hub-cli — the desktop GUI identity)
+                             (default agent-hub-cli,hub-admin — the desktop
+                             GUI and the web admin console identities)
   --state-file <path>        Persist the peer roster (aliases, client info) to
                              this JSON file so identities survive restarts
                              (default ~/.agent-comm-hub/roster.json; "off"

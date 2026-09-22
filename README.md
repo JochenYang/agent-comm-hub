@@ -430,7 +430,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (282 checks: 156 smoke + 37 setup + 11 ops + 35 herdr + 23 discover + 20 e2e)
+pnpm test             # test suite (291 checks: 165 smoke + 37 setup + 11 ops + 35 herdr + 23 discover + 20 e2e)
 npm run build:admin   # admin/ workspace (npm) → single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
@@ -481,4 +481,4 @@ Tests cover registration, duplicate rejection, chat routing, sender-filtered wai
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 282-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
+MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 291-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).

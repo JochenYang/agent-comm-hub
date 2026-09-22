@@ -230,6 +230,33 @@ try {
   await mavis.call('bridge_poll')
   await opencode.call('bridge_poll')
 
+  console.log('== task delivery bookkeeping (deliveredMs) ==')
+  // The ledger row must exist BEFORE the message is routed: deliver() books
+  // the first delivery time on the assignee row, and a ledger miss there left
+  // deliveredMs empty for every task (waiter handoff and mailbox alike).
+  const parkedWait = mavis.call('bridge_wait', { timeoutMs: 3000 }) // waiter first, message second
+  await new Promise(resolve => setTimeout(resolve, 100)) // let the wait reach the hub before sending
+  const handedTask = await claude.call('bridge_task', { to: 'mavis', prompt: 'handed to a live waiter' })
+  const handedMsg = await parkedWait
+  check('task sent to a parked waiter is handed over', handedMsg.type === 'message' && handedMsg.message.id === handedTask.id, JSON.stringify(handedMsg))
+  const handedStatus = await claude.call('bridge_task_status', { ref: handedTask.id })
+  const handedRow = handedStatus.task?.assignees?.find(a => a.peerId === 'mavis')
+  check(
+    'deliveredMs recorded for the waiter handoff',
+    typeof handedRow?.deliveredMs === 'number' && handedRow.deliveredMs >= handedTask.ts,
+    JSON.stringify(handedStatus.task?.assignees),
+  )
+  const queuedTask = await claude.call('bridge_task', { to: 'mavis', prompt: 'queued, no waiter parked' })
+  const queuedStatus = await claude.call('bridge_task_status', { ref: queuedTask.id })
+  const queuedRow = queuedStatus.task?.assignees?.find(a => a.peerId === 'mavis')
+  check(
+    'deliveredMs recorded for a task parked in the mailbox',
+    typeof queuedRow?.deliveredMs === 'number' && queuedRow.deliveredMs >= queuedTask.ts,
+    JSON.stringify(queuedStatus.task?.assignees),
+  )
+  const queuedDrained = await mavis.call('bridge_poll')
+  check('the parked task is still delivered on poll', queuedDrained.messages.some(m => m.id === queuedTask.id), JSON.stringify(queuedDrained.messages.map(m => m.id)))
+
   console.log('== broadcast ==')
   await opencode.call('bridge_chat', { to: 'all', message: 'attention everyone' })
   const mavisBroadcast = await mavis.call('bridge_wait', { timeoutMs: 3000 })
@@ -700,6 +727,19 @@ try {
     const deniedDelete = await stranger.callRaw('bridge_group_delete', { group: 'eng' })
     check('non-creator non-manager cannot delete a group', deniedDelete.error !== undefined && /manager/.test(deniedDelete.error), JSON.stringify(deniedDelete))
 
+    // A group task carries the GROUP id in `to`, so an assignee (peerId ≠
+    // groupId) must read its status through the assignee row — bridge_tasks
+    // already lists it for them.
+    const groupTask = await zs.call('bridge_task', { to: 'eng', prompt: '群里协作一下' })
+    const assigneeRead = await ls.call('bridge_task_status', { ref: groupTask.id })
+    check(
+      'group-task assignee can read the task status',
+      assigneeRead.task?.id === groupTask.id && assigneeRead.task?.assignees?.some(a => a.peerId === 'lisi'),
+      JSON.stringify(assigneeRead),
+    )
+    const outsiderRead = await stranger.callRaw('bridge_task_status', { ref: groupTask.id })
+    check('non-assignee non-member still denied the task status', outsiderRead.error !== undefined && /manager/.test(outsiderRead.error), JSON.stringify(outsiderRead))
+
     // dynamic membership: add/remove members after create (0.7.x)
     const wangwu = makeClient('wangwu', base)
     await wangwu.init()
@@ -764,6 +804,17 @@ try {
     const timedStatus = await smA.call('bridge_task_status', { ref: timed.id })
     check('timeoutMs marks the task timeout', timedStatus.task.status === 'timeout' && timedStatus.task.acks.some(a => a.system === true), JSON.stringify(timedStatus.task))
 
+    // A deadline past setTimeout's 2^31-1 ms ceiling used to overflow the SLA
+    // timer and fire it after ~1 ms, timing the task out on the spot.
+    const farSla = await smA.call('bridge_task', { to: 'sm-b', prompt: 'far deadline', timeoutMs: 3_000_000_000 })
+    await new Promise(r => setTimeout(r, 200))
+    const farStatus = await smA.call('bridge_task_status', { ref: farSla.id })
+    check(
+      'multi-day timeoutMs stays pending (timer not truncated to ~1ms)',
+      farStatus.task.status === 'pending' && farStatus.task.deadlineAt - Date.now() > 2_000_000_000,
+      JSON.stringify({ status: farStatus.task.status, deadlineAt: farStatus.task.deadlineAt, now: Date.now() }),
+    )
+
     const floodTask = await smA.call('bridge_task', { to: 'sm-b', prompt: 'survive eviction' })
     for (let i = 0; i < 120; i++) await smA.call('bridge_chat', { to: 'sm-b', message: `flood-${i}` })
     await smB.call('bridge_poll')
@@ -788,6 +839,9 @@ try {
 
   console.log('== persistence (sqlite db) ==')
   const dbFile = `${tmpdir()}/hub-state-test-${Date.now()}.db`
+  // Last message of the reply chain built before the restart — after the
+  // restart its id is used to try (and fail) to extend the chain past MAX_HOP.
+  let chainMsg
   const hubDbA = startHub({ port: 19008, waitTimeoutMs: 2000, maxQueue: 10, historyLimit: 20, connectedWindowMs: 60_000, db: dbFile }, { info: () => {}, warn: () => {} })
   try {
     const base = 'http://127.0.0.1:19008/mcp'
@@ -801,6 +855,17 @@ try {
     await carol.init()
     await alice.call('bridge_group_add_member', { group: 'ops', member: 'carol' })
     await alice.call('bridge_task', { to: 'bob', prompt: '重启后还在', threadId: 'db-thread' })
+    // A reply chain that straddles the restart: without a persisted `hop` the
+    // depth resets to 0 and MAX_HOP is bypassed by restarting the hub.
+    chainMsg = await alice.call('bridge_chat', { to: 'bob', message: 'chain-0' })
+    for (let i = 1; i <= 5; i++) {
+      chainMsg = await (i % 2 === 1 ? bob : alice).call('bridge_chat', {
+        to: i % 2 === 1 ? 'alice' : 'bob',
+        message: `chain-${i}`,
+        ref: chainMsg.id,
+      })
+    }
+    check('hop chain of 5 is built before the restart', chainMsg.hop === 5, JSON.stringify(chainMsg))
     // bob never polls → the message stays queued; close flushes everything.
   } finally {
     hubDbA.close()
@@ -828,6 +893,11 @@ try {
     check('group membership edit restored from sqlite', groups.groups.some(g => g.id === 'ops' && g.members.includes('carol')), JSON.stringify(groups))
     const tasks = await alice.call('bridge_tasks', { role: 'sent' })
     check('task ledger restored from sqlite', tasks.tasks.some(t => t.prompt === '重启后还在' && t.status === 'pending' && t.threadId === 'db-thread'), JSON.stringify(tasks.tasks.map(t => ({ p: t.prompt, s: t.status }))))
+    let chainErr = null
+    try {
+      await alice.call('bridge_chat', { to: 'bob', message: 'chain-6', ref: chainMsg.id })
+    } catch (e) { chainErr = String(e.message ?? e) }
+    check('hop depth survives a sqlite restart (chain cap still enforced)', chainErr !== null && /hop limit/i.test(chainErr), String(chainErr))
   } finally {
     hubDbB.close()
     rmSync(dbFile, { force: true })

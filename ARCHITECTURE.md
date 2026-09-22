@@ -34,7 +34,7 @@ tasks, and acknowledge each other in real time.
 | **Transport** | MCP streamable-http, hand-rolled over `node:http` | Zero runtime dependencies; `charset=utf-8` responses; JSON-RPC + SSE long connection; `Mcp-Session-Id` per connection |
 | **Identity** | Auto-registration at the MCP handshake (`initialize`); `clientInfo.name` becomes the peer id | Connect = join. **Same-name connections share one peer id (N:1)** — an agent that opens a new session per chat keeps a stable identity and its sessions share the mailbox. `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration (a manager may target another peer: kick). Each peer keeps a **profile** (client name/version, mutable display alias) that survives unregister/GC; the alias is cosmetic — routing always uses the immutable peer id. Roster edits are gated by `managerPeers` (default `['agent-hub-cli', 'hub-admin']` — the desktop GUI and the web console). A manager may also **true-rename** a registered peer (`bridge_rename { peer, peerId }`): mailbox, waiters, bindings, and history attribution re-key atomically. Reading other peers' history is manager-gated too. Profiles persist to `--state-file` (default `~/.agent-comm-hub/roster.json`) |
 | **Routing** | Per-peer FIFO mailbox + long-poll waiters | `bridge_wait` long-polls (default 30 s, server ceiling 60 s); looping it = real-time listening; offline peers' messages queue (max 200, oldest dropped); `to: "all"` broadcasts |
-| **Protocol** | Message `{id, from, to, kind, content, ref?, channel?, threadId?, ts}` | `kind`: `chat` / `task` / `notice` / `ack`. `from` is **injected by the hub** from the session binding — clients cannot spoof it. `ack` is auto-routed back to the original sender of `ref`. Task ledger: `pending → accepted/working → done/failed/timeout` (or `rejected`); terminal statuses lock; `timeoutMs` is a soft SLA. |
+| **Protocol** | Message `{id, from, to, kind, content, ref?, channel?, threadId?, hop?, ts}` | `kind`: `chat` / `task` / `notice` / `ack`. `from` is **injected by the hub** from the session binding — clients cannot spoof it. `ack` is auto-routed back to the original sender of `ref`. `ref` chains carry a `hop` depth (persisted, so a restart cannot reset it) capped at 5. Task ledger: `pending → accepted/working → done/failed/timeout` (or `rejected`); terminal statuses lock; `timeoutMs` is a soft SLA with no ceiling — a deadline beyond `setTimeout`'s 2^31−1 ms limit is re-armed in segments. |
 | **Lifecycle** | Connected = recent activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC unregisters peers beyond `peerIdleTimeoutMs` (10 min) | An open session stays "online" without heartbeat calls; stale bindings are evicted and their names freed |
 
 ## 3. One real-time conversation
@@ -104,7 +104,7 @@ src/
 └── cli.ts          # agent-comm-hub CLI
 agents/             # per-agent config templates + install-all.ps1 (incremental sync)
 admin/              # web console workspace (Vite + React + Tailwind + beui)
-test/               # multi-peer smoke suite (156) + herdr control suite (35)
+test/               # multi-peer smoke suite (165) + herdr control suite (35)
 ```
 
 ## 6. Installing & syncing to agents
@@ -149,8 +149,9 @@ They coexist: ports 18763 vs 18764.
 ## 9. Facts
 
 - Version 0.9.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
-- Test suite 156/156 smoke + 37/37 setup + 11/11 ops + 35/35 herdr + 23/23 discovery + 20/20 e2e (282): registration/rename/unregister, routing, broadcast, ack routing,
-  task ledger, filtered waits, connect-time auto-registration, shared identity, SSE
+- Test suite 165/165 smoke + 37/37 setup + 11/11 ops + 35/35 herdr + 23/23 discovery + 20/20 e2e (291): registration/rename/unregister, routing, broadcast, ack routing,
+  task ledger (delivery timestamps, terminal lock, timeouts incl. multi-day SLAs),
+  a 5-hop reply chain that survives a restart, filtered waits, connect-time auto-registration, shared identity, SSE
   liveness, idle GC, error paths, control-tool argv passthrough, permission
   gating, missing CLI, registry validation, PATH/PATHEXT probing, npm scoped
   dirs, os filtering, per-platform service dry-runs.

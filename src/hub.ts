@@ -125,6 +125,11 @@ const MAX_PROFILES = 512
  * long-running hub cannot grow the map without bound; pending tasks stay. */
 const MAX_TASKS = 1024
 
+/** Largest delay `setTimeout` honors: the delay is a signed 32-bit int, and a
+ * bigger value overflows to a ~1 ms timer (Node fires it immediately and only
+ * warns). Longer waits are re-armed in segments — see scheduleTaskTimeout. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 /** Live hub summary returned by the status tool. */
 export interface HubStatus {
   server: 'agent-comm-hub'
@@ -361,8 +366,13 @@ export class AgentHub {
    * wait for acks. */
   sendTask(from: string, to: string, task: TaskContent): BridgeMessage {
     const threadId = task.threadId
-    const message = this.route(from, to, 'task', JSON.stringify(task), undefined, threadId)
+    // The ledger row must exist BEFORE delivery: deliver() books the first
+    // delivery time on the assignee row and silently gives up when the task
+    // is not in the ledger yet. With route()'s deliver-then-record order
+    // every task that reached a waiter (or a mailbox) lost its deliveredMs.
+    const message = this.compose(from, to, 'task', JSON.stringify(task), undefined, threadId)
     this.recordTask(message, task)
+    this.dispatch(message)
     return message
   }
 
@@ -421,11 +431,19 @@ export class AgentHub {
     this.options.onTaskChanged?.(this.taskOf(record.id)!)
   }
 
-  /** Arm the SLA timer for a task that supplied `timeoutMs`. */
+  /** Arm the SLA timer for a task that supplied `timeoutMs`. A deadline
+   * beyond {@link MAX_TIMER_DELAY_MS} cannot be expressed as one delay — the
+   * timer would overflow and fire after ~1 ms — so it is re-armed in segments
+   * of that size. `deadlineAt` stays the authoritative deadline and each
+   * segment recomputes the remaining time, so a long SLA is honored exactly
+   * (no drift); settling or evicting the task clears the pending segment, and
+   * clearing the timer is what ends the chain. */
   private scheduleTaskTimeout(record: TaskRecord): void {
     if (record.deadlineAt === undefined) return
-    const delay = Math.max(0, record.deadlineAt - Date.now())
-    const timer = setTimeout(() => this.fireTaskTimeout(record.id), delay)
+    const remaining = record.deadlineAt - Date.now()
+    const timer = remaining > MAX_TIMER_DELAY_MS
+      ? setTimeout(() => this.scheduleTaskTimeout(record), MAX_TIMER_DELAY_MS)
+      : setTimeout(() => this.fireTaskTimeout(record.id), Math.max(0, remaining))
     timer.unref?.()
     this.taskTimers.set(record.id, timer)
   }
@@ -803,6 +821,7 @@ export class AgentHub {
       const m = raw as Record<string, unknown>
       if (typeof m.id !== 'string' || typeof m.from !== 'string' || typeof m.to !== 'string' || typeof m.content !== 'string' || typeof m.ts !== 'number') continue
       if ((KINDS as readonly string[]).includes(m.kind as string) === false) continue
+      const hop = importHop(m.hop)
       valid.push({
         id: m.id,
         from: m.from,
@@ -812,6 +831,7 @@ export class AgentHub {
         ...(typeof m.ref === 'string' ? { ref: m.ref } : {}),
         ...(typeof m.channel === 'string' ? { channel: m.channel } : {}),
         ...(typeof m.threadId === 'string' ? { threadId: m.threadId } : {}),
+        ...(hop !== undefined ? { hop } : {}),
         ts: m.ts,
       })
     }
@@ -839,6 +859,7 @@ export class AgentHub {
         if (typeof raw !== 'object' || raw === null) continue
         const m = raw as Record<string, unknown>
         if (typeof m.id !== 'string' || typeof m.from !== 'string' || typeof m.content !== 'string' || typeof m.ts !== 'number') continue
+        const hop = importHop(m.hop)
         restored.push({
           id: m.id,
           from: m.from,
@@ -848,6 +869,7 @@ export class AgentHub {
           ...(typeof m.ref === 'string' ? { ref: m.ref } : {}),
           ...(typeof m.channel === 'string' ? { channel: m.channel } : {}),
           ...(typeof m.threadId === 'string' ? { threadId: m.threadId } : {}),
+          ...(hop !== undefined ? { hop } : {}),
           ts: m.ts,
         })
       }
@@ -962,6 +984,16 @@ export class AgentHub {
   /** Create a message from `from` addressed to `to` and deliver it. `to` may
    *  be a peer id, {@link BROADCAST}, or a group id. */
   private route(from: string, to: string, kind: MessageKind, content: string, ref?: string, threadId?: string): BridgeMessage {
+    const message = this.compose(from, to, kind, content, ref, threadId)
+    this.dispatch(message)
+    return message
+  }
+
+  /** Validate, build, and record a message from `from` to `to` (`to` may be a
+   *  peer id, {@link BROADCAST}, or a group id). Composing and dispatching are
+   *  separate steps because a caller may need ledger state to exist before
+   *  anything reaches a recipient — {@link sendTask} books delivery times. */
+  private compose(from: string, to: string, kind: MessageKind, content: string, ref?: string, threadId?: string): BridgeMessage {
     if (!this.lastSeen.has(from)) throw new Error(`sender not registered: ${from}`)
     const group = this.groups.get(to)
     if (to !== BROADCAST && group === undefined && !this.lastSeen.has(to)) {
@@ -969,6 +1001,8 @@ export class AgentHub {
     }
     // Hop = chain depth along a ref parent (reply / ack / re-delegation).
     // Caps runaway A→B→C→… loops at MAX_HOP (same idea as MiMo session-chat).
+    // The parent is read from history, so the depth of a chain that straddles
+    // a restart depends on `hop` being persisted (see importHistory).
     let hop = 0
     if (ref !== undefined) {
       const parent = this.historyRing.findLast(m => m.id === ref)
@@ -997,18 +1031,26 @@ export class AgentHub {
     // recipient's waiter finally drains it (the desktop "only after the other
     // agent picks it up" lag).
     this.remember(message)
-    if (to === BROADCAST) {
-      for (const peer of this.peers()) {
-        if (peer !== from) this.deliver(peer, message)
-      }
-    } else if (group !== undefined) {
-      for (const member of group.members) {
-        if (member !== from) this.deliver(member, message)
-      }
-    } else {
-      this.deliver(to, message)
-    }
     return message
+  }
+
+  /** Fan a composed message out to its recipients: broadcast, group members,
+   *  or the single addressed peer. */
+  private dispatch(message: BridgeMessage): void {
+    if (message.to === BROADCAST) {
+      for (const peer of this.peers()) {
+        if (peer !== message.from) this.deliver(peer, message)
+      }
+      return
+    }
+    const group = this.groups.get(message.to)
+    if (group !== undefined) {
+      for (const member of group.members) {
+        if (member !== message.from) this.deliver(member, message)
+      }
+      return
+    }
+    this.deliver(message.to, message)
   }
 
   /** Queue or hand off a message; wake the first matching waiter for its target.
@@ -1047,6 +1089,14 @@ export class AgentHub {
     if (this.historyRing.length > this.options.historyLimit) this.historyRing.splice(0, this.historyRing.length - this.options.historyLimit)
     this.options.onMessage?.(message)
   }
+}
+
+/** Chain depth of a persisted message, or `undefined` for "chain origin".
+ * Rows written before `hop` was persisted (and garbage values) restore as 0:
+ * such a message can only be the parent of a fresh hop-1 reply, which costs
+ * the remaining budget of that one chain instead of breaking the restore. */
+function importHop(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
 /** Drain only messages from one sender, preserving order. */

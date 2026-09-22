@@ -205,7 +205,7 @@ strategy:
   - fake npm root（注入 `npmRoot` 参数）验证 npm 发现
   - 注册表 schema 校验：坏记录（缺 strategy、os 非法、路径越界 `../`）报错
   - 大小写：Linux 语义下路径精确匹配（参数注入）
-- `test/setup.mjs` 扩展：注册表驱动的安装/幂等/remove 回归（现有 32 项保持通过）
+- `test/setup.mjs` 扩展：注册表驱动的安装/幂等/remove 回归（现有 37 项保持通过）
 - 三端 CI 跑同一套测试
 
 ## 5. 安全与边界

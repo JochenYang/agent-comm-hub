@@ -46,7 +46,7 @@ layers:
 | Transport | MCP streamable-http hand-rolled over `node:http`; JSON-RPC + SSE; `Mcp-Session-Id` per connection; `charset=utf-8` on every response; CORS `*`; 1 MB request-body cap |
 | Identity | Auto-registration at `initialize`; `clientInfo.name` → peer id (sanitized, `agent` fallback); `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration |
 | Routing | Per-peer FIFO mailbox + long-poll waiters; `bridge_wait` (default 30 s, server ceiling 60 s); sender-filtered waits; `ref`-filtered ack waits; `to: "all"` broadcast; ack routed back to the original sender of `ref` |
-| Protocol | Message `{id, from, to, kind, content, ref?, ts}`; `kind` = `chat` \| `task` \| `notice` \| `ack`; task/ack payloads are JSON-encoded strings decoded by `decodeContent`; `bridge_task` records a task ledger (status + ack timeline) |
+| Protocol | Message `{id, from, to, kind, content, ref?, channel?, threadId?, hop?, ts}`; `kind` = `chat` \| `task` \| `notice` \| `ack`; task/ack payloads are JSON-encoded strings decoded by `decodeContent`; `bridge_task` records a task ledger (status + ack timeline) with per-assignee delivery times; `ref` chains carry a `hop` depth capped at `MAX_HOP` (5) and persist with the message, so a restart cannot reset a chain |
 | Lifecycle | Connected = activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC evicts peers idle beyond `peerIdleTimeoutMs` (10 min) — never a peer with a live SSE stream |
 
 ### Code layout
@@ -54,10 +54,12 @@ layers:
 ```text
 src/
 ├── protocol.ts     # message kinds, BridgeMessage, task/ack payloads, peer id pattern
-├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, idle GC (transport-agnostic)
+├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, task ledger, idle GC (transport-agnostic)
 ├── mcp-server.ts   # SessionRegistry (sessions + peer bindings) + McpStreamableHttpServer
 ├── hub-tools.ts    # the 30 bridge tools, auto-registration, peerId/alias sanitizing, profiles, result presentation
 ├── auth.ts         # remote-mode bearer-token table (load/validate/lookup)
+├── persist.ts      # SQLite state store (node:sqlite): history ring, offline
+│                   #   mailboxes, profiles, groups, task ledger (remote mode)
 ├── index.ts        # startHub() programmatic API, DEFAULT_CONFIG, exports
 ├── cli.ts          # agent-comm-hub CLI (hub start / setup / discover / status / service / update)
 ├── setup.ts        # `setup`: registry-driven incremental sync of MCP entry +
@@ -79,7 +81,7 @@ server/             # remote-deployment assets: token-table template, LAN/VPS
                     #   recipes, Caddy TLS example (see server/README.md)
 test/               # smoke.mjs (multi-peer), setup.mjs (installer),
                     #   ops.mjs (status + service), herdr.mjs (control),
-                    #   discover.mjs (discovery engine)
+                    #   discover.mjs (discovery engine), e2e.mjs (built CLI)
 scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGELOG.md)
 ```
 
@@ -94,6 +96,11 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
 - `index.ts` exports everything public: `startHub`, `AgentHub`,
   `McpStreamableHttpServer`, `SessionRegistry`, `hubTools`, `HerdrCtl`, the
   bridge tool wiring, and `* from './protocol.js'`.
+- Task SLA timers (`hub.ts`) are re-armed in segments of at most 2^31−1 ms:
+  `setTimeout` saturates at that delay, and a bigger one fires after ~1 ms
+  instead (marking a fresh task `timeout` on the spot). `deadlineAt` stays the
+  authoritative deadline, so a multi-day `timeoutMs` is honored exactly; the
+  `bridge_task` tool description states the same contract (no upper bound).
 - The 30 tools (symmetric on every side): the 13 message tools
   (`bridge_register`, `bridge_unregister`, `bridge_rename`, `bridge_chat`,
   `bridge_task`, `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`,
@@ -116,7 +123,10 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
   true-renames a registered peer (atomic re-key incl. history rewrite);
   `bridge_register` self-rename uses the same lossless path when its session
   is the only one attached. Other-peer history reads and
-  `bridge_tasks { peer }` are manager-gated. Hub
+  `bridge_tasks { peer }` are manager-gated. `bridge_task_status` is open to
+  the sender and to the task's assignees — a group task carries the group id
+  in `to`, so its assignees read it through their assignee row (or as current
+  group members) exactly as `bridge_tasks` lists it for them. Hub
   pushes SSE notifications:
   `peers_changed` (full roster) to all streams, `message` (queued-mail hint)
   to the recipient's streams only.
@@ -128,8 +138,8 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build + build:test (esbuild), then node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs + test/e2e.mjs → 282 checks
-                      #   (156+37+11+35+23+20)
+                      #   + test/discover.mjs + test/e2e.mjs → 291 checks
+                      #   (165+37+11+35+23+20)
 npm run build:admin   # admin/ (npm, not pnpm) → the single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
@@ -146,15 +156,16 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 156/156 + 37/37 +
+  merging, the full `pnpm test` must stay green (verified: 165/165 + 37/37 +
   11/11 + 35/35 + 23/23 + 20/20 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (156 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (165 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
-  sender, broadcast (no echo to sender, recorded exactly once in history),
+  sender, task delivery bookkeeping (`deliveredMs` for both the waiter handoff
+  and the mailbox path), broadcast (no echo to sender, recorded exactly once in history),
   status/peers/history incl. the
   `peer: "all"` unfiltered archiver view, unregister /
   re-register, auto-registration (first tool call, eager at connect,
@@ -165,9 +176,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   rename (manager re-key: queued mail / ack / history continuity, old id
   unroutable, taken/reserved rejection; lossless self id-rename via
   bridge_register), history access gate (non-manager denied other-peer and
-  peer="all" reads), the task state machine (`working` + progress, terminal
-  lock with `applied: false`, `timeoutMs` → `timeout`, ack routing after
-  history eviction, `MAX_HOP` chain cap, `threadId` waits), roster
+  peer="all" reads), group-task assignee reads of `bridge_task_status`
+  (non-assignee still manager-gated), the task state machine (`working` +
+  progress, terminal lock with `applied: false`, `timeoutMs` → `timeout`,
+  multi-day `timeoutMs` staying pending, ack routing after
+  history eviction, `MAX_HOP` chain cap incl. survival across a SQLite
+  restart, `threadId` waits), roster
   persistence (stateFile write + restore), remote auth (401 without/unknown
   token, token identity overrides the
   client name, same-name users land on distinct peers with no mailbox
@@ -309,8 +323,9 @@ carries one segment (`0.8.x → 0.9.0`).
      (also stated in `ARCHITECTURE.md` §4 and the AGENTS.md code-layout note)
    - the `managerPeers` default — `grep -rIn "managerPeers\|manager-peers"
      src/index.ts src/cli.ts README.md README.zh.md ARCHITECTURE.md`
-     (the `--help` text in `src/cli.ts` still prints the pre-0.8 single id —
-     fix it whenever the default changes)
+     (the `--help` text in `src/cli.ts` prints the same
+     `agent-hub-cli,hub-admin` default as `DEFAULT_CONFIG.managerPeers` — keep
+     both in sync whenever the default changes)
    - every version occurrence — `grep -rn "<old version>" --include='*.md'
      --include='*.json' --include='*.ts' .` (`package.json`, `src/index.ts`,
      `CHANGELOG.md`, `README*.md`, `ARCHITECTURE.md`); ignore `test/*-entry.mjs`
