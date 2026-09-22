@@ -53,8 +53,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 顺序必须 pnpm/action-setup 在前：setup-node 的 cache: pnpm 会调用
-      # pnpm 计算 lockfile 缓存 key，后装 pnpm 会报 "Unable to locate executable file: pnpm"。
+      # 不再给 setup-node 挂 cache: pnpm。app/package.json 固定 packageManager
+      # pnpm@11.7.0，pnpm 在 app/ 内会自我切换到 11.x，而 setup-node 的缓存步骤是用
+      # 这里装的 pnpm 10 去探测 store 路径的：两者算出的路径在 windows 上不一致，
+      # 后置步骤直接报 "Path Validation Error"（路径不存在）把 job 判红。app 的依赖
+      # 安装本身只要几秒，不值得为此担一个会失败的缓存步骤。
+      # pnpm/action-setup 仍保留：job 里的 pnpm 命令依赖它提供的 pnpm。
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -64,8 +68,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: app/pnpm-lock.yaml
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

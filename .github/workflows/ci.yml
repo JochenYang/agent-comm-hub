@@ -28,6 +28,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      # admin/ 是独立子工程（npm + 自己的 package-lock.json，不属于 pnpm workspace）：
+      # 它的类型漂移和过期产物不会被上面的 pnpm 脚本拦到。必须在 pack 之前重建，
+      # 打进 tarball 的 assets/admin.html 才是当次构建的结果（pnpm pack 只跑
+      # prepare，不会碰 admin）。
+      - name: Install admin deps
+        run: npm --prefix admin ci
+      - name: Admin typecheck
+        run: npm --prefix admin run typecheck
+      - name: Admin build
+        run: npm --prefix admin run build
       - run: pnpm pack
       - name: Upload tarball
         uses: actions/upload-artifact@v4

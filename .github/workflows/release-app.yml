@@ -97,11 +97,13 @@ jobs:
         working-directory: app
     steps:
       - uses: actions/checkout@v4
-      # pnpm/action-setup 必须在 setup-node 之前（cache: pnpm 需要 pnpm 已就绪）
       - uses: pnpm/action-setup@v4
         with: { version: 10 }
+      # 不挂 cache: pnpm（同 ci-app.yml）：app/package.json 固定 packageManager
+      # pnpm@11.7.0，pnpm 自我切换到 11.x 后用这里装的 pnpm 10 探测出的 store 路径
+      # 并不存在，windows 上后置缓存步骤会报 "Path Validation Error" 把 job 判红。
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm, cache-dependency-path: app/pnpm-lock.yaml }
+        with: { node-version: 22 }
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with: { workspaces: 'app/src-tauri -> target' }
