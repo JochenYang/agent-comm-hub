@@ -5,6 +5,24 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-09-22
+
+### Added
+
+- Reply chains and A2A threads are carried end to end: `ref` / `threadId` are
+  passed through `bridge_chat` and `bridge_task`, kept in the stored message
+  body, and `to: "all"` now counts as involving this peer. The local history
+  default rises to 500 rows.
+- The hub host field accepts a full URL (`https://hub.example.com/mcp`); the
+  scheme, port and path inside that URL take precedence over the separate
+  fields.
+
+### Fixed
+
+- Local history keeps `channel` / `thread_id` (schema v3, migrated in place
+  with `PRAGMA table_info` + `ALTER TABLE`), so group unread counts and thread
+  grouping survive a restart instead of silently resetting.
+
 ## [1.4.0] — 2026-09-06
 
 ### Added
