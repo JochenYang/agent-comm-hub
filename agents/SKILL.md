@@ -6,7 +6,8 @@ description: >-
   chat, sending messages or tasks to another agent, waiting for another
   agent's reply, or forwarding results between agents. Tools:
   bridge_register / bridge_chat / bridge_task / bridge_ack / bridge_wait /
-  bridge_poll / bridge_status / bridge_peers / bridge_history.
+  bridge_poll / bridge_status / bridge_peers / bridge_history /
+  bridge_commit / bridge_nack.
 ---
 
 # agent-comm-hub usage
@@ -23,26 +24,59 @@ Optional: call `bridge_register(peerId)` to claim a readable id
 
 ## Tools
 
-- `bridge_chat(to, message, threadId?, ref?)` — send a chat to a peer, group
-  id, or `"all"` (broadcast). `threadId` groups a multi-turn dialog; `ref`
-  marks a reply-to and is capped at 5 hops per chain (see Notes).
-- `bridge_task(to, prompt, context?, deliverable?, timeoutMs?, threadId?)` —
+- `bridge_chat(to, message, threadId?, ref?, expiresAt?)` — send a chat to a peer,
+  group id, or `"all"` (broadcast). `threadId` groups a multi-turn dialog; `ref`
+  marks a reply-to (chain depth is bounded — see Notes). `expiresAt` is an
+  absolute epoch-ms deadline: a message still undelivered when it passes is
+  dropped (counted as `droppedExpired`) instead of arriving late.
+- `bridge_notice(to, message, level?)` — send a system-flavoured line
+  ("your mailbox dropped 3 messages", "hub restarting"). `level` is
+  `info` | `warn` | `error`. Use it instead of `bridge_chat` when the recipient
+  should read it as a status, not as a peer talking; it creates no task.
+- `bridge_task(to, prompt, context?, deliverable?, timeoutMs?, threadId?, ref?, expiresAt?)` —
   delegate a structured task. `timeoutMs` is a soft SLA: the hub marks the
-  task `timeout` if no terminal ack arrives in time.
+  task `timeout` if no terminal ack arrives in time. `ref` names the task this
+  one answers; a task answering a task is a re-delegation, and that chain is
+  capped at 5 hops.
 - `bridge_ack(ref, status, note?, progress?)` — acknowledge a task.
   Statuses: `accepted` | `working` | `rejected` | `done` | `failed`.
   `working` + `progress` (0–100) report intermediate state. Terminal
   statuses lock the task (later acks are recorded on the timeline but do
   not reopen it). The ack is auto-routed to the original sender of `ref`.
 - `bridge_task_status(ref)` — one task's ledger state, per-assignee state,
-  and full ack timeline.
+  and full ack timeline (also carries the A2A aliases `taskId` / `contextId` /
+  `a2aState`).
 - `bridge_tasks(role?, status?, limit?)` — list tasks you sent or received.
-- `bridge_wait(from?, ref?, threadId?, timeoutMs?)` — long-poll for the next
+- `bridge_task_cancel(ref, reason?)` — cancel a task. Either side may: the sender
+  stops work it no longer wants, an assignee reports it will not finish. Routed to
+  the other side; `canceled` is terminal and a later ack cannot reopen it.
+- `bridge_task_input(ref, input)` — answer a task whose assignee acked
+  `input-required`. Only the SENDER calls this; the answer reaches the waiting
+  assignee and the task resumes to `working`.
+- `bridge_announce(card)` — say what you can do: skills, whether you accept tasks,
+  how many at once, input/output modes, and how you are executed when not polling.
+  Only peers that set `acceptsTasks: true` are offered by `bridge_discover`.
+- `bridge_discover(skill?, tag?, acceptsTasks?, idleOnly?)` — find a peer to hand
+  work to. Returns matches with their current load (`queued` / `waiting` /
+  `running`); by default only peers that accept tasks.
+- `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?)` — long-poll for the next
   message (default 30 s; `ref` waits for that task's ack; `threadId` narrows
-  to one dialog). Loop it to hold a real-time conversation.
-- `bridge_poll(from?)` — non-blocking drain of every queued message.
+  to one dialog). Loop it to hold a real-time conversation. `ack: "manual"`
+  LEASES the message instead of consuming it.
+- `bridge_poll(from?, ack?)` — non-blocking drain of every queued message.
+- `bridge_commit(ids)` — confirm you have finished with leased messages. Until you
+  do, they are handed out again when the lease expires (with `attempts` growing),
+  so `ack: "manual"` + `bridge_commit` is the at-least-once path: use it when
+  losing a message would be worse than handling one twice. A message that keeps
+  being handed out without a commit is dead-lettered rather than looping forever
+  (`bridge_status` shows `inFlight` / `deadLettered`).
+- `bridge_nack(ids)` — give leased messages back now (handling failed), or revive
+  a dead-lettered one.
 - `bridge_status()` / `bridge_peers()` — hub health and who is online.
-- `bridge_history(peer?, limit?, channel?)` — recent messages (newest first).
+- `bridge_history(peer?, limit?, channel?, since?)` — recent messages (newest
+  first). `since` is a resume cursor: record `bridge_status().lastSeq`, then read
+  only what happened after it, with no repeats. A small `limit` still truncates,
+  so loop until you get an empty page.
 - `bridge_group_create/send/list/delete` + `add_member`/`remove_member` —
   named channels for a subset of peers.
 
@@ -105,11 +139,31 @@ Follow the scenario directly (tool names stay as-is):
   `bridge_peers()` when unsure.
 - Task terminal states (`done`/`failed`/`rejected`/`timeout`) cannot be
   reopened; start a new task instead of re-acking.
-- **Reply chains are capped at 5 hops.** Every message carrying `ref` sits one
-  hop deeper than the message it points at, and the hub rejects the 6th with
-  `hop limit exceeded`. You only run into it when you keep replying
-  (`ref`) or re-delegating along one chain instead of starting a new message —
-  two agents answering each other's replies forever is exactly what the cap
-  exists to stop. When it happens, stop extending that chain: send a fresh
-  message with no `ref` (a new `threadId` keeps it readable as one dialog) and
-  restate the context in it, or continue with `bridge_task` for new work.
+- **Reply chains are counted, not enforced — nothing is ever refused.**
+  Every message carrying `ref` sits one hop deeper than the message it points at.
+  A plain conversation (chat / ack replies) counts up to **50** hops; a **task
+  re-delegation chain** — a task replying to a task — counts up to **5**. Past
+  either ceiling `hop` simply stops counting: the message and its `ref` are
+  delivered unchanged, so correlation never breaks and `bridge_wait({ ref })`
+  keeps working on arbitrarily long chains. Read `hop` as “how deep this chain
+  is, capped” — reaching the ceiling is a hint that the conversation has become
+  a loop, not an error to recover from.
+- **Nothing is dropped silently any more.** If your mailbox overflows (`maxQueue`)
+  or a message hits its `expiresAt` before you read it, the hub counts it and
+  `bridge_status` / `bridge_peers` show `droppedOverflow` / `droppedExpired` on
+  your row. When you are waiting you may also receive a `notice` whose `from` is
+  the reserved id `hub` — `bridge_wait { from: "hub" }` subscribes to exactly
+  those. `all` and `hub` are reserved: you cannot register or rename into them.
+- **Need at-least-once instead of best-effort?** Take messages with
+  `bridge_wait { ack: "manual" }` (or `bridge_poll { ack: "manual" }`) and call
+  `bridge_commit` once you have really handled them. Uncommitted messages come
+  back when the lease expires, with `attempts` incremented; `bridge_nack` gives
+  one back immediately. After too many hand-outs a message is dead-lettered
+  instead of looping (see `deadLettered` in the roster).
+- **SSE pushes are a client-runtime event channel, not a wake-up.** A hub
+  notification arrives on the stream you subscribed to; it does NOT start a model
+  turn, and an agent that is not polling will not be woken by it. Waking an agent
+  that is not in a `bridge_wait` loop is the job of a *runner* — the hub runs the
+  configured executor for that peer and writes the outcome back as its ack
+  (`--runner`; see the hub README). If you want to be woken, either loop on
+  `bridge_wait` or ask the operator to configure a runner for you.

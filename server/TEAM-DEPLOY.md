@@ -55,24 +55,26 @@ agent-comm-hub auth add admin1 --owner 管理员 --role manager
 
 1. 设置 → Hub 模式：`remote`
 2. 填 hub 的 **host + port**（如 `hub.example.com` + `443`）与 manager token。
-   GUI 只收这两个字段，自己拼 `http://{host}:{port}{path}` ——**没有 scheme
-   选项，填完整 URL 无效**（见下方已知限制）。
+   GUI 的 Hub 主机名字段可以直接填完整 URL（如 `https://hub.example.com/mcp`），
+   URL 里的 scheme / 端口 / 路径优先于旁边两个字段；只填主机名时仍按
+   `http://{host}:{port}{path}` 拼接（app ≥ 1.5.0）。
 3. 重启连接后，GUI 以 `agent-hub-cli` 连入，拥有花名册/改名/踢人/全量历史/任务台账
 
 本地模式仍默认 spawn `npx agent-comm-hub`，行为不变。
 
-### 已知限制：桌面 GUI 不支持 https
+### 已知边界
 
-客户端固定拼 `http://{host}:{port}{path}`
-（`app/src-tauri/src/mcp_client.rs`），因此：
-
-- GUI 只能连到 hub 的**明文 http** 端口。走 Caddy/nginx TLS 反代（本清单第 1 节
-  的推荐拓扑）时，第 2 步填反代域名会握手失败——GUI 用不了，成员接入改用普通
-  MCP 客户端（第 3 节的配置片段照常带 Bearer，不受影响）。
-- 需要 GUI 的场景：要么让 GUI 机器直连 hub 的 http 端口（内网隔离网络可以），
-  要么等客户端补上 scheme 字段。
+- **桌面 GUI 支持 https（app ≥ 1.5.0）**：Hub 主机名填完整 URL 即可直连 TLS 反代，
+  不再需要让它直连明文 http 端口。
+- **反代的 `Origin` 与 `Host`**：hub 默认校验 `Origin`。管理台带 token 且 `Origin` 主机
+  与 `Host` 一致，所以照常可用；如果反代改写了 `Host`，需要在 hub 上用
+  `--allow-origins https://hub.example.com` 显式列出，否则浏览器侧的调用会被 403。
+- **hub 非回环启动必须有 token 表**：`--host 0.0.0.0` 而不带 `--auth-tokens` 会直接
+  拒绝启动（容器里请保持 Dockerfile 那样同时传两者）。
+- **manager id 建议配凭证**：不配 `--manager-token` 时 `managerPeers` 里的 id 是谁先到
+  谁得；公网/内网多人环境请配一个，或用 `auth add --role manager` 的 token。
 - 改名/踢人/认领匿名身份在管理台是只读展示（花名册标注来源 IP 与
-  `walk-in 未认领`）；这些操作目前走 CLI，或走能连上 http 端口的桌面 GUI。
+  `walk-in 未认领`）；这些操作走 CLI，或走桌面 GUI。
 
 ## 5. 验证
 

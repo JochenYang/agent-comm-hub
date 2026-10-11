@@ -31,6 +31,12 @@ pub enum McpError {
     Protocol(String),
     #[error("not connected (no session id)")]
     NotConnected,
+    /// The hub answered 404: it does not know this session any more (it was
+    /// restarted, or the session was terminated). Distinct from a generic
+    /// protocol error because the caller must rebuild the connection and
+    /// re-initialize — that is the whole point of the 404 (spec MUST).
+    #[error("session not found (http 404) — re-initialize")]
+    SessionGone,
 }
 
 pub type Result<T> = std::result::Result<T, McpError>;
@@ -160,6 +166,14 @@ impl McpClient {
         self.session_id.read().await.clone()
     }
 
+    /// Forget the current session id. The hub answers a session id it does not
+    /// know with 404 (spec MUST), so a client that keeps presenting a dead one
+    /// can never recover — this is the reconnect primitive.
+    async fn clear_session(&self) {
+        self.session_id.write().await.take();
+        *self.state.write().await = ConnState::Disconnected;
+    }
+
     /// The current connection state.
     pub async fn is_connected(&self) -> bool {
         matches!(*self.state.read().await, ConnState::Connected)
@@ -167,6 +181,11 @@ impl McpClient {
 
     /// `initialize`: establish a session + trigger the hub-end eager auto-registration (based on clientInfo.name).
     pub async fn initialize(&self) -> Result<Value> {
+        // A fresh initialize MUST NOT carry a session id (spec), and the hub now
+        // answers an unknown id with 404: presenting the one we kept from before a
+        // hub restart would fail forever. Dropping it here is what makes reconnect
+        // work at all.
+        self.clear_session().await;
         let params = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -237,6 +256,13 @@ impl McpClient {
         }
         let text = resp.text().await?;
         if !status.is_success() {
+            // 404 means the hub does not know this session any more (it restarted,
+            // or the session was terminated). Forget it so the next call does not
+            // keep presenting a dead id, and say what to do about it.
+            if status.as_u16() == 404 {
+                self.clear_session().await;
+                return Err(McpError::SessionGone);
+            }
             return Err(McpError::Protocol(format!(
                 "http {} from {url}: {text}",
                 status.as_u16()
@@ -269,11 +295,32 @@ impl McpClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
+        if status.as_u16() == 404 {
+            // The same signal a tool call gets: the hub has forgotten this session.
+            // Drop it so the next call re-initializes instead of re-subscribing in
+            // a loop against a dead id.
+            self.clear_session().await;
+            return Err(McpError::SessionGone);
+        }
         if !status.is_success() {
             return Err(McpError::Protocol(format!(
                 "SSE subscribe http {}",
                 status.as_u16()
             )));
+        }
+        // The hub mints a session for a stream that arrives without one and echoes
+        // it here. Adopt it: otherwise this stream stays attached to a session the
+        // hub can map to no peer, and every per-peer push (hub:message) is skipped
+        // for it while broadcast pushes still arrive — a confusing half-working
+        // stream.
+        if self.session_id.read().await.is_none() {
+            if let Some(sid) = resp.headers().get("mcp-session-id") {
+                if let Ok(s) = sid.to_str() {
+                    if !s.is_empty() {
+                        *self.session_id.write().await = Some(s.to_string());
+                    }
+                }
+            }
         }
         let mut stream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Value>(64);

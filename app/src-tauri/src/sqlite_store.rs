@@ -78,7 +78,6 @@ pub struct MessageRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnreadRecord {
     pub peer_id: String,
-    pub count: i64,
     pub last_read_ts: Option<i64>,
 }
 
@@ -205,6 +204,29 @@ impl Store {
                 }
             }
             tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (3);")?;
+        }
+        if current < 4 {
+            // v4: drop `unread.count`. It was written only by `bump_unread`, which no
+            // production path ever called, and read by nothing — the GUI derives
+            // unread from the message pool plus `last_read_ts`. A column that is never
+            // written and never read is not a feature, it is a trap: the next reader
+            // assumes it means something.
+            //
+            // Rebuild rather than `ALTER TABLE ... DROP COLUMN`: the rebuild works on
+            // any SQLite version and states the surviving shape explicitly. Guarded by
+            // a probe so a database that never had the column (a fresh v1 create, once
+            // the column is gone from the DDL) still advances its log.
+            if Self::column_exists(&tx, "unread", "count")? {
+                tx.execute_batch(
+                    r#"
+                    CREATE TABLE unread_v4 (peer_id TEXT PRIMARY KEY, last_read_ts INTEGER);
+                    INSERT INTO unread_v4 (peer_id, last_read_ts) SELECT peer_id, last_read_ts FROM unread;
+                    DROP TABLE unread;
+                    ALTER TABLE unread_v4 RENAME TO unread;
+                    "#,
+                )?;
+            }
+            tx.execute_batch("INSERT OR REPLACE INTO schema_version (version) VALUES (4);")?;
         }
         tx.commit()?;
         Ok(())
@@ -368,37 +390,34 @@ impl Store {
 
     // ---- unread ----
 
-    pub fn bump_unread(&self, peer_id: &str) -> Result<()> {
-        let conn = self.conn.lock()?;
-        conn.execute(
-            "INSERT INTO unread (peer_id, count) VALUES (?1, 1)
-             ON CONFLICT(peer_id) DO UPDATE SET count = count + 1",
-            params![peer_id],
-        )?;
-        Ok(())
-    }
 
     pub fn clear_unread(&self, peer_id: &str, last_read_ts: i64) -> Result<()> {
         let conn = self.conn.lock()?;
         conn.execute(
-            "INSERT INTO unread (peer_id, count, last_read_ts) VALUES (?1, 0, ?2)
-             ON CONFLICT(peer_id) DO UPDATE SET count = 0, last_read_ts = ?2",
+            "INSERT INTO unread (peer_id, last_read_ts) VALUES (?1, ?2)
+             ON CONFLICT(peer_id) DO UPDATE SET last_read_ts = ?2",
             params![peer_id, last_read_ts],
         )?;
         Ok(())
     }
 
+    /// Read-state for every peer the user has ever opened.
+    ///
+    /// What the GUI restores at startup is the WATERMARK: it derives unread counts
+    /// itself from the message pool plus `last_read_ts`, including for peers it has
+    /// read to zero. So this returns every row with a watermark, not only rows with
+    /// a non-zero counter — the old `WHERE count > 0` returned an empty list on
+    /// every real install, because nothing ever incremented that counter.
     pub fn list_unread(&self) -> Result<Vec<UnreadRecord>> {
         let conn = self.conn.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT peer_id, count, last_read_ts FROM unread
-             WHERE count > 0 ORDER BY last_read_ts DESC",
+            "SELECT peer_id, last_read_ts FROM unread
+             WHERE last_read_ts IS NOT NULL ORDER BY last_read_ts DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(UnreadRecord {
                 peer_id: row.get(0)?,
-                count: row.get(1)?,
-                last_read_ts: row.get(2)?,
+                last_read_ts: row.get(1)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -656,7 +675,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!((n, v), (3, 3));
+        assert_eq!((n, v), (4, 4));
     }
 
     /// The v3 migration applies to an existing v2 database: rolling the version log back and dropping
@@ -700,7 +719,46 @@ mod tests {
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
+    }
+
+    /// The v4 migration applies to an existing v3 database: `unread.count` is dropped
+    /// and the read watermark that sat next to it survives untouched.
+    #[test]
+    fn migrate_v4_drops_the_unread_counter() {
+        let store = fresh();
+        store.clear_unread("a", 1000).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            // Recreate the legacy shape: the counter column back (with data, so a
+            // migration that dropped the whole table instead of the column would be
+            // caught), and the log rolled to 3 so the v4 step re-runs.
+            conn.execute_batch(
+                "ALTER TABLE unread ADD COLUMN count INTEGER NOT NULL DEFAULT 0;
+                 UPDATE unread SET count = 7;
+                 DELETE FROM schema_version;
+                 INSERT INTO schema_version (version) VALUES (3);",
+            )
+            .unwrap();
+            assert!(Store::column_exists(&conn, "unread", "count").unwrap());
+        }
+        store.migrate().unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            assert!(
+                !Store::column_exists(&conn, "unread", "count").unwrap(),
+                "the counter column is gone"
+            );
+            assert!(
+                Store::column_exists(&conn, "unread", "last_read_ts").unwrap(),
+                "the watermark column survives"
+            );
+        }
+        // The row itself survived, watermark intact.
+        let rows = store.list_unread().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].peer_id, "a");
+        assert_eq!(rows[0].last_read_ts, Some(1000));
     }
 
     /// A database whose version log disagrees with its real schema (a partially applied migration, or
@@ -723,7 +781,37 @@ mod tests {
         let v: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
+    }
+    /// The claim "unread is persisted" is about a REAL file: the in-memory tests
+    /// above prove the query, not that the watermark survives a restart. This
+    /// closes and reopens the same database file, which is what the app does on
+    /// every launch.
+    #[test]
+    fn unread_watermark_survives_reopen() {
+        let path = std::env::temp_dir().join(format!("ach-unread-{}.sqlite", std::process::id()));
+        let file = path.to_string_lossy().into_owned();
+        let cleanup = || {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{file}{suffix}"));
+            }
+        };
+        cleanup();
+        {
+            let store = Store::open(&path).unwrap();
+            store.clear_unread("alice", 1_700_000_000_000).unwrap();
+            store.clear_unread("bob", 1_700_000_000_500).unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let rows = store.list_unread().unwrap();
+            assert_eq!(rows.len(), 2, "both watermarks must come back");
+            assert_eq!(rows[0].peer_id, "bob", "newest watermark first");
+            assert_eq!(rows[0].last_read_ts, Some(1_700_000_000_500));
+            assert_eq!(rows[1].peer_id, "alice");
+            assert_eq!(rows[1].last_read_ts, Some(1_700_000_000_000));
+        }
+        cleanup();
     }
 
     /// File-backed variant of the v2 → v3 upgrade: the real app path is `Store::open` on an existing
@@ -831,24 +919,33 @@ mod tests {
     }
 
     #[test]
-    fn unread_bump_and_clear() {
+    fn unread_read_state_roundtrip() {
         let store = fresh();
-        store.bump_unread("a").unwrap();
-        store.bump_unread("a").unwrap();
-        store.bump_unread("b").unwrap();
-        let u = store.list_unread().unwrap();
-        assert_eq!(u.len(), 2);
-        assert_eq!(u.iter().find(|r| r.peer_id == "a").unwrap().count, 2);
-        assert_eq!(u.iter().find(|r| r.peer_id == "b").unwrap().count, 1);
+        // A peer the user never opened has nothing to restore. (This used to be
+        // proved by writing a counter-only row through `bump_unread`; that counter
+        // and its writer are gone — see the v4 migration — so the invariant is now
+        // the simpler one: no watermark, no row.)
+        assert!(store.list_unread().unwrap().is_empty());
 
-        // After clearing a, list_unread (filters count > 0) should no longer return a; b remains.
+        // The watermark IS what the frontend restores, including after reading to
+        // zero: that is the whole point of persisting it.
         store.clear_unread("a", 1000).unwrap();
         let u = store.list_unread().unwrap();
-        assert!(
-            u.iter().find(|r| r.peer_id == "a").is_none(),
-            "cleared peer should not appear in unread list"
-        );
-        assert_eq!(u.iter().find(|r| r.peer_id == "b").unwrap().count, 1);
+        let a = u.iter().find(|r| r.peer_id == "a").expect("a cleared peer keeps its watermark");
+        assert_eq!(a.last_read_ts, Some(1000));
+
+        // Newest watermark first, so the frontend can apply them in order.
+        store.clear_unread("b", 2000).unwrap();
+        let u = store.list_unread().unwrap();
+        assert_eq!(u.len(), 2);
+        assert_eq!(u[0].peer_id, "b");
+        assert_eq!(u[1].peer_id, "a");
+
+        // Re-reading advances the watermark rather than inserting a second row.
+        store.clear_unread("a", 3000).unwrap();
+        let u = store.list_unread().unwrap();
+        assert_eq!(u.len(), 2);
+        assert_eq!(u.iter().find(|r| r.peer_id == "a").unwrap().last_read_ts, Some(3000));
     }
 
     #[test]

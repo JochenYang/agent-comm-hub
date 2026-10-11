@@ -17,9 +17,15 @@ User=agenthub
 ExecStart=/usr/bin/env agent-comm-hub --host 127.0.0.1 --port 18764 \
     --auth-tokens /etc/agent-comm-hub/tokens.json \
     --db /var/lib/agent-comm-hub/state.db
-Restart=on-failure
+Restart=always
 RestartSec=2
 # 无状态机密以外的数据都在 --db 指向的 SQLite；令牌表单独备份（chmod 600）
+# 沙箱：hub 只需读自己的配置与令牌表、写 --db 所在目录，其余一律不给。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agent-comm-hub
 
 # 看门狗：配合 0.7.2 起的无鉴权 GET /healthz
 # ExecStartPost=/bin/sh -c 'sleep 1; curl -fsS http://127.0.0.1:18764/healthz'

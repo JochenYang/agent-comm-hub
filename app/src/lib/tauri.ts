@@ -3,7 +3,7 @@
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 import { listen as tauriListen, type UnlistenFn } from '@tauri-apps/api/event'
-
+import { HUB_TOOLS } from './hubTools'
 export type HubState = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed'
 
 export interface HubStatus {
@@ -87,13 +87,35 @@ export interface TaskContent {
   threadId?: string
 }
 
-export type AckStatus = 'accepted' | 'working' | 'rejected' | 'done' | 'failed'
-export type TaskStatus = 'pending' | 'accepted' | 'working' | 'rejected' | 'done' | 'failed' | 'timeout'
-
+// These mirror the hub's protocol (src/protocol.ts). They are a COPY, not an
+// import — the app must not import from the main repo (workspace isolation) — so
+// they drift whenever the hub adds a status. `input-required` is an interrupt the
+// assignee sends to ask for information; `canceled` is terminal and both sides
+// may produce it (via bridge_task_cancel, not an ack).
+export type AckStatus = 'accepted' | 'working' | 'input-required' | 'rejected' | 'done' | 'failed' | 'canceled'
+export type TaskStatus =
+  | 'pending'
+  | 'accepted'
+  | 'working'
+  | 'input-required'
+  | 'rejected'
+  | 'done'
+  | 'failed'
+  | 'timeout'
+  | 'canceled'
+/** One piece of output attached to an ack (hub W28). `text` is carried inline by
+ *  the hub; `url` points at something the hub does not carry. */
+export interface TaskArtifact {
+  name: string
+  mimeType?: string
+  text?: string
+  url?: string
+}
 export interface AckContent {
   status: AckStatus
   note?: string
   progress?: number
+  artifacts?: TaskArtifact[]
 }
 
 export interface TaskAckEvent {
@@ -105,6 +127,7 @@ export interface TaskAckEvent {
   messageId: string
   applied: boolean
   system?: boolean
+  artifacts?: TaskArtifact[]
 }
 
 export interface AssigneeState {
@@ -123,6 +146,8 @@ export interface TaskRecord {
   deliverable?: string
   status: TaskStatus
   acks: TaskAckEvent[]
+  /** Everything any applied ack attached, in arrival order (hub W28). */
+  artifacts?: TaskArtifact[]
   assignees: AssigneeState[]
   timeoutMs?: number
   deadlineAt?: number
@@ -174,7 +199,9 @@ export interface ChatReceipt {
 
 export interface UnreadRecord {
   peer_id: string
-  count: number
+  /** Read watermark (ms). The GUI derives unread COUNTS itself from the message
+   *  pool; there is no stored counter (the `unread.count` column was removed in
+   *  schema v4 — nothing ever wrote it and nothing read it). */
   last_read_ts: number | null
 }
 
@@ -256,24 +283,27 @@ export const tauri = {
     hubGetLogs: () => tauriInvoke<LogLine[]>('hub_get_logs'),
     appReady: () => tauriInvoke<HubStatus>('app_ready'),
     quitApp: () => tauriInvoke<void>('quit_app'),
-    bridgePeers: () => tauriInvoke<BridgePeersResult>('bridge_peers'),
+    bridgePeers: () => tauriInvoke<BridgePeersResult>(HUB_TOOLS.peers),
     bridgeRename: (peer: string | null, alias: string | null, newPeerId?: string | null) =>
-      tauriInvoke<RenameResult>('bridge_rename', { peer: peer ?? null, alias: alias ?? null, newPeerId: newPeerId ?? null }),
+      tauriInvoke<RenameResult>(HUB_TOOLS.rename, { peer: peer ?? null, alias: alias ?? null, newPeerId: newPeerId ?? null }),
     bridgeUnregisterPeer: (peer: string) =>
       tauriInvoke<UnregisterPeerResult>('bridge_unregister_peer', { peer }),
     rosterList: () => tauriInvoke<RosterRecord[]>('roster_list'),
     rosterForget: (peerId: string) =>
       tauriInvoke<void>('roster_forget', { peerId }),
-    bridgeStatus: () => tauriInvoke<unknown>('bridge_status'),
+    bridgeStatus: () => tauriInvoke<unknown>(HUB_TOOLS.status),
+    /** The hub's advertised tool names (`tools/list`). Used at startup to check
+     *  the app and the hub still agree on what exists. */
+    hubToolsList: () => tauriInvoke<string[]>('hub_tools_list'),
     bridgeWait: (timeoutMs?: number, from?: string, ref?: string, threadId?: string) =>
-      tauriInvoke<WaitResult>('bridge_wait', {
+      tauriInvoke<WaitResult>(HUB_TOOLS.wait, {
         timeoutMs: timeoutMs ?? null,
         from: from ?? null,
         ref: ref ?? null,
         threadId: threadId ?? null
       }),
     bridgeHistory: (peer?: string, limit?: number) =>
-      tauriInvoke<BridgeHistoryResult>('bridge_history', {
+      tauriInvoke<BridgeHistoryResult>(HUB_TOOLS.history, {
         peer: peer ?? null,
         limit: limit ?? null
       }),
@@ -283,7 +313,7 @@ export const tauri = {
         limit: limit ?? null
       }),
     bridgeChat: (to: string, message: string, threadId?: string) =>
-      tauriInvoke<ChatReceipt>('bridge_chat', { to, message, threadId: threadId ?? null }),
+      tauriInvoke<ChatReceipt>(HUB_TOOLS.chat, { to, message, threadId: threadId ?? null }),
     bridgeTask: (
       to: string,
       prompt: string,
@@ -292,7 +322,7 @@ export const tauri = {
       timeoutMs?: number,
       threadId?: string
     ) =>
-      tauriInvoke<ChatReceipt>('bridge_task', {
+      tauriInvoke<ChatReceipt>(HUB_TOOLS.task, {
         to,
         prompt,
         context: context ?? null,
@@ -301,20 +331,27 @@ export const tauri = {
         threadId: threadId ?? null
       }),
     bridgeAck: (refId: string, status: AckContent['status'], note?: string, progress?: number) =>
-      tauriInvoke<ChatReceipt>('bridge_ack', {
+      tauriInvoke<ChatReceipt>(HUB_TOOLS.ack, {
         refId,
         status,
         note: note ?? null,
         progress: progress ?? null
       }),
     bridgeTasks: (role?: 'sent' | 'received' | 'all', status?: TaskStatus, limit?: number) =>
-      tauriInvoke<{ tasks: TaskRecord[] }>('bridge_tasks', {
+      tauriInvoke<{ tasks: TaskRecord[] }>(HUB_TOOLS.tasks, {
         role: role ?? null,
         status: status ?? null,
         limit: limit ?? null
       }),
     bridgeTaskStatus: (ref: string) =>
-      tauriInvoke<{ task: TaskRecord }>('bridge_task_status', { refId: ref }),
+      tauriInvoke<{ task: TaskRecord }>(HUB_TOOLS.taskStatus, { refId: ref }),
+    // Either side may cancel; the hub routes the cancel to the other side, so the
+    // caller must refresh afterwards to see the notification.
+    bridgeTaskCancel: (ref: string, reason?: string) =>
+      tauriInvoke<unknown>(HUB_TOOLS.taskCancel, { refId: ref, reason: reason ?? null }),
+    // Only the task's SENDER may answer an `input-required` interrupt.
+    bridgeTaskInput: (ref: string, input: string) =>
+      tauriInvoke<unknown>(HUB_TOOLS.taskInput, { refId: ref, input }),
     configGet: () => tauriInvoke<Record<string, unknown>>('config_get'),
     configSet: (values: Record<string, unknown>) =>
       tauriInvoke<void>('config_set', { values }),
@@ -337,8 +374,11 @@ export const tauri = {
     hubCliSetup: () =>
       tauriInvoke<{ ok: boolean; output: string }>('hub_cli_setup'),
     unreadList: () => tauriInvoke<UnreadRecord[]>('unread_list'),
-    unreadClear: (peerId: string) =>
-      tauriInvoke<void>('unread_clear', { peerId }),
+    // `ts` is the moment the frontend considers read; omitted means now on the
+    // Rust side. Passing the message's own timestamp (not the clock) is what keeps
+    // a restart from silently marking later messages read.
+    unreadClear: (peerId: string, ts?: number) =>
+      tauriInvoke<void>('unread_clear', { peerId, ts: ts ?? null }),
     // herdr
     herdrIsAvailable: () => tauriInvoke<boolean>('herdr_is_available'),
     herdrAgentList: () => tauriInvoke<HerdrAgent[]>('herdr_agent_list'),

@@ -77,6 +77,7 @@ export function MessagesView(): React.JSX.Element {
     relayAll,
     setRelayAll,
     sendChat,
+    sendTask,
     selectedId,
     selectMessage,
     refresh,
@@ -85,6 +86,10 @@ export function MessagesView(): React.JSX.Element {
   // The store pool is view-agnostic (SSE pushes/polls never drop by view); the list
   // renders only the current view's slice.
   const messages = useVisibleMessages()
+  // Send-as-task (W33): a task is a real delegation the hub tracks in its ledger
+  // (status, acks, timeout, artifacts), not just a message. Without this entry the
+  // desktop could receive and ack tasks but never start one.
+  const [asTask, setAsTask] = useState<boolean>(false)
   const { t } = useTranslation()
   // Error label only shows while the hub is running (a polling failure while stopped is normal, not a red error)
   const hubState = useHubStore((s) => s.status?.state)
@@ -172,13 +177,13 @@ export function MessagesView(): React.JSX.Element {
     try {
       const body = attachmentsToBody(trimmedText, attachments)
       const results = await Promise.all(
-        allRecipients.map((to) => sendChat(to, body))
+        allRecipients.map((to) => (asTask ? sendTask(to, body) : sendChat(to, body)))
       )
       if (results.every((r) => r)) {
         setText('')
         setAttachments([])
         const target = allRecipients.length === 1 ? allRecipients[0] : `${allRecipients.length} peers`
-        setFeedback(t('messages.sent_ok', { target }))
+        setFeedback(t(asTask ? 'messages.task_sent_ok' : 'messages.sent_ok', { target }))
       } else {
         setFeedback(t('messages.send_failed'))
       }
@@ -465,6 +470,19 @@ export function MessagesView(): React.JSX.Element {
           disabled={sending}
         />
         <button
+          type="button"
+          onClick={() => setAsTask((v) => !v)}
+          aria-pressed={asTask}
+          title={t('messages.as_task_hint')}
+          className={`rounded-md px-2 py-1 font-mono text-xs ring-1 transition-colors ${
+            asTask
+              ? 'bg-info/15 text-info ring-info/30'
+              : 'bg-background text-muted-foreground ring-border hover:text-foreground'
+          }`}
+        >
+          {t('messages.as_task')}
+        </button>
+        <button
           type="submit"
           disabled={
             (text.trim() === '' && attachments.length === 0) || sending
@@ -582,6 +600,20 @@ function MessageItem({
         </span>
         <span className="shrink-0 text-[10px] text-muted-foreground/60">{tsLabel}</span>
       </div>
+      {/* Thread / channel chips. NOT `hop`: the hub sends it (see `present()` in
+          hub-tools.ts) but the desktop's Rust layer only lifts `channel` and
+          `threadId` into columns, so a depth chip here could never render. Adding
+          it means carrying `hop` through the Rust side first — see the plan's W36. */}
+      {(msg.threadId !== undefined || msg.channel !== undefined) && (
+        <div className="mt-1 flex flex-wrap items-center gap-1 font-mono text-[10px] text-muted-foreground/70">
+          {msg.threadId !== undefined && (
+            <span className="rounded bg-muted/50 px-1 py-px" title={msg.threadId}>
+              thread {msg.threadId.slice(0, 8)}
+            </span>
+          )}
+          {msg.channel !== undefined && <span className="rounded bg-muted/50 px-1 py-px">#{msg.channel}</span>}
+        </div>
+      )}
       {msg.kind === 'chat' ? (
         <Markdown text={text} />
       ) : (

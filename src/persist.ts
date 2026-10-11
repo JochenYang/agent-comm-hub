@@ -12,13 +12,13 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import type { BridgeMessage, MessageKind, TaskRecord } from './protocol.js'
+import type { BridgeMessage, MessageKind, PeerCard, TaskRecord } from './protocol.js'
 import type { GroupState, PeerProfile } from './hub.js'
 
 const KIND_NAMES: readonly string[] = ['chat', 'task', 'notice', 'ack']
 
 function messageToRow(message: BridgeMessage): (string | number | null)[] {
-  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts, message.hop ?? null]
+  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts, message.hop ?? null, message.seq ?? null, message.expiresAt ?? null]
 }
 
 function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
@@ -42,6 +42,12 @@ function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
     // Chain depth: rows written before the hop column restore without it
     // (treated as a chain origin by importHistory — never as a bogus depth).
     ...(typeof row.hop === 'number' && Number.isFinite(row.hop) && row.hop > 0 ? { hop: row.hop } : {}),
+    // Cursors: rows written before the mseq column restore without it, and are
+    // then reachable only without a `since` cursor (never mistaken for seq 0).
+    ...(typeof row.mseq === 'number' && Number.isFinite(row.mseq) && row.mseq > 0 ? { seq: row.mseq } : {}),
+    // Deadline: restored so a message that expired while the hub was down is
+    // dropped rather than delivered late.
+    ...(typeof row.expires_at === 'number' && Number.isFinite(row.expires_at) && row.expires_at > 0 ? { expiresAt: row.expires_at } : {}),
     ts,
   }
 }
@@ -69,15 +75,15 @@ export class SQLiteStateStore {
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS profiles (
-        id TEXT PRIMARY KEY, alias TEXT, client_name TEXT, client_version TEXT, registered_at INTEGER
+        id TEXT PRIMARY KEY, alias TEXT, client_name TEXT, client_version TEXT, registered_at INTEGER, card TEXT
       );
       CREATE TABLE IF NOT EXISTS messages (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER, mseq INTEGER, expires_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS mailboxes (
         peer TEXT NOT NULL, seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER, mseq INTEGER, expires_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS groups (
         id TEXT PRIMARY KEY, name TEXT, members TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -90,13 +96,19 @@ export class SQLiteStateStore {
     // destructive). A column that already exists throws — the normal path on
     // every boot after the one that added it.
     for (const table of ['messages', 'mailboxes']) {
-      for (const column of ['thread_id TEXT', 'hop INTEGER']) {
+      for (const column of ['thread_id TEXT', 'hop INTEGER', 'mseq INTEGER', 'expires_at INTEGER']) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`)
         } catch {
           // column already present
         }
       }
+    }
+    // Same idea for profiles: `card` arrived after the table existed.
+    try {
+      this.db.exec('ALTER TABLE profiles ADD COLUMN card TEXT')
+    } catch {
+      // column already present
     }
     log.info(`sqlite state open: ${file}`)
   }
@@ -109,24 +121,24 @@ export class SQLiteStateStore {
   /** Insert buffered messages and re-snapshot mailboxes/profiles/groups/tasks. */
   flush(snapshot: { mailboxes: Record<string, BridgeMessage[]>; profiles: PeerProfile[]; groups: GroupState[]; tasks: TaskRecord[] }): void {
     const insert = this.db.prepare(
-      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop, mseq, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const message of this.buffer.splice(0, this.buffer.length)) {
       insert.run(...messageToRow(message))
     }
     this.db.exec('DELETE FROM mailboxes')
     const insertMail = this.db.prepare(
-      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop, mseq, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const [peer, queue] of Object.entries(snapshot.mailboxes)) {
       for (const message of queue) insertMail.run(peer, ...messageToRow(message))
     }
     this.db.exec('DELETE FROM profiles')
     const insertProfile = this.db.prepare(
-      'INSERT INTO profiles (id, alias, client_name, client_version, registered_at) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO profiles (id, alias, client_name, client_version, registered_at, card) VALUES (?, ?, ?, ?, ?, ?)',
     )
     for (const profile of snapshot.profiles) {
-      insertProfile.run(profile.id, profile.alias ?? null, profile.clientName ?? null, profile.clientVersion ?? null, profile.registeredAt)
+      insertProfile.run(profile.id, profile.alias ?? null, profile.clientName ?? null, profile.clientVersion ?? null, profile.registeredAt, profile.card === undefined ? null : JSON.stringify(profile.card))
     }
     this.db.exec('DELETE FROM groups')
     const insertGroup = this.db.prepare(
@@ -161,6 +173,8 @@ export class SQLiteStateStore {
         ...(typeof row.client_name === 'string' && row.client_name !== '' ? { clientName: row.client_name } : {}),
         ...(typeof row.client_version === 'string' && row.client_version !== '' ? { clientVersion: row.client_version } : {}),
         registeredAt: typeof row.registered_at === 'number' ? row.registered_at : Date.now(),
+        // A corrupt card row must not take the whole roster down.
+        ...cardField(row.card),
       })
     }
     const messages: BridgeMessage[] = []
@@ -209,5 +223,18 @@ export class SQLiteStateStore {
   close(snapshot: Parameters<SQLiteStateStore['flush']>[0]): void {
     this.flush(snapshot)
     this.db.close()
+  }
+}
+
+/** A persisted card, or nothing. A corrupt row must not take the whole roster
+ *  down, and an absent card must not become a `card: undefined` key — tool
+ *  results are required to be lossless JSON. */
+function cardField(raw: unknown): { card?: PeerCard } {
+  if (typeof raw !== 'string' || raw === '') return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return typeof parsed === 'object' && parsed !== null ? { card: parsed as PeerCard } : {}
+  } catch {
+    return {}
   }
 }

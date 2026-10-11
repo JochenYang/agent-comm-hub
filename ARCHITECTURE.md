@@ -34,7 +34,7 @@ tasks, and acknowledge each other in real time.
 | **Transport** | MCP streamable-http, hand-rolled over `node:http` | Zero runtime dependencies; `charset=utf-8` responses; JSON-RPC + SSE long connection; `Mcp-Session-Id` per connection |
 | **Identity** | Auto-registration at the MCP handshake (`initialize`); `clientInfo.name` becomes the peer id | Connect = join. **Same-name connections share one peer id (N:1)** — an agent that opens a new session per chat keeps a stable identity and its sessions share the mailbox. `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration (a manager may target another peer: kick). Each peer keeps a **profile** (client name/version, mutable display alias) that survives unregister/GC; the alias is cosmetic — routing always uses the immutable peer id. Roster edits are gated by `managerPeers` (default `['agent-hub-cli', 'hub-admin']` — the desktop GUI and the web console). A manager may also **true-rename** a registered peer (`bridge_rename { peer, peerId }`): mailbox, waiters, bindings, and history attribution re-key atomically. Reading other peers' history is manager-gated too. Profiles persist to `--state-file` (default `~/.agent-comm-hub/roster.json`) |
 | **Routing** | Per-peer FIFO mailbox + long-poll waiters | `bridge_wait` long-polls (default 30 s, server ceiling 60 s); looping it = real-time listening; offline peers' messages queue (max 200, oldest dropped); `to: "all"` broadcasts |
-| **Protocol** | Message `{id, from, to, kind, content, ref?, channel?, threadId?, hop?, ts}` | `kind`: `chat` / `task` / `notice` / `ack`. `from` is **injected by the hub** from the session binding — clients cannot spoof it. `ack` is auto-routed back to the original sender of `ref`. `ref` chains carry a `hop` depth (persisted, so a restart cannot reset it) capped at 5. Task ledger: `pending → accepted/working → done/failed/timeout` (or `rejected`); terminal statuses lock; `timeoutMs` is a soft SLA with no ceiling — a deadline beyond `setTimeout`'s 2^31−1 ms limit is re-armed in segments. |
+| **Protocol** | Message `{id, from, to, kind, content, ref?, channel?, threadId?, hop?, priority?, ts}` | `kind`: `chat` / `task` / `notice` / `ack`. `from` is **injected by the hub** from the session binding — clients cannot spoof it. `ack` is auto-routed back to the original sender of `ref`. `ref` chains carry a `hop` depth (persisted, so a restart cannot reset it) capped at 5. `priority` (0\|1\|2, absent = 0) orders a mailbox and decides what overflow drops. Task ledger: `pending → accepted/working → done/failed/timeout` (or `rejected`); terminal statuses lock; `timeoutMs` is a soft SLA with no ceiling — a deadline beyond `setTimeout`'s 2^31−1 ms limit is re-armed in segments. |
 | **Lifecycle** | Connected = recent activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC unregisters peers beyond `peerIdleTimeoutMs` (10 min) | An open session stays "online" without heartbeat calls; stale bindings are evicted and their names freed |
 
 ## 3. One real-time conversation
@@ -52,12 +52,12 @@ opencode listening loop: bridge_wait() returns → rebuts → … (loop = live d
 "Listening" = the agent loops `bridge_wait` inside its turn. Without a loop,
 messages are not lost — they queue until the agent polls.
 
-## 4. Tools (30, symmetric on every side)
+## 4. Tools (37, symmetric on every side)
 
-Message tools (13): `bridge_register` · `bridge_unregister` · `bridge_rename` ·
-`bridge_chat` · `bridge_task` · `bridge_ack` · `bridge_wait` · `bridge_poll` ·
-`bridge_status` · `bridge_peers` · `bridge_history` · `bridge_tasks` ·
-`bridge_task_status`
+Message tools (16): `bridge_register` · `bridge_unregister` · `bridge_rename` ·
+`bridge_chat` · `bridge_notice` · `bridge_task` · `bridge_ack` · `bridge_wait` ·
+`bridge_poll` · `bridge_commit` · `bridge_nack` · `bridge_status` ·
+`bridge_peers` · `bridge_history` · `bridge_tasks` · `bridge_task_status`
 
 Group tools (6): `bridge_group_create` · `bridge_group_send` ·
 `bridge_group_list` · `bridge_group_delete` · `bridge_group_add_member` ·
@@ -98,19 +98,21 @@ src/
 ├── protocol.ts     # message kinds, task/ack payloads, peer id rules
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, idle GC
 ├── mcp-server.ts   # SessionRegistry + hand-rolled streamable-http server
-├── hub-tools.ts    # the 30 bridge tools, auto-registration, liveness wiring
+├── hub-tools.ts    # the 39 bridge tools, auto-registration, liveness wiring
 ├── herdr-ctl.ts    # HerdrCtl: control-tool adapter over the herdr CLI
 ├── index.ts        # startHub() programmatic API + defaults
 └── cli.ts          # agent-comm-hub CLI
-agents/             # per-agent config templates + install-all.ps1 (incremental sync)
+agents/             # per-agent config templates + registry.json + SKILL.md
+                    #   (install-all.ps1 is a deprecated shim over `setup`)
 admin/              # web console workspace (Vite + React + Tailwind + beui)
-test/               # multi-peer smoke suite (165) + herdr control suite (35)
+test/               # the six committed suites: smoke (169) + setup (46) + ops (11)
+                    #   + herdr (35) + discover (33) + e2e (20) = 314 checks
 ```
 
 ## 6. Installing & syncing to agents
 
 - **Hub**: `npx agent-comm-hub` (or `npm i -g agent-comm-hub`).
-- **Agents**: run `agent-comm-hub setup` (or `agents/install-all.ps1`) once.
+- **Agents**: run `agent-comm-hub setup` once.
   Supported agents are declared in `agents/registry.json`; setup **discovers**
   which are installed (PATH commands, config paths, npm global packages — pure
   Node, no shell) and **incrementally merges** the `agent-hub` entry into each
@@ -148,10 +150,10 @@ They coexist: ports 18763 vs 18764.
 
 ## 9. Facts
 
-- Version 0.9.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
-- Test suite 165/165 smoke + 37/37 setup + 11/11 ops + 35/35 herdr + 23/23 discovery + 20/20 e2e (291): registration/rename/unregister, routing, broadcast, ack routing,
+- Version 0.10.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
+- Test suite 169/169 smoke + 46/46 setup + 11/11 ops + 35/35 herdr + 33/33 discovery + 20/20 e2e (314): registration/rename/unregister, routing, broadcast, ack routing,
   task ledger (delivery timestamps, terminal lock, timeouts incl. multi-day SLAs),
-  a 5-hop reply chain that survives a restart, filtered waits, connect-time auto-registration, shared identity, SSE
+  a reply chain that survives a restart, filtered waits, connect-time auto-registration, shared identity, SSE
   liveness, idle GC, error paths, control-tool argv passthrough, permission
   gating, missing CLI, registry validation, PATH/PATHEXT probing, npm scoped
   dirs, os filtering, per-platform service dry-runs.

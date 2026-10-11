@@ -10,6 +10,13 @@ import {
 } from '@/lib/tauri'
 import { serializeError } from '@/lib/serializeError'
 import { SELF_PEER_ID } from '@/lib/self'
+import {
+  applyDisplayWindow,
+  withinDisplayWindow,
+  normalizeDisplayWindow,
+  DEFAULT_DISPLAY_WINDOW,
+  type DisplayWindow
+} from '@/lib/displayWindow'
 
 /**
  * Message store — zustand global singleton (SPEC §5.2 design; the earlier hand-written hook gave each component its own
@@ -36,6 +43,13 @@ interface MessagesState {
    * (zhangsan↔lisi, group broadcasts, etc.), fed by the hub's relay push + a 3s full poll. */
   relayAll: boolean
   setRelayAll: (on: boolean) => void
+  /** How much of the pool a view renders (W34). `0` on either field means "no
+   *  limit" — the default, so an install that never opens the settings panel
+   *  renders exactly what it rendered before. Persisted through the config table. */
+  displayWindow: DisplayWindow
+  setDisplayWindow: (window: DisplayWindow) => void
+  /** Ticks so a time-based window slides even while no message arrives. */
+  nowTick: number
   refresh: () => Promise<void>
   sendChat: (to: string, message: string) => Promise<boolean>
   sendTask: (
@@ -50,6 +64,10 @@ interface MessagesState {
     note?: string,
     progress?: number
   ) => Promise<boolean>
+  /** Cancel a task (either side may). Resolves true when the hub accepted it. */
+  cancelTask: (refId: string, reason?: string) => Promise<boolean>
+  /** Answer an `input-required` interrupt. Only the task's SENDER may call this. */
+  taskInput: (refId: string, input: string) => Promise<boolean>
   markPeerRead: (peerId: string, ts: number) => void
   unreadCountFor: (peerId: string) => number
   /** Unread count for every peer (peerId → count). */
@@ -132,6 +150,20 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
     },
     relayAll: false,
     setRelayAll: (on) => set({ relayAll: on }),
+    displayWindow: DEFAULT_DISPLAY_WINDOW,
+    nowTick: Date.now(),
+    setDisplayWindow: (window) => {
+      const clean = normalizeDisplayWindow(window.hours, window.maxMessages)
+      set({ displayWindow: clean })
+      // Fire-and-forget: a settings write that fails must not take the view down,
+      // and the in-memory value is already applied.
+      void tauri.invoke
+        .configSet({
+          display_window_hours: String(clean.hours),
+          display_max_messages: String(clean.maxMessages)
+        })
+        .catch(() => undefined)
+    },
     lastReadTs: {},
     pushMessageSafe: (msg) => pushMessage(msg),
 
@@ -217,19 +249,50 @@ export const useMessagesStore = create<MessagesState>()((set, get) => {
       }
     },
 
+    cancelTask: async (refId, reason) => {
+      try {
+        await tauri.invoke.bridgeTaskCancel(refId, reason)
+        // The hub routes the cancel to the other side; refresh so the ledger and
+        // the notification show up without waiting for the next poll.
+        void get().refresh()
+        return true
+      } catch (e) {
+        set({ error: serializeError(e) })
+        return false
+      }
+    },
+
+    taskInput: async (refId, input) => {
+      try {
+        await tauri.invoke.bridgeTaskInput(refId, input)
+        void get().refresh()
+        return true
+      } catch (e) {
+        set({ error: serializeError(e) })
+        return false
+      }
+    },
+
     markPeerRead: (peerId, ts) => {
       set((s) => {
         if ((s.lastReadTs[peerId] ?? 0) >= ts) return s
         return { lastReadTs: { ...s.lastReadTs, [peerId]: ts } }
       })
+      // Persist the watermark, fire-and-forget: a storage failure must not block
+      // the UI, and the in-memory value is already applied. `ts` (not the clock)
+      // goes to the store, so reopening an old message does not mark later ones read.
+      void tauri.invoke.unreadClear(peerId, ts).catch(() => undefined)
     },
 
     unreadCountFor: (peerId) => {
-      const { messages, lastReadTs } = get()
+      const { messages, lastReadTs, displayWindow, nowTick } = get()
       let n = 0
       for (const m of messages) {
         if (m.from !== peerId) continue
         if (m.to !== SELF_PEER_ID && m.to !== 'all' && m.channel === undefined) continue
+        // Same window as the view: a badge for a message the view will not show is
+        // a badge the user cannot clear by opening the conversation.
+        if (!withinDisplayWindow(m.ts, displayWindow, nowTick)) continue
         if (m.ts > (lastReadTs[peerId] ?? 0)) n++
       }
       return n
@@ -245,10 +308,15 @@ useMessagesStore.subscribe((s) => {
   // the pool holds all relay traffic now, so counting by sender alone would badge me
   // for other people's conversations — and the relay view no longer needs a skip case.
   const out: Record<string, number> = {}
+  // The window is applied here too, with the same rule as the view (see
+  // withinDisplayWindow): unread and visible must agree, or the badge counts
+  // messages the user cannot see and therefore cannot clear.
+  const now = Date.now()
   for (const m of s.messages) {
     const peer = m.from
     if (peer === SELF_PEER_ID) continue
     if (m.to !== SELF_PEER_ID && m.to !== 'all' && m.channel === undefined) continue
+    if (!withinDisplayWindow(m.ts, s.displayWindow, now)) continue
     if (m.ts > (s.lastReadTs[peer] ?? 0)) out[peer] = (out[peer] ?? 0) + 1
   }
   // Only set when the value changes, to avoid an infinite loop (unreadMap isn't persisted in state, just a derived snapshot)
@@ -318,7 +386,9 @@ window.setInterval(() => {
 // messages + group mail land here even without SSE) and keeps the peer "connected" in the
 // hub's activity window. 25s budget; renew on hit or timeout.
 void (async function waitLoop(): Promise<void> {
-  // eslint-disable-next-line no-constant-condition
+  // Deliberately an unconditional loop with an internal exit: the eslint-disable
+  // that used to sit here referenced a linter this workspace never installed.
+  // `tsc --noEmit` is the gate (see SPEC NFR-7).
   while (true) {
     try {
       const res = await tauri.invoke.bridgeWait(25_000, undefined)
@@ -338,6 +408,46 @@ void (async function waitLoop(): Promise<void> {
 void tauri.event.onHubMessage((msg) => {
   useMessagesStore.getState().pushMessageSafe(msg)
 })
+// Display window (W34): load the saved choice once at startup. A failure keeps the
+// default (no limit) — an unreadable setting must never hide the user's messages.
+void (async () => {
+  try {
+    const cfg = await tauri.invoke.configGet()
+    const window = normalizeDisplayWindow(cfg?.display_window_hours, cfg?.display_max_messages)
+    useMessagesStore.setState({ displayWindow: window })
+  } catch {
+    // Hub/app not ready: defaults apply.
+  }
+})()
+
+// Read watermarks (W35): restored so a restart does not re-badge messages the
+// user already read. Without this the whole unread feature resets on every launch,
+// which is exactly the state the store was in before — the SQLite table existed
+// but nothing ever read or wrote it.
+void (async () => {
+  try {
+    const rows = await tauri.invoke.unreadList()
+    const restored: Record<string, number> = {}
+    for (const row of rows) {
+      if (typeof row.peer_id === 'string' && typeof row.last_read_ts === 'number') {
+        restored[row.peer_id] = row.last_read_ts
+      }
+    }
+    if (Object.keys(restored).length > 0) {
+      // In-memory wins: the user may already have read something during startup.
+      useMessagesStore.setState((s) => ({ lastReadTs: { ...restored, ...s.lastReadTs } }))
+    }
+  } catch {
+    // Hub/app not ready: start with nothing marked read, as before.
+  }
+})()
+
+// Slide a time-based window even on a quiet hub: `useVisibleMessages` depends on
+// nowTick, and without a tick the view would only re-filter when a message
+// happened to arrive.
+window.setInterval(() => {
+  useMessagesStore.setState({ nowTick: Date.now() })
+}, 60_000)
 
 /** View filter applied at RENDER time: relayAll shows everything; no conversation selected
  * shows the full live stream (admin default — including agent↔agent traffic); a conversation
@@ -347,8 +457,12 @@ export function useVisibleMessages(): PresentedMessage[] {
   const messages = useMessagesStore((s) => s.messages)
   const activePeer = useMessagesStore((s) => s.activePeer)
   const relayAll = useMessagesStore((s) => s.relayAll)
-  return useMemo(
-    () => messages.filter((m) => belongsToView(relayAll, activePeer, m)),
-    [messages, activePeer, relayAll]
-  )
+  const displayWindow = useMessagesStore((s) => s.displayWindow)
+  const nowTick = useMessagesStore((s) => s.nowTick)
+  return useMemo(() => {
+    const inView = messages.filter((m) => belongsToView(relayAll, activePeer, m))
+    // The window cuts the VIEW, never the pool: switching it back to "no limit"
+    // must bring the older messages straight back.
+    return applyDisplayWindow(inView, displayWindow, nowTick)
+  }, [messages, activePeer, relayAll, displayWindow, nowTick])
 }

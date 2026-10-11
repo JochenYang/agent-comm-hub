@@ -26,8 +26,14 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-
+        # Required for the `keepalive 32` above: nginx must clear the hop-by-hop
+        # Connection header before forwarding, or the upstream connection is not
+        # reused and every request opens a new one.
+        proxy_set_header Connection "";
         # SSE: no buffering, long read timeout (hub heartbeats every 20s).
+        # The hub also sends `X-Accel-Buffering: no` on the SSE response itself, so
+        # this directive is belt-and-braces — keep it for proxies that predate the
+        # header, and because it also covers the JSON responses.
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 1h;

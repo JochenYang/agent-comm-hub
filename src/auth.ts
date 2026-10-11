@@ -56,6 +56,17 @@ export interface TokenTable {
 const TOKEN_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/
 
 /**
+ * The `CHANGE-ME-*` placeholders in the bundled server/tokens.example.json pass
+ * TOKEN_PATTERN, so they need their own guard — a `cp` of the template used to
+ * start a hub with three publicly-known credentials (one of them manager).
+ *
+ * Shared by the load path and the write path on purpose: when only the loader
+ * checked, `agent-comm-hub auth add --token CHANGE-ME-...` happily persisted a
+ * table that the hub then refused to start with (and the admin token panel 500s).
+ */
+const PLACEHOLDER_TOKEN = /CHANGE[-_]?ME/i
+
+/**
  * Load and validate a token table file:
  * `{ "tokens": [{ "token", "peer", "role", "owner?" }, ...] }`.
  * Fail-closed: ANY structural problem throws, so a typo never silently
@@ -81,6 +92,9 @@ export function loadTokenFile(file: string): Map<string, TokenIdentity> {
     if (typeof token !== 'string' || !TOKEN_PATTERN.test(token)) {
       throw new Error(msg('has an invalid token (expect 16-128 chars of [A-Za-z0-9._:-])'))
     }
+    if (PLACEHOLDER_TOKEN.test(token)) {
+      throw new Error(msg('uses the example placeholder token — generate one with `agent-comm-hub auth gen`'))
+    }
     if (typeof peer !== 'string' || !PEER_ID_PATTERN.test(peer) || peer === 'all') {
       throw new Error(msg(`has an invalid peer id '${String(peer)}'`))
     }
@@ -96,7 +110,26 @@ export function loadTokenFile(file: string): Map<string, TokenIdentity> {
     peers.add(peer)
   })
   if (table.size === 0) throw new Error(`auth token file ${file}: no tokens defined`)
+  warnIfTokenFileIsReadableByOthers(file)
   return table
+}
+
+/**
+ * Warn (never throw) when the token table is readable beyond its owner. The table
+ * is a plaintext credential store: any local account that can read it can
+ * impersonate every member. Windows has no POSIX mode bits, so the check is
+ * skipped there.
+ */
+function warnIfTokenFileIsReadableByOthers(file: string): void {
+  if (process.platform === 'win32') return
+  try {
+    const mode = statSync(file).mode & 0o777
+    if ((mode & 0o077) !== 0) {
+      console.warn(`warning: ${file} is readable by group/other (mode ${mode.toString(8)}) — chmod 600 it`)
+    }
+  } catch {
+    // stat failure is not this function's problem: the file was just read.
+  }
 }
 
 /** Wrap a validated map into the lookup the transport calls per request. */
@@ -239,6 +272,9 @@ function loadTokenFileVoid(rows: TokenRowJson[]): void {
   const peers = new Set<string>()
   for (const { token, peer, role, owner } of rows) {
     if (!TOKEN_PATTERN.test(token)) throw new Error(`invalid token for peer '${peer}'`)
+    if (PLACEHOLDER_TOKEN.test(token)) {
+      throw new Error(`example placeholder token for peer '${peer}' — generate one with \`agent-comm-hub auth gen\``)
+    }
     if (!PEER_ID_PATTERN.test(peer) || peer === 'all') throw new Error(`invalid peer id '${peer}'`)
     if (role !== 'agent' && role !== 'manager') throw new Error(`invalid role '${role}'`)
     if (table.has(token)) throw new Error('duplicate token')

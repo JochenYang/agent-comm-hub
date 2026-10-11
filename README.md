@@ -98,7 +98,7 @@ itself).
 
 ```bash
 agent-comm-hub setup
-# or: agents/install-all.ps1 (PowerShell equivalent)
+# (agents/install-all.ps1 is deprecated — it forwards to this command)
 # undo: agent-comm-hub setup --remove
 # list what is installed (no changes): agent-comm-hub discover
 # configure a single agent:           agent-comm-hub setup --agent codex
@@ -131,7 +131,7 @@ curl -X POST http://127.0.0.1:18764/mcp \
 
 Each agent gets **one MCP server entry** pointing at `http://127.0.0.1:18764/mcp`, plus the shared English skill (`agents/SKILL.md`) that teaches it when and how to use the bridge tools. Templates live in [`agents/`](agents/README.md).
 
-**One-shot incremental sync** (recommended): `agents/install-all.ps1` merges the
+**One-shot incremental sync** (recommended): `agent-comm-hub setup` merges the
 `agent-hub` entry into every installed agent's MCP config (mcode, opencode,
 Kimi Code, Gemini CLI, Codex, zcode, DSH) and installs the skill — it only
 touches the `agent-hub` key, backs up each file, and is idempotent. Claude Code
@@ -252,16 +252,31 @@ with `agent-comm-hub setup --remove` (or only refresh skills via
 
 | Tool | Purpose |
 |---|---|
-| `bridge_register(peerId)` | Claim or rename your identity (auto-registered at connect with the client name; optional for a readable id like `opencode:myproject`) |
-| `bridge_unregister()` | Leave the hub (removes peer, queue, and session binding; stays off until an explicit register) |
-| `bridge_chat(to, message)` | Send a chat message; `to: "all"` broadcasts |
-| `bridge_task(to, prompt, context?, deliverable?)` | Delegate a structured task |
-| `bridge_ack(ref, status, note?)` | Acknowledge a task (`accepted`/`rejected`/`done`/`failed`), routed back to the original sender |
-| `bridge_wait(from?, timeoutMs?)` | Long-poll for the next message (default 30 s) |
-| `bridge_poll(from?)` | Non-blocking drain of queued messages |
+| `bridge_register(peerId, alias?)` | Claim or rename your identity (auto-registered at connect with the client name; optional for a readable id like `opencode:myproject`) |
+| `bridge_rename(alias?, peer?, peerId?)` | Set your own display alias; renaming or true-renaming **another** peer needs manager rights |
+| `bridge_unregister(peer?)` | Leave the hub (removes peer, queue, and session binding; stays off until an explicit register). With `peer`, kicks that peer (manager) |
+| `bridge_chat(to, message, threadId?, priority?, ref?, expiresAt?)` | Send a chat message; `to: "all"` broadcasts. `expiresAt` is an absolute epoch-ms deadline: a message still undelivered after it is dropped and counted, not delivered late. `priority` (0\|1\|2, default 0) orders the recipient's mailbox |
+| `bridge_notice(to, message, level?)` | Send a system-flavoured notice (`info`/`warn`/`error`) — read as a status, not as chat; creates no task |
+| `bridge_task(to, prompt, context?, deliverable?, timeoutMs?, threadId?, ref?, expiresAt?)` | Delegate a structured task (`timeoutMs` is the assignee's SLA once it arrives; `expiresAt` is the delivery deadline) |
+| `bridge_ack(ref, status, note?, progress?)` | Acknowledge a task (`accepted`/`working`/`rejected`/`done`/`failed`), routed back to the original sender |
+| `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?)` | Long-poll for the next message (default 30 s). `ack: "manual"` leases it instead of consuming it; `maxMessages > 1` returns `{type:"messages", messages:[…]}` in one call |
+| `bridge_poll(from?, ack?)` | Non-blocking drain of queued messages (`ack: "manual"` leases them) |
+| `bridge_commit(ids)` | Acknowledge leased messages; uncommitted ones come back when the lease expires |
+| `bridge_nack(ids)` | Give leased (or dead-lettered) messages back immediately — use when handling failed |
 | `bridge_status()` | Hub health: peers with connected/queued/waiting state |
-| `bridge_peers()` | Who is online |
-| `bridge_history(peer?, limit?)` | Recent messages (context refresh after reconnect) |
+| `bridge_peers()` | Who is online, how reachable (`online`/`idle`/`parked`) and how much is queued |
+| `bridge_history(peer?, limit?, channel?)` | Recent messages (context refresh after reconnect) |
+| `bridge_tasks(role?, status?, limit?, peer?)` | Task ledger rows you sent or received |
+| `bridge_task_status(ref)` | One task's state, per-assignee rows and the full ack timeline (also carries the A2A aliases `taskId` / `contextId` / `a2aState`) |
+| `bridge_task_cancel(ref, reason?)` | Cancel a task — either side may; routed to the other side and terminal |
+| `bridge_task_input(ref, input)` | Answer an `input-required` interrupt; the task resumes to `working` |
+| `bridge_announce(card)` | Say what you can do (skills, `acceptsTasks`, modes, runner) |
+| `bridge_discover(skill?, tag?, acceptsTasks?, idleOnly?)` | Find a peer to hand work to, with its current load |
+| `bridge_group_create` · `bridge_group_send` · `bridge_group_list` · `bridge_group_delete` · `bridge_group_add_member` · `bridge_group_remove_member` | Named channels for a subset of peers |
+
+That is the full 26 message + group tools; the 11 control tools are below. (37 in total and symmetric on every side — see [ARCHITECTURE.md](ARCHITECTURE.md) §4.)
+
+Two peer ids are reserved and cannot be registered or renamed into: `all` (broadcast) and `hub` (the hub's own drop notices — `bridge_wait { from: "hub" }` subscribes to them).
 
 ### herdr control tools (optional)
 
@@ -294,6 +309,7 @@ socket — physical input, read output:
 | `bridge_pane_send(target, text, enter?)` | Type text into a pane (slash commands execute; Enter submits by default) |
 | `bridge_pane_keys(target, keys)` | Raw key presses to any pane |
 | `bridge_pane_read(target, lines?, source?)` | Read a pane's recent output |
+| `bridge_pane_wait(target, until?, timeoutMs?)` | Wait for a pane to reach a state (idle / working / blocked / done) |
 
 Verified live: a MiniMax Code session was driven end-to-end through the hub —
 prompt injected via `bridge_pane_send`, reply collected via
@@ -317,7 +333,17 @@ continuous. Renaming yourself is open to everyone; renaming/kicking
 history (`bridge_history { peer }` / `peer: "all"`) requires the **manager**
 role (`--manager-peers`, default `agent-hub-cli,hub-admin` — the desktop GUI
 and the web console identities).
-This is a convention on top of the loopback trust model, not authentication.
+
+With no credential configured this is a convention on top of the loopback trust
+model, not authentication — the peer id is simply whoever claimed it first. Set
+`--manager-token <secret>` (or drop the secret in `<state-file dir>/manager.token`)
+to make manager PRIVILEGES require it: rename/kick/full-history/task-board and the
+SSE relay then need `Authorization: Bearer <secret>`, and a credential-less client
+that claims a manager id gets no power. The id itself is not reserved — the
+desktop GUI identifies itself as `agent-hub-cli`, so reserving it would stop the
+GUI from connecting. Note that claiming the id still occupies its identity and
+mailbox even without the credential, and that in remote mode (`--auth-tokens`) the
+token table owns the `Authorization` header, so `--manager-token` is ignored there.
 
 Rosters persist: `--state-file` (default `~/.agent-comm-hub/roster.json`,
 `off` to disable) keeps aliases and client info across hub restarts.
@@ -347,12 +373,42 @@ agent-comm-hub service install|uninstall [options]   one-shot auto-start
 --wait-timeout-ms <n>    Long-poll ceiling for bridge_wait (default 60000)
 --default-wait-ms <n>    bridge_wait default budget (default 30000)
 --connected-window-ms <n>  Peer counts as active within this window (default 30000)
---peer-idle-timeout-ms <n> Auto-unregister idle peers after this; 0 disables (default 600000)
+--peer-idle-timeout-ms <n> Park (not delete) idle peers after this; 0 disables the GC
+                         entirely (default 600000)
+--parked-ttl-ms <n>      Drop a parked mailbox after this; 0 disables expiry
+                         (default 604800000 = 7 days)
+--rate-per-min <n>       Per-peer mailbox rate limit (messages per minute); 0 (default)
+                         is unlimited. Guards a recipient against a broadcast storm;
+                         excess is counted as `droppedRate` in the roster
+--db <path>              SQLite state file for history/mailboxes/roster/groups/tasks
+                         (default ~/.agent-comm-hub/state.db; "off" = memory + JSON roster)
+--auth-tokens <file>     REMOTE MODE: require `Authorization: Bearer <token>`; the token,
+                         not the client name, decides the peer id. Also refuses a
+                         non-loopback --host unless this is set.
+--allow-join             (remote mode) accept token-less walk-in peers, each on a unique
+                         id; LAN/VPN only — keep it off on the public internet.
+--heartbeat-ms <n>       SSE heartbeat cadence (default 20000)
+--runner <json>          Executor for a peer that is NOT polling: one JSON object
+                         or an array, e.g. {"peer":"codex","kind":"cli",
+                         "command":"codex","args":["exec","{prompt}"]} or
+                         {"peer":"mcode","kind":"herdr"}. Off by default; the
+                         runner's outcome is written back as that peer's ack.
 --herdr-bin <path>       herdr CLI binary for bridge_agent_* control tools
                          (default herdr, resolved via PATH)
 --herdr-timeout-ms <n>   Default cap for one herdr call in ms (default 30000)
 --manager-peers <ids>    Comma-separated roster managers, or "all"
                          (default agent-hub-cli,hub-admin — desktop GUI + web console)
+--manager-token <secret> Require this secret (Authorization: Bearer <secret>) for hub
+                         manager PRIVILEGES (rename/kick/full history/relay); otherwise
+                         <state-file dir>/manager.token is read when present. The peer
+                         id itself is not reserved. Ignored with --auth-tokens.
+--allow-origins <list>   Comma-separated browser origins allowed to call the MCP
+                         endpoint (e.g. https://hub.example.com). Requests without
+                         an Origin header and loopback origins are always allowed;
+                         anything else gets 403 (the MCP spec's DNS-rebinding rule).
+--insecure               Allow --host to bind a non-loopback address with NO token
+                         table. Refused by default: without --auth-tokens the hub
+                         would trust every client that can reach the port.
 --state-file <path>      Roster persistence file
                          (default ~/.agent-comm-hub/roster.json; "off" = memory only)
 --url <u> / --server-name <n> / --remove / --dry-run   (setup/service/status)
@@ -430,7 +486,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (291 checks: 165 smoke + 37 setup + 11 ops + 35 herdr + 23 discover + 20 e2e)
+pnpm test             # test suite (314 checks: 169 smoke + 46 setup + 11 ops + 35 herdr + 33 discover + 20 e2e)
 npm run build:admin   # admin/ workspace (npm) → single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
@@ -481,4 +537,4 @@ Tests cover registration, duplicate rejection, chat routing, sender-filtered wai
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 291-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
+MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 314-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).

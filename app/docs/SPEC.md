@@ -296,8 +296,8 @@ CREATE TABLE unread (
 - [ ] **NFR-3**：herdr 终端输出每 200ms 节流刷新，不卡主线程。
 - [ ] **NFR-4**：安装包大小 Windows msi ≤ 30 MB / macOS dmg ≤ 25 MB / Linux AppImage ≤ 35 MB。
 - [ ] **NFR-5**：所有颜色 token 通过 `/color` skill 的 contrast / CVD / chromostereopsis 校验。
-- [ ] **NFR-6**：CI 在 ubuntu-latest / windows-latest / macos-latest 三平台跑通 build + lint + test。
-- [ ] **NFR-7**：Rust 端代码 `cargo clippy --deny warnings` 0 警告；TS 端 `pnpm lint` 0 错误。
+- [ ] **NFR-6**：CI 在 ubuntu-latest / windows-latest / macos-latest 三平台跑通 build + test。
+- [ ] **NFR-7**：Rust 端代码 `cargo clippy --deny warnings` 0 警告。（原同时要求“TS 端 `pnpm lint` 0 错误”：eslint 从未进入 devDependencies，该脚本自始至终跑不了，已随脚本一并移除——靠 `tsc --noEmit` strict 把关。若要重新引入静态检查，需先把 eslint 与配置加进来。）
 
 ## 7. Open Questions
 

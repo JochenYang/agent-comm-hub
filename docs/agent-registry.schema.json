@@ -22,6 +22,11 @@
             "items": { "type": "string", "minLength": 1 },
             "description": "Command names checked against PATH (any hit = agent installed)."
           },
+          "probePaths": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^~/", "description": "`~`-relative directory; its EXISTENCE means the agent is installed here (must not contain `..`)." },
+            "description": "State directories that prove the agent has been used on this machine, for agents that leave no command on PATH."
+          },
           "configs": {
             "type": "array",
             "items": {
@@ -38,17 +43,23 @@
                   "description": "JSON section path (dotted, e.g. `mcp.servers`) for strategy json; null otherwise."
                 },
                 "strategy": {
-                  "enum": ["json", "toml", "dsh"],
-                  "description": "Merge strategy: json = JSON section merge; toml = section append; dsh = YAML insert with marker."
+                  "enum": ["json", "toml", "dsh", "yaml-array"],
+                  "description": "Merge strategy: json = JSON section merge; toml = section append; dsh = YAML insert with marker; yaml-array = a YAML key whose value is a LIST of mappings (Continue), refused when the file's shape is not that."
                 },
                 "entry": {
                   "type": ["object", "null"],
-                  "description": "Server entry template; `{url}` / `{serverName}` placeholders are substituted. Null for toml/dsh."
+                  "description": "Server entry template; `{url}` / `{serverName}` placeholders are substituted. Null for toml/dsh; required for json and yaml-array."
                 },
                 "serverName": {
                   "type": "string",
                   "minLength": 1,
                   "description": "Optional MCP server key override for this config (defaults to SetupOptions.serverName). DSH uses agent-comm-hub to avoid colliding with a dynamic MCP-manager mount of agent-hub."
+                },
+                "os": {
+                  "type": "array",
+                  "items": { "enum": ["win32", "darwin", "linux"] },
+                  "minItems": 1,
+                  "description": "Platforms this FILE applies to; absent means every platform. Needed when one agent uses different files per platform (claude-desktop: a macOS path and a Windows path) — splitting it into two records would duplicate its skill/probe metadata and let the halves drift."
                 }
               }
             }

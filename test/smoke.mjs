@@ -381,7 +381,12 @@ try {
     check('peer registered before GC', before.peers.some(p => p.id === 'gcpear'), JSON.stringify(before))
     await new Promise(resolve => setTimeout(resolve, 2200)) // idle 700ms + 1s GC interval
     const after = await checkerGc.call('bridge_peers')
-    check('idle peer evicted by GC', !after.peers.some(p => p.id === 'gcpear'), JSON.stringify(after))
+    // W7: the idle GC parks a peer instead of forgetting it — it disappears from
+    // the "connected" set but stays addressable and keeps whatever was queued.
+    const parkedGc = after.peers.find(p => p.id === 'gcpear')
+    check('idle peer is parked by GC (gone quiet, still listed)', parkedGc !== undefined && parkedGc.reachable === 'parked' && parkedGc.connected === false, JSON.stringify(after))
+    const toParked = await checkerGc.call('bridge_chat', { to: 'gcpear', message: 'queued while you were away' })
+    check('a parked peer is still addressable', toParked.ok === true, JSON.stringify(toParked))
     const rejoined = await ghost.call('bridge_peers') // next call re-auto-registers
     check('evicted session re-registers on next call', rejoined.peers.some(p => p.id === 'gcpear'), JSON.stringify(rejoined))
 
@@ -397,7 +402,8 @@ try {
     await liveGcReader.cancel()
     await new Promise(resolve => setTimeout(resolve, 1500)) // next GC tick evicts it
     const afterClose = await checkerGc.call('bridge_peers')
-    check('peer evicted after SSE closes', !afterClose.peers.some(p => p.id === 'livegc'), JSON.stringify(afterClose))
+    const parkedLive = afterClose.peers.find(p => p.id === 'livegc')
+    check('peer is parked after its SSE closes', parkedLive !== undefined && parkedLive.reachable === 'parked' && parkedLive.connected === false, JSON.stringify(afterClose))
   } finally {
     hubGc.close()
   }
@@ -677,6 +683,30 @@ try {
     const hijack = await zs.callRaw('bridge_register', { peerId: 'impersonated' })
     check('token-bound session cannot claim another id', hijack.error !== undefined && /bound to your access token/.test(hijack.error), JSON.stringify(hijack))
 
+    // An SSE stream is as sensitive as a tool call: it receives that session's
+    // pushes WITH content. Attaching to someone else's session must be refused —
+    // and must not lock the real owner out (the bug was that GET only checked the
+    // token was VALID, then rebound the session to whoever asked).
+    const zsInit = await fetch(authBase, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer zs-token-0123456789abcdef' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'kimi-code', version: '1' }, capabilities: {} } }),
+    })
+    const zsSid = zsInit.headers.get('mcp-session-id')
+    check('(setup) a session id was minted for the stream test', typeof zsSid === 'string' && zsSid.length > 0, String(zsSid))
+    const crossStream = await fetch(authBase, {
+      headers: { Accept: 'text/event-stream', 'Mcp-Session-Id': zsSid, Authorization: 'Bearer ls-token-0123456789abcdef' },
+    })
+    check("another user's token cannot attach an SSE stream to this session", crossStream.status === 401, String(crossStream.status))
+    await crossStream.body?.cancel()
+    const ownerStillWorks = await fetch(authBase, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'Mcp-Session-Id': zsSid, Authorization: 'Bearer zs-token-0123456789abcdef' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    })
+    check('and the real owner is not locked out of their own session', ownerStillWorks.status === 200, String(ownerStillWorks.status))
+    await ownerStillWorks.body?.cancel()
+
     const renamed = await boss.call('bridge_rename', { peer: 'zhangsan', alias: '张三（kimi）' })
     check('manager-role token renames another peer', renamed.ok === true && renamed.alias === '张三（kimi）', JSON.stringify(renamed))
     const denied = await ls.callRaw('bridge_rename', { peer: 'zhangsan', alias: 'nope' })
@@ -822,17 +852,15 @@ try {
     const floodStatus = await smA.call('bridge_task_status', { ref: floodTask.id })
     check('ack routes via ledger after history eviction', floodStatus.task.status === 'accepted', JSON.stringify(floodStatus.task.status))
 
-    // hop limit: reply chains deeper than MAX_HOP are rejected
+    // Reply-chain depth: a plain conversation may run far past the old 5-hop
+    // wall, which used to refuse a legitimate sixth turn outright.
     let hopMsg = await smA.call('bridge_chat', { to: 'sm-b', message: 'hop-0' })
     for (let i = 1; i <= 5; i++) {
       hopMsg = await smB.call('bridge_chat', { to: 'sm-a', message: `hop-${i}`, ref: hopMsg.id })
     }
-    check('hop chain of 5 is allowed', hopMsg.hop === 5, JSON.stringify(hopMsg))
-    let hopErr = null
-    try {
-      await smA.call('bridge_chat', { to: 'sm-b', message: 'hop-6', ref: hopMsg.id })
-    } catch (e) { hopErr = String(e.message ?? e) }
-    check('hop limit rejects the 6th hop', hopErr !== null && /hop limit/i.test(hopErr), String(hopErr))
+    check('reply chain of 5 carries hop 5', hopMsg.hop === 5, JSON.stringify(hopMsg))
+    const hop6 = await smA.call('bridge_chat', { to: 'sm-b', message: 'hop-6', ref: hopMsg.id })
+    check('the 6th reply is delivered, not rejected (hop keeps counting)', hop6.hop === 6 && hop6.ref === hopMsg.id, JSON.stringify(hop6))
   } finally {
     hubSm.close()
   }
@@ -893,11 +921,8 @@ try {
     check('group membership edit restored from sqlite', groups.groups.some(g => g.id === 'ops' && g.members.includes('carol')), JSON.stringify(groups))
     const tasks = await alice.call('bridge_tasks', { role: 'sent' })
     check('task ledger restored from sqlite', tasks.tasks.some(t => t.prompt === '重启后还在' && t.status === 'pending' && t.threadId === 'db-thread'), JSON.stringify(tasks.tasks.map(t => ({ p: t.prompt, s: t.status }))))
-    let chainErr = null
-    try {
-      await alice.call('bridge_chat', { to: 'bob', message: 'chain-6', ref: chainMsg.id })
-    } catch (e) { chainErr = String(e.message ?? e) }
-    check('hop depth survives a sqlite restart (chain cap still enforced)', chainErr !== null && /hop limit/i.test(chainErr), String(chainErr))
+    const chain6 = await alice.call('bridge_chat', { to: 'bob', message: 'chain-6', ref: chainMsg.id })
+    check('hop depth survives a sqlite restart (continues at 6, not reset to 1)', chain6.hop === 6, JSON.stringify(chain6))
   } finally {
     hubDbB.close()
     rmSync(dbFile, { force: true })

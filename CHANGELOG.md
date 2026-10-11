@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.10.0 (2026-10-11)
+
+- **Session lifecycle**: an unused session (no live SSE stream) is forgotten after
+  `--session-ttl-ms` (default 30 min; `0` = off). Clients get 404 and
+  re-initialize per the MCP spec; the hub re-registers them under the same peer id
+  with the mailbox intact.
+- **Per-peer mailbox rate limit**: `--rate-per-min` caps how fast one peer's
+  mailbox accepts mail (`0` = unlimited, the default). Excess is counted as
+  `droppedRate` in the roster and `bridge_metrics`; a waiting peer is never
+  throttled.
+- **Message priority**: `bridge_chat` / `bridge_notice` / `bridge_task`
+  accept `priority` (0|1|2, default 0). A mailbox delivers high priority first;
+  overflow drops the LEAST important queued message (oldest within a priority —
+  unchanged from "oldest dropped" when no priority is set).
+- **Parked-mailbox expiry reconciles the task ledger**: a task whose mailbox was
+  destroyed by `--parked-ttl-ms` now fails with a system event naming the peer,
+  instead of staying `pending` forever.
+- **`--parked-ttl-ms` works with the idle GC disabled**: turning
+  `--peer-idle-timeout-ms` to 0 no longer disables mailbox expiry; a dedicated
+  reaper keeps the two settings independent.
+- **`bridge_metrics`**: per-peer (`sent`/`received`/`acked`/`queued`/
+  `inFlight`/`deadLettered`/drops) and global (`messagesTotal`, waiters,
+  `tasksByStatus`) operational counters.
+- **`bridge_events`**: the hub's own operational event stream
+  (`peer_joined`/`peer_left`/`peer_parked`/`mailbox_dropped`/
+  `task_transition`/`runner_started`/`runner_finished`) with a monotonic
+  `since` cursor.
+- **Remote auth hardening**: an SSE stream now requires the SAME session's token.
+  A foreign token could previously attach to another user's session and receive
+  their pushes (including message content) while locking the real owner out.
+- **SSE response headers**: every response (401/403/405 and 200) names the
+  protocol version, and `Mcp-Protocol-Version` no longer echoes a client-supplied
+  unsupported value.
+- **Validation order unified**: POST and GET/SSE both check auth → protocol
+  version → session, so the same request gets the same status code either way.
+- **Six more agents**: zed, amp, continue, cline, roo-code, amazon-q. Filename
+  globs (`cli-agents/*.json`) are supported in the registry.
+- **setup idempotency fixes**: the JSON merge compares the whole entry (Gemini's
+  `httpUrl` entry is no longer rewritten on every run, which used to leave a
+  fresh `.bak-` file behind each time), and a TOML `url` change is actually
+  written instead of being reported as unchanged.
+- **app**: the unreachable `lint` script is removed (eslint was never installed);
+  NFR-6/7 updated to match; the vestigial `unread.count` column is dropped
+  (schema v4) with a migration.
+
 ## 0.9.1 (2026-09-22)
 
 - **Task delivery time is recorded**: the ledger row is now written before the

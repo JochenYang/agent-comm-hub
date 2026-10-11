@@ -23,7 +23,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadRegistry, discover, expandConfigFile, expandHome, type RegistryEntry } from './discover.js'
+import { loadRegistry, discover, expandConfigFile, expandHome, configsForPlatform, type RegistryEntry } from './discover.js'
 
 export interface SetupOptions {
   /** Hub MCP endpoint URL. */
@@ -34,6 +34,10 @@ export interface SetupOptions {
   remove?: boolean
   /** Only configure the given registry agent id (e.g. `--agent codex`). */
   agent?: string
+  /** Configure agents whose config file exists even though the agent itself does
+   *  not (see DiscoveredAgent.configOnly). Off by default: writing into a
+   *  leftover dotfile resurrects an agent the user may have uninstalled. */
+  force?: boolean
   /** PATH contents for discovery (tests); defaults to process.env.PATH. */
   pathEnv?: string
   /** Skip npm-global discovery (tests / speed). */
@@ -42,6 +46,10 @@ export interface SetupOptions {
   homeDir?: string
   /** SKILL.md source; defaults to the package's agents/SKILL.md. */
   skillSrc?: string
+  /** Registry to read instead of the bundled `agents/registry.json` (tests: it is
+   *  the only way to exercise a strategy against a purpose-built agent record
+   *  without shipping that record). */
+  registryFile?: string
   log?: (message: string) => void
 }
 
@@ -49,6 +57,11 @@ export interface SetupSummary {
   done: string[]
   unchanged: string[]
   skipped: string[]
+  /** Files we found but refused to touch because their shape was not one this
+   *  strategy understands. Distinct from `skipped` (nothing to do) and from
+   *  `errors` (we tried and failed): here the file is left exactly as it was, and
+   *  the user is the one who has to decide. */
+  refused: string[]
   errors: string[]
 }
 
@@ -99,6 +112,25 @@ function resolveSection(doc: Record<string, unknown>, section: string): Record<s
   return node
 }
 
+/** Structural JSON equality, for deciding whether a config actually changed.
+ *
+ *  Key order must not matter: the file on disk was written by an earlier run of
+ *  this same code, but a hand-edited config may order keys differently, and a
+ *  reorder is not a change worth backing the file up for. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => sameJson(item, b[index]))
+  }
+  const left = a as Record<string, unknown>
+  const right = b as Record<string, unknown>
+  const leftKeys = Object.keys(left)
+  if (leftKeys.length !== Object.keys(right).length) return false
+  return leftKeys.every(key => Object.prototype.hasOwnProperty.call(right, key) && sameJson(left[key], right[key]))
+}
+
 /** Merge/remove one server key inside a JSON section; returns a status word. */
 async function mergeJsonServer(
   file: string,
@@ -118,10 +150,12 @@ async function mergeJsonServer(
     await writeJsonNoBom(file, doc)
     return 'removed'
   }
-  if (has) {
-    const existing = servers[opts.serverName] as { url?: unknown } | undefined
-    if (existing?.url === opts.url) return 'unchanged'
-  }
+  // Compare the WHOLE entry, not just `url`. A registry entry may describe the
+  // server with a different field — Gemini CLI uses `httpUrl` — and checking only
+  // `url` made `existing.url` permanently `undefined`, so such a config was
+  // rewritten on EVERY run. That broke the idempotency contract (invariant 6) and
+  // left a fresh `.bak-` file in the user's home each time.
+  if (has && sameJson(servers[opts.serverName], entry)) return 'unchanged'
   servers[opts.serverName] = entry
   await backup(file)
   await writeJsonNoBom(file, doc)
@@ -137,15 +171,25 @@ async function mergeTomlSection(
   const text = await readFile(file, 'utf8')
   const marker = `[mcp_servers.${opts.serverName}]`
   const markerRe = new RegExp(`^\\[mcp_servers\\.${escapeRegExp(opts.serverName)}\\]`, 'm')
+  const sectionRe = new RegExp(`^\\[mcp_servers\\.${escapeRegExp(opts.serverName)}\\][^\\r\\n]*(\\r?\\n(?!\\[).*)*(\\r?\\n)?`, 'm')
   if (opts.remove) {
     if (!markerRe.test(text)) return 'absent'
-    const cleaned = text.replace(new RegExp(`^\\[mcp_servers\\.${escapeRegExp(opts.serverName)}\\][^\\r\\n]*(\\r?\\n(?!\\[).*)*(\\r?\\n)?`, 'm'), '')
+    const cleaned = text.replace(sectionRe, '')
     await backup(file)
     await writeFile(file, cleaned, 'utf8')
     return 'removed'
   }
-  if (markerRe.test(text)) return 'unchanged'
   const block = `\n${marker}\ntype = "streamable-http"\nurl = "${opts.url}"\n`
+  if (markerRe.test(text)) {
+    // The section HEADER alone is not enough. Matching only the header made a
+    // changed url invisible: `setup` reported "unchanged" and left the agent
+    // pointing at the old endpoint forever. Compare the whole block, and rebuild
+    // it in place when it differs (a stale url, or a hand-edited section).
+    if (text.includes(block.trimStart())) return 'unchanged'
+    await backup(file)
+    await writeFile(file, text.replace(sectionRe, '').trimEnd() + block, 'utf8')
+    return 'changed'
+  }
   await backup(file)
   await writeFile(file, text.trimEnd() + block, 'utf8')
   return 'changed'
@@ -247,6 +291,121 @@ async function mergeDshPatch(
   return 'changed'
 }
 
+/**
+ * Merge into a YAML file whose `mcpServers` value is a LIST of mappings
+ * (Continue's shape), as opposed to `json`'s object-of-objects.
+ *
+ * Deliberately NOT a YAML parser — the project has zero runtime dependencies, so
+ * there is no library to hand this to, and hand-rolling one would be worse than
+ * the narrow, well-defined edit below. What it understands is exactly the shape
+ * it must edit: a top-level `mcpServers:` key whose value is a sequence of `- `
+ * items. Anything else is refused with `unrecognized` rather than rewritten —
+ * silently mangling a config we did not understand is the failure this guard
+ * exists to prevent.
+ */
+async function mergeYamlArrayServer(
+  file: string,
+  opts: { serverName: string; url: string; remove: boolean; entry: Record<string, unknown> },
+): Promise<'changed' | 'unchanged' | 'removed' | 'absent' | 'skipped' | 'unrecognized'> {
+  if (!existsSync(file)) return 'skipped'
+  const text = await readFile(file, 'utf8')
+  const lines = text.split('\n')
+
+  const keyIndex = lines.findIndex(line => /^mcpServers:\s*(#.*)?$/.test(line))
+  const inlineKey = lines.findIndex(line => /^mcpServers:\s*\S/.test(line))
+  if (keyIndex === -1) {
+    // An inline value (`mcpServers: {}`) cannot take a list item, and anything
+    // else with a non-empty value is a shape we do not claim to understand.
+    if (inlineKey !== -1) return 'unrecognized'
+  }
+
+  /** The block owned by `mcpServers`: from the key line to the next top-level key. */
+  const blockEnd = (from: number): number => {
+    for (let i = from + 1; i < lines.length; i++) {
+      const line = lines[i]
+      if (line.trim() === '' || line.startsWith('#')) continue
+      if (!/^\s/.test(line)) return i
+    }
+    return lines.length
+  }
+
+  /** `[start, end)` for every `- ` item inside a block. */
+  const items = (from: number, to: number): Array<{ start: number; end: number }> => {
+    const starts: number[] = []
+    for (let i = from; i < to; i++) {
+      if (/^\s*-\s/.test(lines[i])) starts.push(i)
+    }
+    return starts.map((start, k) => ({ start, end: k + 1 < starts.length ? starts[k + 1] : to }))
+  }
+
+  const isOurs = (item: { start: number; end: number }): boolean =>
+    lines.slice(item.start, item.end).some(line => new RegExp(`^\\s*-?\\s*name:\\s*${opts.serverName}\\s*$`).test(line))
+
+  if (keyIndex === -1) {
+    if (opts.remove) return 'absent'
+    await backup(file)
+    const block = `mcpServers:\n${yamlArrayItem(opts.serverName, opts.url, opts.entry, '  ')}`
+    await writeFile(file, `${text.replace(/\n*$/, '')}\n${block}\n`, 'utf8')
+    return 'changed'
+  }
+
+  const to = blockEnd(keyIndex)
+  const ours = items(keyIndex + 1, to).filter(isOurs)
+  // The indent to match: our existing item if any, otherwise the first item's.
+  const all = items(keyIndex + 1, to)
+  // A block with content but no `- ` items is a MAPPING, not a list. Appending a
+  // list item to it would produce a file that is neither, so refuse instead — the
+  // same call as the inline-value case above, for the same reason.
+  const bodyLines = lines.slice(keyIndex + 1, to).filter(line => line.trim() !== '' && !line.trim().startsWith('#'))
+  if (all.length === 0 && bodyLines.length > 0) return 'unrecognized'
+  const indent = ours.length > 0
+    ? (lines[ours[0].start].match(/^(\s*)/)?.[1] ?? '  ')
+    : (all.length > 0 ? (lines[all[0].start].match(/^(\s*)/)?.[1] ?? '  ') : '  ')
+
+  if (opts.remove) {
+    if (ours.length === 0) return 'absent'
+    await backup(file)
+    // Drop every matching item (an older buggy run could have left several).
+    const out = lines.slice()
+    for (const item of ours.reverse()) out.splice(item.start, item.end - item.start)
+    await writeFile(file, out.join('\n'), 'utf8')
+    return 'removed'
+  }
+
+  const wanted = yamlArrayItem(opts.serverName, opts.url, opts.entry, indent)
+  if (ours.length === 1 && lines.slice(ours[0].start, ours[0].end).join('\n').trimEnd() === wanted.trimEnd()) {
+    return 'unchanged'
+  }
+  await backup(file)
+  const out = lines.slice()
+  // Remove every previous copy, then insert one at the position of the first.
+  const first = ours[0]?.start ?? to
+  for (const item of ours.reverse()) out.splice(item.start, item.end - item.start)
+  const insertAt = ours.length > 0 ? first : to
+  out.splice(insertAt, 0, ...wanted.replace(/\n$/, '').split('\n'))
+  await writeFile(file, out.join('\n'), 'utf8')
+  return 'changed'
+}
+
+/** One YAML list item: `- name: <serverName>` then the entry's keys, all at
+ *  `indent`, with the keys aligned under `name`. */
+function yamlArrayItem(serverName: string, url: string, entry: Record<string, unknown>, indent: string): string {
+  const substituted = substitute(entry, { url, serverName })
+  const keys = Object.entries(substituted)
+  const inner = `${indent}  `
+  const head = `${indent}- name: ${serverName}\n`
+  return head + keys.map(([key, value]) => `${inner}${key}: ${yamlScalar(value)}\n`).join('')
+}
+
+/** Render a scalar for the YAML item. Only the shapes a registry entry can hold:
+ *  strings (quoted only when they would otherwise be misread) and numbers/booleans
+ *  (emitted bare, which is what YAML means by them). */
+function yamlScalar(value: unknown): string {
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  const text = String(value ?? '')
+  return /^[A-Za-z0-9._/:@-]+$/.test(text) ? text : JSON.stringify(text)
+}
+
 /** Copy the skill into a directory (idempotent; overwrites on change). */
 async function syncSkill(skillDir: string, skillSrc: string, remove: boolean, log: (m: string) => void): Promise<void> {
   if (remove) {
@@ -292,15 +451,16 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
   const skillSrc = options.skillSrc ?? defaultSkillSrc()
   const remove = options.remove === true
   const log = options.log ?? ((message: string): void => console.log(message))
-  const summary: SetupSummary = { done: [], unchanged: [], skipped: [], errors: [] }
+  const summary: SetupSummary = { done: [], unchanged: [], skipped: [], refused: [], errors: [] }
   const record = (status: string | undefined, label: string, file: string): void => {
     if (status === 'changed' || status === 'removed') summary.done.push(`${label}: ${file}`)
     else if (status === 'unchanged' || status === 'absent') summary.unchanged.push(`${label}: ${file}`)
     else if (status === 'skipped') summary.skipped.push(`${label}: ${file}`)
+    else if (status === 'unrecognized') summary.refused.push(`${label}: ${file}`)
   }
 
   // Registry-driven discovery: which registered agents are installed?
-  const registry = loadRegistry()
+  const registry = loadRegistry(options.registryFile)
   const found = discover(registry, { homeDir: home, pathEnv: options.pathEnv, noNpm: options.noNpm === true })
   const only = options.agent
   let targetAgents: RegistryEntry[] = []
@@ -314,23 +474,53 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
       log(`configure only: ${only}`)
     }
   } else {
-    targetAgents = found.filter(agent => agent.present).map(agent => registry.agents.find(entry => entry.id === agent.id)!)
+    const installed = found.filter(agent => agent.present)
+    targetAgents = installed.map(agent => registry.agents.find(entry => entry.id === agent.id)!)
+    // A config file is not an installation. These are reported (and skipped)
+    // rather than silently dropped, because "why is my agent not configured any
+    // more?" is otherwise unanswerable — and `--force` is the way to insist.
+    const configOnly = found.filter(agent => agent.configOnly)
+    if (options.force === true) {
+      for (const agent of configOnly) {
+        const entry = registry.agents.find(candidate => candidate.id === agent.id)
+        if (entry !== undefined && !targetAgents.includes(entry)) targetAgents.push(entry)
+      }
+    } else if (configOnly.length > 0) {
+      for (const agent of configOnly) {
+        summary.skipped.push(`${agent.id}: config-only (${agent.configFiles[0]}) — agent not installed; use --force or --agent ${agent.id}`)
+      }
+      log(`skipped (config-only, agent not installed): ${configOnly.map(agent => agent.id).join(', ')} — use --force to configure anyway`)
+    }
     const present = targetAgents.map(agent => agent.id)
     log(`discovered: ${present.length > 0 ? present.join(', ') : 'none'}`)
   }
 
   for (const agent of targetAgents) {
-    for (const config of agent.configs) {
+    for (const config of configsForPlatform(agent, process.platform)) {
       // Per-agent server key: DSH must not reuse the generic `agent-hub` name
       // when an MCP-manager plugin already owns it (profile load crash).
       const nameFor = config.serverName ?? agent.serverName ?? serverName
       for (const file of expandConfigFile(config.file, home)) {
         try {
-          const status = config.strategy === 'json'
-            ? await mergeJsonServer(file, config.section!, substitute(config.entry!, { url, serverName: nameFor }), { serverName: nameFor, url, remove })
-            : config.strategy === 'toml'
-              ? await mergeTomlSection(file, { serverName: nameFor, url, remove })
-              : await mergeDshPatch(file, { serverName: nameFor, url, remove })
+          // A switch, not a nested ternary: each strategy added here used to
+          // deepen the chain, and the last arm silently became the default for any
+          // unknown value. Unknown strategies cannot reach here (the registry
+          // validates them at load), but the shape should not depend on that.
+          let status: 'changed' | 'unchanged' | 'removed' | 'absent' | 'skipped' | 'unrecognized'
+          switch (config.strategy) {
+            case 'json':
+              status = await mergeJsonServer(file, config.section!, substitute(config.entry!, { url, serverName: nameFor }), { serverName: nameFor, url, remove })
+              break
+            case 'toml':
+              status = await mergeTomlSection(file, { serverName: nameFor, url, remove })
+              break
+            case 'yaml-array':
+              status = await mergeYamlArrayServer(file, { serverName: nameFor, url, remove, entry: config.entry ?? {} })
+              break
+            case 'dsh':
+              status = await mergeDshPatch(file, { serverName: nameFor, url, remove })
+              break
+          }
           record(status, agent.id, file)
         } catch (error) {
           summary.errors.push(`${agent.id}: ${file} — ${(error as Error).message}`)
@@ -340,8 +530,13 @@ export async function runSetup(options: SetupOptions = {}): Promise<SetupSummary
     }
   }
 
-  // Skills: cross-agent standard location + each discovered agent's private dir.
-  const skillDirs = [join(home, '.agents', 'skills', serverName)] // cross-agent standard
+  // Skills: the cross-agent standard location plus each configured agent's own
+  // dir. The cross-agent one is NOT created unconditionally: with no agent
+  // installed there is nothing to read it, and creating it anyway is exactly the
+  // "empty directories for agents you do not have" problem. On `remove` it is
+  // still visited, so an uninstall cleans up what an earlier install left.
+  const skillDirs: string[] = []
+  if (targetAgents.length > 0 || remove) skillDirs.push(join(home, '.agents', 'skills', serverName))
   for (const agent of targetAgents) {
     if (agent.skill !== null) skillDirs.push(join(expandHome(agent.skill, home), serverName))
   }

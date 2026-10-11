@@ -42,6 +42,7 @@ writeFileSync(join(home, '.dsh', 'profiles', 'web', 'cordis.patch.yml'), '# web 
 
 const quiet = { log: () => {} }
 
+const backupNames = () => new Set([join(home, '.minimax'), join(home, '.minimax', 'mcp'), join(home, '.config', 'opencode'), join(home, '.gemini'), join(home, '.codex'), join(home, '.zcode', 'cli')].flatMap(d => existsSync(d) ? readdirSync(d).filter(f => f.includes('.bak-')).map(f => `${d}/${f}`) : []))
 const countBaks = () => ['mcp.json', 'opencode.json', 'settings.json', 'config.toml', 'config.json'].reduce((n, name) => {
   const dirs = [join(home, '.minimax'), join(home, '.minimax', 'mcp'), join(home, '.config', 'opencode'), join(home, '.gemini'), join(home, '.codex'), join(home, '.zcode', 'cli')]
   return n + dirs.filter(d => existsSync(d)).reduce((m, d) => m + readdirSync(d).filter(f => f.startsWith(name) && f.includes('.bak-')).length, 0)
@@ -49,6 +50,19 @@ const countBaks = () => ['mcp.json', 'opencode.json', 'settings.json', 'config.t
 
 const read = p => JSON.parse(readFileSync(p, 'utf8'))
 const toml = p => readFileSync(p, 'utf8')
+/** Every regular file under `dir`, as paths relative to it. */
+function walkFiles(dir) {
+  const out = []
+  const walk = current => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else out.push(full.slice(dir.length + 1))
+    }
+  }
+  walk(dir)
+  return out
+}
 
 try {
   console.log('== setup: incremental install ==')
@@ -61,10 +75,22 @@ try {
   check('opencode context7 preserved', oc.mcp.context7?.type === 'local')
   check('opencode unrelated keys preserved', oc.other === 'keep-me')
   const kimi = read(join(home, '.kimi-code', 'mcp.json'))
-  check('kimi agent-hub added', kimi.mcpServers['agent-hub']?.transport === 'http')
+  // Kimi Code does not accept `transport: "http"` — its only documented value is
+  // "sse", and HTTP is the default when a `url` is present without `transport`.
+  // The old assertion pinned the invalid value, so it was asserting the bug.
+  check(
+    'kimi agent-hub added as an HTTP url with no transport field',
+    kimi.mcpServers['agent-hub']?.url === 'http://127.0.0.1:18764/mcp' && !('transport' in (kimi.mcpServers['agent-hub'] ?? {})),
+    JSON.stringify(kimi.mcpServers['agent-hub'])
+  )
   check('kimi exa preserved', kimi.mcpServers.exa?.url === 'https://mcp.exa.ai/mcp')
   const gem = read(join(home, '.gemini', 'settings.json'))
-  check('gemini section created + entry added', gem.mcpServers['agent-hub']?.type === 'http')
+  // Gemini CLI's remote field is `httpUrl`, not `type` + `url`.
+  check(
+    'gemini section created + entry added with httpUrl',
+    gem.mcpServers['agent-hub']?.httpUrl === 'http://127.0.0.1:18764/mcp' && !('type' in (gem.mcpServers['agent-hub'] ?? {})),
+    JSON.stringify(gem.mcpServers['agent-hub'])
+  )
   check('gemini original keys preserved', gem.general?.key === 1)
   const cx = toml(join(home, '.codex', 'config.toml'))
   check('codex original line preserved', cx.startsWith('model = "x"'))
@@ -86,12 +112,41 @@ try {
   check('dsh patch unrelated entries preserved', dshPatchBefore.includes('searchProvider: searxng'))
   const baksAfterInstall = countBaks()
   check('backups created for changed files', baksAfterInstall >= 5, `got ${baksAfterInstall}`)
+  // Snapshot the backup NAMES, not just the count. Backup filenames carry a
+  // second-resolution timestamp, so a file rewritten twice inside one second
+  // OVERWRITES its own backup and the count stays put — which is exactly how a
+  // non-idempotent merge hid here (Gemini's `httpUrl` entry was rewritten on every
+  // run). Comparing the name set catches a rewrite the count cannot see.
+  const baksBefore = backupNames()
 
   console.log('== setup: idempotency ==')
   const s2 = await runSetup({ homeDir: home, skillSrc, ...quiet })
-  check('re-run produces no new backups', countBaks() === baksAfterInstall, `now ${countBaks()}`)
+  // The DECISIVE check: a re-run must report that it changed NOTHING. Backup
+  // names cannot prove this — they carry a second-resolution timestamp, so a file
+  // rewritten twice inside one second overwrites its own backup and every
+  // backup-based count stays put. That is exactly how a non-idempotent merge hid
+  // here: Gemini's entry uses `httpUrl`, the merge only compared `url`, so the
+  // config was rewritten on every run while the backup count looked stable.
+  check('re-run changes no files', s2.done.length === 0, `changed: ${JSON.stringify(s2.done)}`)
+  check('re-run produces no new backups',
+    [...backupNames()].every(name => baksBefore.has(name)) && backupNames().size === baksBefore.size,
+    `new: ${JSON.stringify([...backupNames()].filter(name => !baksBefore.has(name)))}`)
   check('dsh patch unchanged on re-run', dshPatch() === dshPatchBefore)
   check('summary unchanged count > 0', s2.unchanged.length > 0, JSON.stringify(s2.unchanged.length))
+
+  // A CHANGED url must actually land. The TOML merge used to match only the
+  // section header, so a moved endpoint stayed stale in the user's Codex config
+  // while `setup` reported "unchanged" — the mirror image of the JSON bug above.
+  const codexBefore = readFileSync(join(home, '.codex', 'config.toml'), 'utf8')
+  await runSetup({ homeDir: home, skillSrc, url: 'http://10.0.0.5:18764/mcp', force: true, ...quiet })
+  const codexAfter = readFileSync(join(home, '.codex', 'config.toml'), 'utf8')
+  check('a changed url is written into the codex TOML config',
+    codexAfter.includes('url = "http://10.0.0.5:18764/mcp"') && !codexAfter.includes('127.0.0.1:18764'),
+    JSON.stringify(codexAfter))
+  check('the codex TOML keeps exactly one hub section',
+    (codexAfter.match(/\[mcp_servers\.agent-hub\]/g) ?? []).length === 1, JSON.stringify(codexAfter))
+  check('the codex original content survived the url change',
+    codexAfter.includes('model = "x"') && codexBefore.includes('model = "x"'), JSON.stringify(codexAfter))
 
   console.log('== setup: uninstall ==')
   await runSetup({ homeDir: home, skillSrc, remove: true, ...quiet })
@@ -214,6 +269,33 @@ try {
     migrated.includes('serverName: agent-comm-hub') && !migrated.includes('serverName: agent-hub') && migrated.split('dsh-mcp-client').length === 2 && migrated.includes('searchProvider: searxng'),
     migrated,
   )
+  // --- W21: nothing installed means nothing created ---
+  console.log('== setup: empty machine creates nothing ==')
+  const emptyHome = mkdtempSync(join(tmpdir(), 'hub-setup-empty-'))
+  const emptySkill = join(emptyHome, 'SKILL.md')
+  writeFileSync(emptySkill, '---\nname: agent-comm-hub\n---\n')
+  const beforeFiles = walkFiles(emptyHome)
+  const emptySummary = await runSetup({ homeDir: emptyHome, skillSrc: emptySkill, pathEnv: '', noNpm: true, ...quiet })
+  const afterFiles = walkFiles(emptyHome)
+  check(
+    'an empty home with an empty PATH creates no files at all',
+    afterFiles.length === beforeFiles.length && emptySummary.done.length === 0,
+    JSON.stringify({ added: afterFiles.filter(f => !beforeFiles.includes(f)), done: emptySummary.done }),
+  )
+  check('and the cross-agent skill dir was not created either', !existsSync(join(emptyHome, '.agents')), '~/.agents exists')
+  rmSync(emptyHome, { recursive: true, force: true })
+
+  // --- W17/W21: a probePath hit is an installation, even with no config file ---
+  console.log('== setup: probePaths make an agent installed ==')
+  const probeHome = mkdtempSync(join(tmpdir(), 'hub-setup-probe-'))
+  const probeSkill = join(probeHome, 'SKILL.md')
+  writeFileSync(probeSkill, '---\nname: agent-comm-hub\n---\n')
+  mkdirSync(join(probeHome, '.minimax'), { recursive: true }) // state dir only: no mcp.json
+  const probeSummary = await runSetup({ homeDir: probeHome, skillSrc: probeSkill, pathEnv: '', noNpm: true, ...quiet })
+  check('mcode is recognised from ~/.minimax alone', probeSummary.done.length + probeSummary.skipped.length > 0, JSON.stringify(probeSummary))
+  check('its config file is NOT created (missing files stay missing)', !existsSync(join(probeHome, '.minimax', 'mcp.json')), 'mcp.json was created')
+  check('but its skill is synced, because the agent is really there', existsSync(join(probeHome, '.minimax', 'skills', 'agent-hub', 'SKILL.md')), JSON.stringify(walkFiles(probeHome)))
+  rmSync(probeHome, { recursive: true, force: true })
 
   console.log(`\n${checks - failures}/${checks} checks passed`)
   if (failures > 0) process.exitCode = 1

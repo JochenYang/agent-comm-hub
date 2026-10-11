@@ -18,7 +18,17 @@ interface Props {
 export function PeersView({ selfPeerId }: Props): React.JSX.Element {
   const { t } = useTranslation()
   const { peers, loading, error, refresh, renamePeer, removePeer, forgetPeer } = usePeersStore()
-  const { unreadMap, activePeer, setActivePeer } = useMessagesStore()
+  const { unreadMap, activePeer, setActivePeer, markPeerRead } = useMessagesStore()
+  /** Open a conversation (or close it when it is already open).
+   *
+   *  Opening also clears the badge (W35): the user is looking at the conversation
+   *  now, so everything currently visible counts as read. `Date.now()` rather than
+   *  the newest visible message's ts is deliberate — the badge ignores messages
+   *  outside the display window, so the two agree on what "cleared" means. */
+  const openConversation = (peerId: string, isActive: boolean): void => {
+    setActivePeer(isActive ? null : peerId)
+    if (!isActive) markPeerRead(peerId, Date.now())
+  }
   // Error bar only shows while the hub is running: a polling failure while stopped ("MCP not initialized") is normal,
   // and shouldn't hang around as a red error (users reported it popping constantly after startup).
   const hubState = useHubStore((s) => s.status?.state)
@@ -114,7 +124,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
         role="button"
         tabIndex={0}
         onClick={() => {
-          if (!isRenaming) setActivePeer(isActive ? null : p.id)
+          if (!isRenaming) openConversation(p.id, isActive)
         }}
         onKeyDown={(e) => {
           // Keyboard accessibility (WCAG 2.1 AA): Enter / Space behave like a click to switch conversations;
@@ -122,7 +132,7 @@ export function PeersView({ selfPeerId }: Props): React.JSX.Element {
           if (isRenaming) return
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
-            setActivePeer(isActive ? null : p.id)
+            openConversation(p.id, isActive)
           }
         }}
         title={isActive ? t('peers.back_conv') : t('peers.view_conv', { peer: p.id })}

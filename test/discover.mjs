@@ -6,13 +6,14 @@
  *  - config-path discovery
  *  - npm-global discovery (fake npm root, scoped dirs normalized)
  *  - os filtering (claude-desktop is darwin-only)
- *  - source priority: config > path > npm
+ *  - config-only detection (a config file without an installed agent)
+ *  - source priority: path > npm > probe-path > config
  */
 
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadRegistry, validateRegistry, discover, expandHome, expandConfigFile } from './discover-entry.mjs'
+import { loadRegistry, validateRegistry, discover, expandHome, expandConfigFile, configsForPlatform, CREDENTIAL_FILES } from './discover-entry.mjs'
 
 let failures = 0
 let checks = 0
@@ -30,11 +31,33 @@ try {
   console.log('== registry: load + validate ==')
   const registry = loadRegistry()
   check('bundled registry loads and validates', Array.isArray(registry.agents) && registry.agents.length >= 10)
-  check('registry has claude-desktop (darwin only)', registry.agents.some(a => a.id === 'claude-desktop' && a.os?.includes('darwin') && !a.os.includes('win32')))
+  // claude-desktop used to be darwin-only with a single macOS path. It now covers
+  // Windows too, which is why `configs[]` gained a per-file `os`: the two platforms
+  // use different FILES, and a record-level `os` cannot express that.
+  check(
+    'registry has claude-desktop on darwin and win32 with one file each',
+    registry.agents.some(a =>
+      a.id === 'claude-desktop' && a.os?.includes('darwin') && a.os.includes('win32') && a.configs.length === 2
+      && a.configs.every(c => Array.isArray(c.os) && c.os.length === 1)),
+  )
   check('registry has qwen-code (httpUrl entry)', registry.agents.some(a => a.id === 'qwen-code' && a.configs[0]?.entry?.httpUrl === '{url}'))
-  check('registry has pi (config-less, skill via ~/.agents/skills)', registry.agents.some(a => a.id === 'pi' && a.configs.length === 0 && a.skill === null))
+  // pi has no MCP config of its own; it reads the cross-agent skill location.
+  // The old assertion said `skill === null` while its own name said otherwise.
+  check(
+    'registry has pi (config-less, skill at the cross-agent location)',
+    registry.agents.some(a => a.id === 'pi' && a.configs.length === 0 && a.skill === '~/.agents/skills'),
+  )
+  check(
+    'registry gives qwen-code a skill directory',
+    registry.agents.some(a => a.id === 'qwen-code' && a.skill === '~/.qwen/skills'),
+  )
   check('registry has cursor (url entry)', registry.agents.some(a => a.id === 'cursor' && a.configs[0]?.entry?.url === '{url}'))
-  check('registry has qoder + codebuddy (probe-only)', registry.agents.some(a => a.id === 'qoder' && a.configs.length === 0) && registry.agents.some(a => a.id === 'codebuddy' && a.configs.length === 0))
+  // qoder was probe-only; its config location is now confirmed. codebuddy still is.
+  check(
+    'registry has qoder (configurable) + codebuddy (probe-only)',
+    registry.agents.some(a => a.id === 'qoder' && a.configs.length > 0)
+      && registry.agents.some(a => a.id === 'codebuddy' && a.configs.length === 0),
+  )
 
   console.log('== registry: validation rejects bad records ==')
   const bad = {
@@ -49,6 +72,24 @@ try {
   threw = false
   try { validateRegistry({ agents: [{ id: 'a', probe: [], configs: [{ file: '../escape', strategy: 'json', section: 'x', entry: {} }], skill: null }] }) } catch { threw = true }
   check('path traversal rejected', threw)
+  // Credential files are refused at load, not merely documented (AGENTS.md
+  // invariant 6). A registry that pointed at one would have to round-trip the
+  // whole file, rewriting the credential blob.
+  for (const file of CREDENTIAL_FILES) {
+    threw = false
+    try {
+      validateRegistry({ agents: [{ id: 'a', probe: [], configs: [{ file, strategy: 'json', section: 'mcpServers', entry: {} }], skill: null }] })
+    } catch { threw = true }
+    check(`credential file refused: ${file}`, threw)
+  }
+  // And the SHIPPED registry must not contain one either — the check above only
+  // proves the validator works.
+  const shippedFiles = registry.agents.flatMap(a => a.configs.map(c => c.file))
+  check(
+    'no shipped registry entry points at a credential file',
+    shippedFiles.every(f => !CREDENTIAL_FILES.includes(f)),
+    JSON.stringify(shippedFiles.filter(f => CREDENTIAL_FILES.includes(f))),
+  )
   threw = false
   try { validateRegistry({ agents: [{ id: 'a', probe: [], configs: [{ file: '~/x.json', strategy: 'json', section: null, entry: null }], skill: null }] }) } catch { threw = true }
   check('json strategy without section/entry rejected', threw)
@@ -103,7 +144,35 @@ try {
   writeFileSync(join(home, '.config', 'opencode', 'opencode.json'), '{}')
   const cfg = discover(registry, { homeDir: home, pathEnv: '/nonexistent', platform: 'linux', noNpm: true })
   const ocCfg = cfg.find(a => a.id === 'opencode')
-  check('config presence discovered with configFiles', ocCfg?.present === true && ocCfg.source === 'config' && ocCfg.configFiles.length === 1, JSON.stringify(ocCfg))
+  // The config lives inside `~/.config/opencode`, which is also opencode's
+  // probePath — so this now reports the stronger signal (`probe-path`), not
+  // `config`: a config file alone is not evidence of an installation.
+  check('config presence discovered with configFiles', ocCfg?.present === true && ocCfg.source === 'probe-path' && ocCfg.configFiles.length === 1, JSON.stringify(ocCfg))
+
+  console.log('== config-only: a config file is not an installation ==')
+  const cfgHome = mkdtempSync(join(tmpdir(), 'hub-discover-configonly-'))
+  mkdirSync(join(cfgHome, 'shared'), { recursive: true })
+  writeFileSync(join(cfgHome, 'shared', 'leftover.json'), '{}')
+  // The bundled registry's configs all live INSIDE their probePath, so the
+  // distinction can only be exercised with an entry whose config is elsewhere
+  // (a shared dotfile, an app-data path).
+  const synthetic = {
+    agents: [{
+      id: 'ghost',
+      probe: ['ghost'],
+      probePaths: ['~/.ghost-install'],
+      configs: [{ file: '~/shared/leftover.json', section: 'mcpServers', strategy: 'json', entry: { url: 'http://x/mcp' } }],
+      skill: null,
+      os: ['win32', 'darwin', 'linux'],
+    }],
+  }
+  const ghost = discover(synthetic, { homeDir: cfgHome, pathEnv: '/nonexistent', platform: 'linux', noNpm: true })[0]
+  check('a config file alone does NOT make the agent installed', ghost.present === false && ghost.source === 'config' && ghost.configOnly === true, JSON.stringify(ghost))
+  check('the leftover config file is still reported', ghost.configFiles.length === 1, JSON.stringify(ghost.configFiles))
+  mkdirSync(join(cfgHome, '.ghost-install'), { recursive: true })
+  const ghost2 = discover(synthetic, { homeDir: cfgHome, pathEnv: '/nonexistent', platform: 'linux', noNpm: true })[0]
+  check('a probePath hit makes the same entry installed', ghost2.present === true && ghost2.source === 'probe-path' && ghost2.configOnly === false, JSON.stringify(ghost2))
+  rmSync(cfgHome, { recursive: true, force: true })
 
   console.log('== npm-global discovery ==')
   // Separate home: the config-path section above already created opencode's
@@ -122,7 +191,21 @@ try {
 
   console.log('== os filtering ==')
   const winOs = discover(registry, { homeDir: home, pathEnv, platform: 'win32', noNpm: true })
-  check('claude-desktop hidden on win32', !winOs.some(a => a.id === 'claude-desktop'))
+  // claude-desktop used to be darwin-only, so it was hidden on win32. It is not
+  // hidden any more — but the platform filter still has to do its job: only the
+  // win32 FILE may be considered on Windows, and only the macOS one on darwin.
+  const desktopWin = winOs.find(a => a.id === 'claude-desktop')
+  // Assert on the REGISTRY entry: a DiscoveredAgent only lists config files that
+  // actually exist, and the fake home has neither of claude-desktop's.
+  const desktopEntry = registry.agents.find(a => a.id === 'claude-desktop')
+  check(
+    'claude-desktop is visible on win32 and only its Windows file applies',
+    desktopWin !== undefined
+      && configsForPlatform(desktopEntry, 'win32').length === 1
+      && configsForPlatform(desktopEntry, 'win32')[0].file.includes('AppData/Roaming/Claude')
+      && configsForPlatform(desktopEntry, 'darwin')[0].file.includes('Library/Application Support/Claude'),
+    JSON.stringify(configsForPlatform(desktopEntry, 'win32').map(c => c.file)),
+  )
   const macOs = discover(registry, { homeDir: home, pathEnv: '/nonexistent', platform: 'darwin', noNpm: true })
   check('claude-desktop listed on darwin', macOs.some(a => a.id === 'claude-desktop' && !a.present))
 

@@ -93,7 +93,7 @@ agent-comm-hub status             # hub 是否在跑？谁在线？
 
 ```bash
 agent-comm-hub setup
-# 或 PowerShell 版：agents/install-all.ps1
+# （agents/install-all.ps1 已废弃，它只是转发到这个命令）
 # 卸载：agent-comm-hub setup --remove
 # 查看本机装了什么（只读）：agent-comm-hub discover
 # 只配置某一个：agent-comm-hub setup --agent codex
@@ -276,7 +276,7 @@ const hub = startHub({ port: 18764 }, console) // 返回 { hub, registry, server
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit（strict）
-pnpm test             # 测试套件（291 项：165 冒烟 + 37 安装器 + 11 运维 + 35 herdr + 23 发现 + 20 e2e）
+pnpm test             # 测试套件（314 项：169 冒烟 + 46 安装器 + 11 运维 + 35 herdr + 33 发现 + 20 e2e）
 npm run build:admin   # admin/ 工作区（用 npm）→ 单文件 assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js（零依赖）
 pnpm pack             # 构建 + npm pack（发布产物）

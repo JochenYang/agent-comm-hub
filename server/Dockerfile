@@ -2,10 +2,20 @@
 # 镜像只封装 hub 本身；对外 TLS 仍建议由 Caddy/nginx 终结（见同目录示例）。
 FROM node:22-alpine
 
-RUN npm install -g agent-comm-hub
+# Pinned, not `latest`: a container that silently changes version on rebuild is not
+# reproducible. The release SOP updates this alongside the other version strings;
+# --build-arg HUB_VERSION=x.y.z builds a specific release.
+ARG HUB_VERSION=0.9.1
+
+RUN npm install -g agent-comm-hub@${HUB_VERSION}
 
 # 状态（history / 信箱 / 花名册 / 群组）落在 /data 卷；令牌表也建议放这里（chmod 600）。
 VOLUME /data
+
+# Run as a non-root user. The hub only needs to read its config and write /data,
+# and this is the process most likely to face the public internet.
+RUN addgroup -S hub && adduser -S -G hub hub && chown -R hub:hub /data
+USER hub
 
 EXPOSE 18764
 

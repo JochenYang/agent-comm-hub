@@ -8,6 +8,8 @@ export {
   runDiscover,
   expandHome,
   expandConfigFile,
+  configsForPlatform,
+  CREDENTIAL_FILES,
   registryFile,
   type Registry,
   type RegistryEntry,

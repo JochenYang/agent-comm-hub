@@ -147,10 +147,44 @@ MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorizat
 
 ## 5. 已知边界（诚实清单）
 
-- **桌面 GUI 不支持 https**：客户端固定拼 `http://{host}:{port}{path}`
-  （`app/src-tauri/src/mcp_client.rs`），没有 scheme 选项。走 TLS 反代的团队目前
-  只能用普通 MCP 客户端接入；需要 GUI 时得直连 http 端口，或等客户端补上
-  scheme 字段。
+- **桌面 GUI 支持 https（app ≥ 1.5.0）**：Hub 主机名可以填完整 URL（如
+  `https://hub.example.com/mcp`），URL 里的 scheme、端口与路径优先于旁边的独立字段；
+  只填主机名时仍按 `http://{host}:{port}{path}` 拼接（`app/src-tauri/src/mcp_client.rs`
+  的 `endpoint_url`，含单测）。走 TLS 反代的团队可以直接把 GUI 指向域名。
+- **`Origin` 校验默认开启**：没有 `Origin` 头的客户端（curl、各 agent 的 MCP 客户端、
+  桌面 GUI）不受影响；浏览器页面只有在回环来源、或用 `--allow-origins <list>` 显式列出的
+  来源下才能调用，其余一律 403。管理台是回环来源；远程模式下它带着 token 且 `Origin`
+  主机与 `Host` 一致，因此照常可用。
+- **`--host` 非回环时必须有 token 表**：否则 hub 直接拒绝启动（`--insecure` 是显式承担
+  风险的逃生口）。这条以前只是文档里的建议，现在由代码强制。
+- **manager 特权需要凭证**：配置 `--manager-token`（或 `<state-file 目录>/manager.token`）后，
+  改名他人 / 踢人 / 读全量历史 / `peer: "all"` 任务面板 / SSE 中继全部要求请求带
+  `Authorization: Bearer <manager token>`；**未配时**才回到旧约定（`managerPeers` 里的 id 谁先到谁得）。
+  不配且 hub 监听非回环时，启动会打一条 warn。
+- **但“抢到那个 id”仍然拿到身份与信箱**：一个未鉴权的客户端可以把自己命名成
+  `agent-hub-cli`（或 `bridge_register` 抢注）——它拿不到任何 manager 特权，但会占着这个 id：
+  路由给该 id 的消息会被它 `bridge_poll` 取走，它也能以 `from: agent-hub-cli` 对外发送；
+  真正的 GUI 随后同名连入时会同名共享同一个信箱（N:1）。把 manager token 配起来只解决“特权”，
+  不解决“身份”。要完全避开，就别把 manager 身份挂在一个可猜测的固定 id 上。
+- **session id 的存在性可被探测（已记录，暂不修）**：未鉴权的调用者能区分两种响应——
+  「未知 session id」得到 **404**，而「已知 session id、但属于另一个凭据用户」得到 **401**。
+  两者结合可以逐个试探某个 UUID 是否存在（UUID 本身不可猜，所以实际风险很低，但差异是真实的）。
+  本轮**有意不改行为**：把鉴权提到 session 校验之前，只是把一个 401 泄露换成另一种可观察差异
+  （例如“所有未知 id 都回 404”会让已终止与从未存在的 id 无法区分，而那正是客户端重新 `initialize`
+  所依赖的信号）。真要消除，需要先设计一个不依赖状态码差异的会话生命周期语义。
+- **会话会被回收（`--session-ttl-ms`，默认 30 min）**：没有活 SSE 流且超过时限未被使用的 session 会被遗忘；客户端下次调用得到 404，按规范重新 `initialize` 即可，hub 会自动用同一 peer id 重新注册、信箱不丢。`--session-ttl-ms 0` 关闭回收。
+- **每 peer 信箱限速（`--rate-per-min`，默认不限）**：超过配额的消息被丢弃并计为 `droppedRate`（roster 与 bridge_metrics 可见）——**有意不排队通知**，否则通知会以和风暴同样的速度填满信箱。等待中的 peer 不受限速（一次 wait 取一条，速率由它自己控制）。
+- **消息可带 `priority`（0\|1\|2，缺省 0）**：信箱按优先级排序；信箱溢出时丢**最不重要**的那条（同优先级内丢最旧——没人设优先级时与旧的「丢最旧」完全一致）。这改变了溢出语义：低优先级消息可能被持续的高优先级流量挤掉（计数可见），这是特性而非缺陷。
+- **桌面 GUI 配了 manager token 后要手动补凭证**：GUI 在本地模式默认不带 `Authorization`，
+  因此配上 `--manager-token` 后它会照常连上、但失去改名/踢人/全量历史/任务台账（relay 视图降级）。
+  修法：把 manager token 填进 GUI 设置里的「访问 token（远程）」字段并重启连接。（app 侧自动读取
+  `<state-file 目录>/manager.token` 属后续工作。）
+- **本部署是传输层的静态 bearer token 认证，不是 MCP authorization 规范的实现**：规范里
+  authorization 是 OPTIONAL，但 HTTP 传输上的授权实现应当遵循 OAuth 2.1 / RFC 9728。
+  本项目没有 `/.well-known/oauth-protected-resource`、没有 audience 校验、没有 token
+  过期与轮换。不要对外宣称它符合 OAuth。
+- **`tokens.example.json` 不能直接当令牌表用**：里面的 `CHANGE-ME-*` 占位符会被 hub
+  拒绝启动（fail-closed）。用 `agent-comm-hub auth add` 生成真 token。
 - token 走 HTTP header：个别极简 MCP 客户端若不支持自定义 header，接不进远程
   模式（本地模式不受影响）；需要按各家 agent 实测支持度。
 - 消息历史/离线信箱/花名册/群组/任务台账持久化到 SQLite（`--db`，CLI 默认开启）；
@@ -158,3 +192,38 @@ MCP 配置与本地相同，只改两处：URL 指向服务器、加 `Authorizat
 - 群聊：全员广播用 `to: "all"`；部分成员群用 `bridge_group_*`。群成员在创建
   时指定，之后可随时用 `bridge_group_add_member` / `bridge_group_remove_member`
   增删（创建者或 manager 可操作；创建者本人不能被移出）。
+
+## 6. 备份与恢复
+
+状态全在 `--db` 指向的 SQLite 文件里（history、信箱、花名册、群组、任务账本）。
+**不要用 `cp` 拷 `.db` 文件**：WAL 模式下已提交但尚未 checkpoint 的事务在 `-wal` 里，
+只拷主文件会得到一个看上去完整、实际缺最近数据的库。
+
+在 hub 运行中也能安全做的一致性快照：
+
+```bash
+# 1) 先把 WAL 落盘（可选，但能让快照更小）
+sqlite3 /var/lib/agent-comm-hub/state.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+
+# 2) 用 VACUUM INTO 生成一个自包含的副本（不加锁阻塞写，且已合并 WAL）
+sqlite3 /var/lib/agent-comm-hub/state.db \
+  "VACUUM INTO '/var/backups/agent-comm-hub-$(date +%F).db';"
+```
+
+恢复：停掉 hub → 用快照替换 `--db` 指向的文件（同时删掉旧的 `-wal` / `-shm`，
+否则它们会被当成新库的日志）→ 启动。
+
+令牌表（`tokens.json` / `manager.token`）**不在**这个库里，要单独备份；
+它们含凭据，备份文件同样需要 `chmod 600`。
+
+### 一个需要自查的版本区间
+
+SQLite 在 3.7.0 – 3.7.16 之间有一个 WAL-reset 缺陷（并发读 + 写事务可能读到错误的 WAL 帧，
+表现为静默数据错乱）。Node 22 自带的 SQLite 远新于此，但**若你把自己编译的 SQLite
+或旧运行时塞进容器，这个区间必须自查**：
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');console.log(new DatabaseSync(':memory:').prepare('select sqlite_version() v').get())"
+```
+
+低于 3.7.17 就不要用 WAL（或直接升级），否则备份再完整也保护不了被写坏的数据。

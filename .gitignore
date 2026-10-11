@@ -10,3 +10,6 @@ test/discover-entry.mjs
 
 # local scratch (verification scripts, throwaway hub state)
 .tmp/
+
+# handoff plans (temporary; the persistent plan lives in docs/plans/)
+.devflow/

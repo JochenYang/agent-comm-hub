@@ -28,7 +28,7 @@ Key facts:
   other. Same-name connections share one peer id (N:1) and one mailbox.
 - **Offline-tolerant**: messages queue per peer (max 200, oldest dropped) and
   are delivered on the next `bridge_wait`/`bridge_poll`.
-- Version `0.9.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
+- Version `0.10.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
   manager is **pnpm** (single-package repo; `pnpm-workspace.yaml` only carries
   the pnpm 10 `allowBuilds` approval for esbuild). The one exception is the
   `admin/` web-console workspace, which uses **npm** (its own
@@ -43,11 +43,12 @@ layers:
 
 | Layer | Mechanism |
 |---|---|
-| Transport | MCP streamable-http hand-rolled over `node:http`; JSON-RPC + SSE; `Mcp-Session-Id` per connection; `charset=utf-8` on every response; CORS `*`; 1 MB request-body cap |
+| Transport | MCP streamable-http hand-rolled over `node:http`; JSON-RPC + SSE; `Mcp-Session-Id` per connection; `charset=utf-8` on every response; **`Origin` gate** (no Origin / loopback / `--allow-origins` / same-host **with a bearer token**; anything else 403) and CORS that echoes an allowed origin instead of `*`; 1 MB request-body cap |
 | Identity | Auto-registration at `initialize`; `clientInfo.name` → peer id (sanitized, `agent` fallback); `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration |
 | Routing | Per-peer FIFO mailbox + long-poll waiters; `bridge_wait` (default 30 s, server ceiling 60 s); sender-filtered waits; `ref`-filtered ack waits; `to: "all"` broadcast; ack routed back to the original sender of `ref` |
-| Protocol | Message `{id, from, to, kind, content, ref?, channel?, threadId?, hop?, ts}`; `kind` = `chat` \| `task` \| `notice` \| `ack`; task/ack payloads are JSON-encoded strings decoded by `decodeContent`; `bridge_task` records a task ledger (status + ack timeline) with per-assignee delivery times; `ref` chains carry a `hop` depth capped at `MAX_HOP` (5) and persist with the message, so a restart cannot reset a chain |
-| Lifecycle | Connected = activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC evicts peers idle beyond `peerIdleTimeoutMs` (10 min) — never a peer with a live SSE stream |
+| Protocol | Message `{id, seq, from, to, kind, content, ref?, channel?, threadId?, hop?, priority?, expiresAt?, ts}`; `priority` (0\|1\|2, absent = 0) orders the recipient's mailbox and decides what overflow drops (the LEAST important message, oldest first within a priority — unchanged from "oldest dropped" when nobody sets one); `kind` = `chat` \| `task` \| `notice` \| `ack`; the SSE push contract (`SSE_METHOD` / `SSE_EVENT_PEERS_CHANGED` / `SSE_EVENT_MESSAGE`) lives in `src/protocol.ts` and the desktop's Rust side mirrors the same named constants; task/ack/notice payloads are JSON-encoded strings decoded by `decodeContent`; every message carries a monotonic `seq` (never restarts — see `bridge_history { since }`) and may carry an absolute `expiresAt` (dropped and counted as `droppedExpired` instead of delivered late); `bridge_task` records a task ledger (status + ack timeline) with per-assignee delivery times; `ref` chains carry a `hop` depth that persists with the message (a restart cannot reset a chain) and is **counted, not enforced** — two ceilings, `MAX_HOP` (5) for a task re-delegation and `MAX_REPLY_CHAIN` (50) for a plain reply, past which `hop` simply stops counting; the message and its `ref` are always delivered |
+| Delivery | Per-peer mailbox with `maxQueue`; overflow is **counted** (`droppedOverflow`) rather than silent, and a waiting peer gets a `notice` from the reserved id `hub`. An optional per-peer token bucket (`ratePerMin`, 0 = off) limits how fast a mailbox ACCUMULATES — it guards the recipient against a broadcast storm and counts excess as `droppedRate` (no notice is queued for a rate drop, or the notices would fill the mailbox just as fast). Manual-ack leases (`ack: "manual"` + `bridge_commit`/`bridge_nack`, `leaseTtlMs`, `maxAttempts`) give at-least-once handling; `attempts`/`inFlight`/`deadLettered`/`droppedOverflow`/`droppedExpired`/`droppedRate` are visible in the roster |
+| Lifecycle | Connected = activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC **parks** peers idle beyond `peerIdleTimeoutMs` (10 min) — the peer leaves the connected set as `reachable: "parked"` but keeps its mailbox and stays addressable; parked mail drops only after `parkedTtlMs` (7 days). An explicit `bridge_unregister` or a manager kick drops both the mailbox and the addressability |
 
 ### Code layout
 
@@ -56,7 +57,7 @@ src/
 ├── protocol.ts     # message kinds, BridgeMessage, task/ack payloads, peer id pattern
 ├── hub.ts          # AgentHub: registry, mailboxes, waiters, history ring, task ledger, idle GC (transport-agnostic)
 ├── mcp-server.ts   # SessionRegistry (sessions + peer bindings) + McpStreamableHttpServer
-├── hub-tools.ts    # the 30 bridge tools, auto-registration, peerId/alias sanitizing, profiles, result presentation
+├── hub-tools.ts    # the 39 bridge tools, auto-registration, peerId/alias sanitizing, profiles, result presentation
 ├── auth.ts         # remote-mode bearer-token table (load/validate/lookup)
 ├── persist.ts      # SQLite state store (node:sqlite): history ring, offline
 │                   #   mailboxes, profiles, groups, task ledger (remote mode)
@@ -68,10 +69,12 @@ src/
 ├── discover.ts     # agent discovery + registry load/validation (PATH probing,
 │                   #   config paths, npm global; platform-injectable)
 ├── herdr-ctl.ts    # optional herdr control adapter (agent CLI + pane socket)
+├── runner.ts       # executors for peers that are NOT polling: `cli` (execFile)
+                    #   and `herdr` (type into a pane); outcome -> the peer's ack
 └── ops.ts          # `status` probe, `service install/uninstall` (Windows /
                     #   Linux / macOS launchd), `update`
-agents/             # per-agent config templates + SKILL.md + install-all.ps1 +
-                    #   registry.json (declarative agent support — the single
+agents/             # per-agent config templates + registry.json + SKILL.md
+                    #   (declarative agent support — the single
                     #   source of truth for setup/discover)
 admin/              # web console workspace (Vite + React + Tailwind + beui
                     #   components). Built with npm, not pnpm, by
@@ -83,6 +86,8 @@ test/               # smoke.mjs (multi-peer), setup.mjs (installer),
                     #   ops.mjs (status + service), herdr.mjs (control),
                     #   discover.mjs (discovery engine), e2e.mjs (built CLI)
 scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGELOG.md)
+                    #   manual/ = one-off probes and herdr driver scripts, NOT run by
+                    #   CI and NOT covered by assertions (see manual/README.md)
 ```
 
 - `hub.ts` is deliberately transport-agnostic (no MCP, no HTTP imports) so the
@@ -101,10 +106,13 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
   instead (marking a fresh task `timeout` on the spot). `deadlineAt` stays the
   authoritative deadline, so a multi-day `timeoutMs` is honored exactly; the
   `bridge_task` tool description states the same contract (no upper bound).
-- The 30 tools (symmetric on every side): the 13 message tools
+- The 39 tools (symmetric on every side): the 22 message + observability tools
   (`bridge_register`, `bridge_unregister`, `bridge_rename`, `bridge_chat`,
-  `bridge_task`, `bridge_ack`, `bridge_wait`, `bridge_poll`, `bridge_status`,
-  `bridge_peers`, `bridge_history`, `bridge_tasks`, `bridge_task_status`),
+  `bridge_notice`, `bridge_task`, `bridge_ack`, `bridge_wait`, `bridge_poll`,
+  `bridge_commit`, `bridge_nack`, `bridge_status`, `bridge_peers`,
+  `bridge_history`, `bridge_tasks`, `bridge_task_status`, `bridge_task_cancel`,
+  `bridge_task_input`, `bridge_announce`, `bridge_discover`,
+  `bridge_metrics`, `bridge_events`),
   6 group tools (`bridge_group_create`, `bridge_group_send`,
   `bridge_group_list`, `bridge_group_delete`, `bridge_group_add_member`,
   `bridge_group_remove_member`),
@@ -138,8 +146,8 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build + build:test (esbuild), then node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs + test/e2e.mjs → 291 checks
-                      #   (165+37+11+35+23+20)
+                      #   + test/discover.mjs + test/e2e.mjs → 314 checks
+                      #   (169+46+11+35+33+20)
 npm run build:admin   # admin/ (npm, not pnpm) → the single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
@@ -156,12 +164,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 165/165 + 37/37 +
-  11/11 + 35/35 + 23/23 + 20/20 on Node 24 / Windows).
+  merging, the full `pnpm test` must stay green (verified: 169/169 + 46/46 +
+  11/11 + 35/35 + 33/33 + 20/20 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (165 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (169 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, task delivery bookkeeping (`deliveredMs` for both the waiter handoff
@@ -180,15 +188,17 @@ pnpm pack             # build + npm pack (publishing artifact)
   (non-assignee still manager-gated), the task state machine (`working` +
   progress, terminal lock with `applied: false`, `timeoutMs` → `timeout`,
   multi-day `timeoutMs` staying pending, ack routing after
-  history eviction, `MAX_HOP` chain cap incl. survival across a SQLite
+  history eviction, reply-chain depth incl. survival across a SQLite
   restart, `threadId` waits), roster
   persistence (stateFile write + restore), remote auth (401 without/unknown
   token, token identity overrides the
   client name, same-name users land on distinct peers with no mailbox
   leak, token-bound rename rejection, manager-role token ops).
-- `test/setup.mjs` (37 checks): `runSetup` against a fake home dir — only the
+- `test/setup.mjs` (46 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
-  idempotency, `remove` uninstall, DSH patch block insert/url-change/remove,
+  idempotency (a re-run must report it changed NO file — backup-name counting
+  cannot prove this, see the comment there), `remove` uninstall, DSH patch block
+  insert/url-change/remove,
   duplicate-entry healing (markerless hub entries collapse to one).
 - `test/ops.mjs` (11 checks): `runStatus` against a live hub and a dead port,
   self-exclusion and cleanup of its probe peer, plus per-platform service
@@ -198,7 +208,7 @@ pnpm pack             # build + npm pack (publishing artifact)
   (`test/fixtures/fake-herdr.mjs`) — results, argv passthrough, error
   envelopes, smart fallback (agent vs pane channel), permission gating,
   missing CLI.
-- `test/discover.mjs` (23 checks): registry load/validation (bad records
+- `test/discover.mjs` (33 checks): registry load/validation (bad records
   rejected), `~`/wildcard expansion, PATH probing (win32 PATHEXT vs POSIX
   semantics), config-path discovery, npm-global discovery incl. scoped dirs,
   os filtering, source priority.
@@ -254,12 +264,20 @@ pnpm pack             # build + npm pack (publishing artifact)
 4. **Peer ids are validated** against `^[A-Za-z0-9._:-]{1,64}$` before any
    registration; unregistered callers get a clear error.
 5. **`SERVER_VERSION` in `src/index.ts` must match `package.json` version.**
-6. **`setup`/`install-all.ps1` never rewrite agent configs destructively**:
+6. **`setup` never rewrites agent configs destructively** (the deprecated
+   `agents/install-all.ps1` shim forwards to it, so the same contract applies):
    only the named `agent-hub` key is touched, every modified file is backed up
    (`<file>.bak-<timestamp>`), written UTF-8 without BOM, idempotent, and
-   missing configs are skipped (never created). `~/.claude.json` is **never**
-   touched (contains credentials) — Claude Code's MCP config stays manual via
-   project `.mcp.json`.
+   missing configs are skipped (never created).
+   **Files that hold credentials are never written to**, not even key-scoped:
+   `~/.claude.json`, `~/.dsh/.credentials.yaml`, `~/.dsh/settings.yaml`,
+   `~/.codex/auth.json`, `~/.qwen/mcp-oauth-tokens.json`. A merge into one of
+   these would have to round-trip the whole file (rewriting the credential blob)
+   and every read of it lands the secret in the process's memory and in any
+   backup we make. Where an agent's MCP config lives only in such a file, that
+   agent stays MANUAL: the registry points at a separate, non-credential file
+   (`~/.claude.json` → project `.mcp.json`), or the agent has no config entry at
+   all. Adding one of these paths to `agents/registry.json` is a bug.
 7. **Agent support lives in `agents/registry.json`**, not in code: adding an
    agent is a registry record + a test. The registry is validated at load
    time; config paths are `~`-relative and must not contain `..`; the
@@ -275,8 +293,26 @@ pnpm pack             # build + npm pack (publishing artifact)
 
 ## Security considerations
 
-- The hub binds to `127.0.0.1` by default and has **no authentication** — do
-  not expose the port publicly without adding a token/proxy layer.
+- The hub binds to `127.0.0.1` by default. Loopback is **not** an authentication
+  boundary: without `--auth-tokens` any local client is trusted (that is the
+  desktop trust model) and any browser page used to be able to talk to it —
+  now blocked by the `Origin` gate, but the gate is a guard, not credentials.
+  Do not expose the port beyond the host without a token table.
+- **`--host` beyond loopback is refused unless `--auth-tokens` is set** (or
+  `--insecure` is passed deliberately). The guard is enforced in `startHub`,
+  not just documented.
+- **Manager privileges need a credential once one is configured**: with
+  `--manager-token` (or `<stateFileDir>/manager.token`), roster edits, kicks,
+  `peer: "all"` history and the SSE relay require it. The peer id itself is
+  never reserved (the desktop GUI identifies as `agent-hub-cli`), so claiming
+  a manager id still takes the identity and mailbox — only the power is gated.
+- **`Origin` gate**: a request carrying an `Origin` other than a loopback one
+  or an `--allow-origins` entry is rejected with 403, unless it also presents a
+  bearer token and its origin host matches `Host`. The MCP spec makes validating
+  `Origin` a MUST (DNS rebinding).
+- **Tokens are plaintext on disk**: `tokens.json` and `manager.token` are
+  credentials — `chmod 600` them, never commit them, and note that the bundled
+  `server/tokens.example.json` placeholders are rejected at load on purpose.
 - Never put credentials in bridge messages (plaintext on loopback).
 - Message routing validates senders (must be registered) and recipients
   (`unknown recipient` error); acks validate `ref` against history and

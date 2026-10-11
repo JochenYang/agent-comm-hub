@@ -3,6 +3,7 @@ import { tauri, type HubConfigValues } from '@/lib/tauri'
 import { serializeError } from '@/lib/serializeError'
 import { Button } from '@/components/ui/button'
 import { SUPPORTED_LANGS, useTranslation } from '@/i18n'
+import { useMessagesStore } from '@/stores/messagesStore'
 
 /** Mapping from FIELDS key → i18n settings.* key (hub_host/hub_port/hub_path in i18n carry the hub_ prefix). */
 const LABEL_KEY: Record<string, string> = {
@@ -59,6 +60,10 @@ export function SettingsView(): React.JSX.Element {
   const [updateInfo, setUpdateInfo] = useState<{ latest: string; outdated: boolean } | null>(null)
   const [hubToolError, setHubToolError] = useState<string | null>(null)
   const [hubToolOutput, setHubToolOutput] = useState<string | null>(null)
+  // Display window lives in the message store, not in the hub-config form: it
+  // applies to the views immediately.
+  const displayWindow = useMessagesStore((s) => s.displayWindow)
+  const setDisplayWindow = useMessagesStore((s) => s.setDisplayWindow)
 
   useEffect(() => {
     void (async () => {
@@ -275,6 +280,47 @@ export function SettingsView(): React.JSX.Element {
             />
           </div>
         ))}
+      </div>
+      {/* Display window (W34). Deliberately NOT part of the hub-config form: it
+          shapes what the views render, not what the hub does, so it applies on
+          the spot and needs no restart. */}
+      <div className="border-t p-4">
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground">{t('settings.display_title')}</span>
+          <span className="text-[11px] text-muted-foreground/70">{t('settings.display_apply_note')}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t('settings.display_window_hours')}
+              <span className="ml-1 font-normal text-muted-foreground/70">
+                · {t('settings.hints.display_window_hours')}
+              </span>
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={String(displayWindow.hours)}
+              onChange={(e) => setDisplayWindow({ ...displayWindow, hours: Number(e.target.value) })}
+              className="rounded-md border bg-background px-2 py-1 font-mono text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              {t('settings.display_max_messages')}
+              <span className="ml-1 font-normal text-muted-foreground/70">
+                · {t('settings.hints.display_max_messages')}
+              </span>
+            </label>
+            <input
+              type="number"
+              min={0}
+              value={String(displayWindow.maxMessages)}
+              onChange={(e) => setDisplayWindow({ ...displayWindow, maxMessages: Number(e.target.value) })}
+              className="rounded-md border bg-background px-2 py-1 font-mono text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+        </div>
       </div>
       <div className="flex items-center justify-end gap-2 border-t p-3">
         <Button variant="outline" onClick={() => void handleSave()} disabled={saving}>

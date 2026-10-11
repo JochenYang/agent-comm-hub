@@ -23,26 +23,64 @@ import { homedir } from 'node:os'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/** Files that hold credentials. `setup` must never write to one: a key-scoped
+ *  merge is not possible (the file is not a config we understand), so it would
+ *  have to round-trip the whole file — rewriting the credential blob — and every
+ *  read lands the secret in this process's memory and in any backup we make.
+ *
+ *  Enforced at load rather than only documented (AGENTS.md invariant 6): an
+ *  invariant that nothing checks is prose, and this one guards secrets. */
+export const CREDENTIAL_FILES: readonly string[] = [
+  '~/.claude.json',
+  '~/.dsh/.credentials.yaml',
+  '~/.dsh/settings.yaml',
+  '~/.codex/auth.json',
+  '~/.qwen/mcp-oauth-tokens.json',
+]
+
 export interface RegistryEntry {
   id: string
   probe: string[]
+  /** Directories whose EXISTENCE means "this agent is installed here".
+   *
+   * Some agents leave no command on PATH — they are run from a GUI, or the user
+   * installed them per-user — but their state directory is a reliable signal that
+   * they have been used on this machine. Without this, `setup` would either skip
+   * an agent that is really there, or (worse) configure one that is not.
+   * `~`-relative; a trailing segment need not exist. */
+  probePaths?: string[]
   /** npm global package dir names (normalized, e.g. `cli` for
    * `@opencode-ai/cli`) matched against `npm root -g` node_modules. */
   npm?: string[]
   configs: Array<{
     file: string
     section: string | null
-    strategy: 'json' | 'toml' | 'dsh'
+    strategy: 'json' | 'toml' | 'dsh' | 'yaml-array'
     entry: Record<string, unknown> | null
     /** Optional MCP server key override (default: SetupOptions.serverName).
      * DSH uses a distinct name so a dynamic MCP-manager mount of `agent-hub`
      * does not collide with the static profile-patch insert. */
     serverName?: string
+    /** Platforms this FILE applies to. Absent means every platform.
+     *
+     *  Record-level `os` cannot express this: one agent may need different files
+     *  per platform (`claude-desktop` has a macOS path and a Windows path), and
+     *  splitting it into two records would duplicate its skill/probe metadata and
+     *  let the two halves drift. */
+    os?: Array<'win32' | 'darwin' | 'linux'>
   }>
   /** Optional agent-wide server key override (falls back to config, then default). */
   serverName?: string
   skill: string | null
   os: Array<'win32' | 'darwin' | 'linux'>
+}
+
+/** Config entries that apply on `platform`. The ONE place this filter lives:
+ *  `discover()` and `setup()` both read the registry, and a filter applied in only
+ *  one of them would list an agent as configurable while writing to a file its
+ *  platform never uses. */
+export function configsForPlatform(agent: RegistryEntry, platform: NodeJS.Platform): RegistryEntry['configs'] {
+  return agent.configs.filter(config => config.os === undefined || config.os.includes(platform as 'win32' | 'darwin' | 'linux'))
 }
 
 export interface Registry {
@@ -66,11 +104,18 @@ export interface DiscoverOptions {
 
 export interface DiscoveredAgent {
   id: string
-  /** Where the agent was found; 'none' when only registered but absent. */
-  source: 'path' | 'config' | 'npm' | 'none'
+  /** How the agent was found. `config` means ONLY a config file was found, which
+   *  is not evidence that the agent is installed — see `configOnly`. */
+  source: 'path' | 'npm' | 'probe-path' | 'config' | 'none'
   /** Expanded config file paths that exist (profiles wildcard expanded). */
   configFiles: string[]
+  /** True when the AGENT was found (PATH, npm, or a probePath directory). */
   present: boolean
+  /** A config file exists but the agent does not: a leftover from an uninstall,
+   *  or a dotfile shared with something else. Writing into it would resurrect a
+   *  dead agent (and create files the user never asked for), so `setup` skips
+   *  these unless asked explicitly. */
+  configOnly: boolean
 }
 
 /** Path to this package's agents/registry.json. */
@@ -84,10 +129,19 @@ export function expandHome(file: string, home: string): string {
 }
 
 /**
- * Expand a config file template: `~/` home substitution plus a single `*`
- * path segment — e.g. the DSH profiles pattern expands over every profile
- * directory (the glob marker is described in prose here so it can never
- * close this block comment). Returns the concrete paths, existing or not.
+ * Expand a config file template: `~/` home substitution plus a single `*`.
+ *
+ * Two glob shapes, decided by whether the star is the LAST segment:
+ *  - `dir/<star>/file.ext` — the star matches DIRECTORIES (the DSH profiles
+ *    pattern: `~/.dsh/profiles/<star>/cordis.patch.yml` expands over every
+ *    profile dir). The suffix after the star is appended verbatim.
+ *  - `dir/<star>.ext` — the star matches FILES in the final directory (the
+ *    amazon-q agent shape: `~/.aws/amazonq/cli-agents/<star>.json` is one config
+ *    per agent).
+ *
+ * Returns the concrete paths, existing or not. A nonexistent base yields [] for
+ * both shapes. (The star is written `<star>` here: a literal `*` followed by `/`
+ * would terminate this comment.)
  */
 export function expandConfigFile(file: string, home: string): string[] {
   const expanded = expandHome(file, home)
@@ -97,6 +151,18 @@ export function expandConfigFile(file: string, home: string): string[] {
   const suffix = expanded.slice(star + 1)
   const base = prefix.slice(0, prefix.lastIndexOf(sep))
   if (!existsSync(base)) return []
+  // FILENAME glob: the star sits INSIDE the final segment (`cli-agents/*.json`),
+  // so the pattern for a file's name is <prefix tail><suffix>. Replace the star in
+  // the file's own name — never append the suffix again, or `x.json` + ".json"
+  // becomes `x.json.json`.
+  if (suffix.startsWith(sep) === false) {
+    // The file-name pattern is <anything><suffix>: match by the suffix the star
+    // stands for, and keep the file's OWN name — appending the suffix again
+    // turned `my-agent.json` into `my-agent.json.json`.
+    return readdirSync(base, { withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.endsWith(suffix))
+      .map(entry => join(base, entry.name))
+  }
   return readdirSync(base, { withFileTypes: true })
     .filter(entry => entry.isDirectory())
     .map(entry => join(base, entry.name, suffix))
@@ -115,6 +181,17 @@ export function validateRegistry(registry: Registry): void {
     ids.add(agent.id)
     if (!Array.isArray(agent.probe)) throw new Error(`registry: ${agent.id}: probe must be an array`)
     if (agent.npm !== undefined && !Array.isArray(agent.npm)) throw new Error(`registry: ${agent.id}: npm must be an array`)
+    if (agent.probePaths !== undefined) {
+      if (!Array.isArray(agent.probePaths)) throw new Error(`registry: ${agent.id}: probePaths must be an array`)
+      for (const probePath of agent.probePaths) {
+        if (typeof probePath !== 'string' || !probePath.startsWith('~/')) {
+          throw new Error(`registry: ${agent.id}: probePath must be '~'-relative`)
+        }
+        if (probePath.split('/').includes('..')) {
+          throw new Error(`registry: ${agent.id}: probePath must not contain '..'`)
+        }
+      }
+    }
     if (!Array.isArray(agent.configs)) throw new Error(`registry: ${agent.id}: configs must be an array`)
     for (const config of agent.configs) {
       if (typeof config.file !== 'string' || !config.file.startsWith('~/')) {
@@ -126,14 +203,27 @@ export function validateRegistry(registry: Registry): void {
       if (config.file.split('*').length > 2) {
         throw new Error(`registry: ${agent.id}: at most one '*' segment allowed`)
       }
-      if (!['json', 'toml', 'dsh'].includes(config.strategy)) {
+      if (!['json', 'toml', 'dsh', 'yaml-array'].includes(config.strategy)) {
         throw new Error(`registry: ${agent.id}: unknown strategy '${config.strategy}'`)
       }
-      if (config.strategy === 'json' && (typeof config.section !== 'string' || config.entry === null)) {
-        throw new Error(`registry: ${agent.id}: json strategy needs a section and an entry`)
+      if (config.os !== undefined
+        && (!Array.isArray(config.os) || config.os.length === 0 || config.os.some(entry => !['win32', 'darwin', 'linux'].includes(entry)))) {
+        throw new Error(`registry: ${agent.id}: invalid config os list`)
       }
-      if (config.strategy !== 'json' && config.entry !== null) {
-        throw new Error(`registry: ${agent.id}: only json strategy may carry an entry`)
+      if (CREDENTIAL_FILES.includes(config.file)) {
+        throw new Error(
+          `registry: ${agent.id}: ${config.file} holds credentials and must never be written — `
+            + 'point the record at a separate MCP config file, or leave the agent manual (AGENTS.md invariant 6)',
+        )
+      }
+      // `yaml-array` carries an entry and a section for the same reason `json`
+      // does: it writes a keyed item, just into a YAML list instead of a JSON map.
+      const keyed = config.strategy === 'json' || config.strategy === 'yaml-array'
+      if (keyed && (typeof config.section !== 'string' || config.entry === null)) {
+        throw new Error(`registry: ${agent.id}: ${config.strategy} strategy needs a section and an entry`)
+      }
+      if (!keyed && config.entry !== null) {
+        throw new Error(`registry: ${agent.id}: only json/yaml-array strategy may carry an entry`)
       }
     }
     if (agent.skill !== null && (typeof agent.skill !== 'string' || !agent.skill.startsWith('~/'))) {
@@ -251,23 +341,30 @@ export function discover(registry: Registry, options: DiscoverOptions = {}): Dis
     .map(agent => {
       let source: DiscoveredAgent['source'] = 'none'
       const configFiles: string[] = []
-      for (const config of agent.configs) {
+      for (const config of configsForPlatform(agent, platform)) {
         for (const file of expandConfigFile(config.file, home)) {
-          if (existsSync(file)) {
-            configFiles.push(file)
-            if (source === 'none') source = 'config'
-          }
+          if (existsSync(file)) configFiles.push(file)
         }
       }
-      if (source === 'none' && agent.probe.some(command => commandOnPath(command, pathEnv, pathext, platform))) {
+      // Installed? A command on PATH, then an npm global, then the agent's own
+      // state directory. A config file is NOT installation: the user may have
+      // uninstalled the agent and left the dotfile behind.
+      let installed = false
+      if (agent.probe.some(command => commandOnPath(command, pathEnv, pathext, platform))) {
         source = 'path'
-      }
-      if (source === 'none' && npmNames !== null &&
+        installed = true
+      } else if (npmNames !== null &&
           (agent.probe.some(command => npmNames!.includes(command)) ||
            (agent.npm ?? []).some(name => npmNames!.includes(name)))) {
         source = 'npm'
+        installed = true
+      } else if ((agent.probePaths ?? []).some(probePath => existsSync(expandHome(probePath, home)))) {
+        source = 'probe-path'
+        installed = true
       }
-      return { id: agent.id, source, configFiles, present: source !== 'none' }
+      const configOnly = !installed && configFiles.length > 0
+      if (!installed && configOnly) source = 'config'
+      return { id: agent.id, source, configFiles, present: installed, configOnly }
     })
 }
 

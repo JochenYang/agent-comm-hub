@@ -12,19 +12,23 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { HerdrCtl } from './herdr-ctl.js'
+import { RunnerRegistry, type RunnerConfig } from './runner.js'
 import { AgentHub, type HubOptions, type PeerProfile } from './hub.js'
-import { autoRegisterPeer, hubTools, livePeersFor, present, rosterFor, sanitizePeerId } from './hub-tools.js'
-import { McpStreamableHttpServer, SessionRegistry } from './mcp-server.js'
+import { DEFAULT_PARKED_TTL_MS } from './hub.js'
+import { autoRegisterPeer, hubTools, isManagerCaller, livePeersFor, present, rosterFor, sanitizePeerId } from './hub-tools.js'
+import { McpStreamableHttpServer, SessionRegistry, isLoopbackHost } from './mcp-server.js'
 import { ANON_JOIN_PEER, bearerFromHeaders, watchTokenFile, addToken, removeToken, readTokens, type TokenIdentity, type TokenTable } from './auth.js'
 import { SQLiteStateStore } from './persist.js'
 import type { BridgeMessage } from './protocol.js'
+import { SSE_METHOD, SSE_EVENT_PEERS_CHANGED, SSE_EVENT_MESSAGE } from './protocol.js'
 
 export { HerdrCtl, type HerdrAgent, type HerdrPane, type HerdrRead, type HerdrSettled, AGENT_STATUSES } from './herdr-ctl.js'
+export { RunnerRegistry, createRunner, validateRunnerConfig, DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_NOTE_CHARS, type Runner, type RunnerConfig, type RunnerDeps, type RunRequest, type RunResult } from './runner.js'
 export { loadTokenFile, tokenTable, watchTokenFile, addToken, removeToken, readTokens, generateToken, type TokenIdentity, type TokenRole, type TokenTable, type TokenRowJson } from './auth.js'
 export { SQLiteStateStore, type PersistedState } from './persist.js'
-export { AgentHub, type HubOptions, type PeerProfile, type PeerState, type HubStatus } from './hub.js'
+export { AgentHub, MAX_EVENTS, type HubEvent, type HubEventKind, type HubOptions, type PeerProfile, type PeerState, type HubStatus } from './hub.js'
 export { McpStreamableHttpServer, SessionRegistry, type McpTool } from './mcp-server.js'
 export { hubTools, present, autoRegisterPeer, sanitizePeerId, sanitizeAlias, type PresentedMessage } from './hub-tools.js'
 export * from './protocol.js'
@@ -33,7 +37,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.9.1'
+export const SERVER_VERSION = '0.10.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -56,6 +60,17 @@ export interface HubConfig {
   connectedWindowMs: number
   /** Auto-unregister peers idle for this long (ms); 0 disables the GC. */
   peerIdleTimeoutMs: number
+  /** How long a parked mailbox (peer gone, mail kept) survives before it is
+   * dropped (ms). Default 7 days in `AgentHub`; 0 disables expiry. */
+  parkedTtlMs?: number
+  /** Manual-ack lease duration (ms); see bridge_wait { ack: 'manual' }. */
+  leaseTtlMs?: number
+  /** Hand-outs before a leased message is dead-lettered instead of requeued;
+   * 0 disables the limit. */
+  maxAttempts?: number
+  /** Per-peer mailbox rate limit in messages per minute; `0` (default) is unlimited.
+   *  Guards the RECIPIENT against a broadcast storm — see `HubOptions.ratePerMin`. */
+  ratePerMin?: number
   /** herdr CLI binary for the bridge_agent_* control tools (default 'herdr',
    * resolved via PATH). */
   herdrBin?: string
@@ -71,11 +86,34 @@ export interface HubConfig {
   herdrSendRequest?: (method: string, params: Record<string, unknown>) => Promise<unknown>
   /** Peers allowed to use bridge_agent_* tools; 'all' (default) or a list. */
   herdrControlPeers?: 'all' | string[]
+  /** Executors for peers that are not polling (see `src/runner.ts`). Empty by
+   *  default: nothing runs on this machine unless the operator configures it. */
+  runners?: RunnerConfig[]
+  /** How long a session with no live SSE stream may go unused before the registry
+   *  forgets it (default 30 min; `0` disables reaping). See `SessionRegistry.sweep`. */
+  sessionTtlMs?: number
   /** Peers allowed to manage the roster (bridge_rename of others, manager
    * kick via bridge_unregister). `'all'` keeps the loopback trust model;
    * the default is the desktop/CLI archiver identity so the companion GUI
    * is the manager out of the box. */
   managerPeers?: 'all' | string[]
+  /** Extra browser origins allowed to call the MCP endpoint (`--allow-origins`).
+   * Requests without an `Origin` header and loopback origins are always allowed;
+   * everything else is rejected with 403. See `originAllowed` in mcp-server.ts. */
+  allowOrigins?: string[]
+  /** Loopback manager secret (`--manager-token`). When set, hub-manager
+   * PRIVILEGES (roster edits, kicks, full-history reads, the SSE relay) require
+   * it as `Authorization: Bearer <token>` on the request. The peer id itself is
+   * NOT reserved — the shipped desktop GUI identifies itself as `agent-hub-cli`
+   * at initialize and must keep connecting.
+   * When unset, `<stateFileDir>/manager.token` is read if that file exists;
+   * without either, manager ids stay a convention (documented in README).
+   * Ignored in remote mode (`--auth-tokens`): the token table owns that header. */
+  managerToken?: string
+  /** Opt out of the "non-loopback bind requires a token table" guard. Only for
+   * a network that is already isolated by other means (VPN, firewall, container
+   * network) — the hub itself has no authentication without `--auth-tokens`. */
+  insecure?: boolean
   /** JSON file the peer roster (profiles: aliases, client info) is persisted
    * to so identities survive hub restarts. Undefined (the DEFAULT_CONFIG) =
    * off — the CLI turns it on by default; tests stay hermetic. */
@@ -180,11 +218,63 @@ function writeRosterFile(file: string, profiles: PeerProfile[]): void {
   renameSync(tmp, file)
 }
 
+/**
+ * Read the optional loopback manager secret that sits next to the state file
+ * (`<stateFileDir>/manager.token`). Absent or empty means manager ids stay a
+ * convention, exactly as before this option existed.
+ *
+ * Only ENOENT is treated as "not configured". Any other failure (a directory in
+ * its place, a permission problem) means the operator did configure a credential
+ * and the hub cannot read it — silently falling back would downgrade the manager
+ * gate to the peer-id convention without anyone noticing, so this throws.
+ */
+function readManagerTokenFile(stateFile: string | undefined): string | undefined {
+  if (stateFile === undefined) return undefined
+  const file = join(dirname(stateFile), 'manager.token')
+  try {
+    const raw = readFileSync(file, 'utf8').trim()
+    return raw === '' ? undefined : raw
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw new Error(`cannot read the manager token ${file}: ${(error as Error).message}`)
+  }
+}
+
 /** Start the hub: MCP endpoint on `host:port + path`, tools wired to a fresh AgentHub. */
 export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = console): StartedHub {
   // Drop undefined keys so CLI defaults never clobber DEFAULT_CONFIG values.
   const overrides = Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined))
   const resolved: HubConfig = { ...DEFAULT_CONFIG, ...overrides }
+  const managerToken = resolved.managerToken ?? readManagerTokenFile(resolved.stateFile)
+  // Binding beyond loopback without a token table means every client that can
+  // reach the port is trusted. That used to be a documentation-only rule, so
+  // existing deployments may rely on it; `insecure: true` is the explicit way out.
+  if (!isLoopbackHost(resolved.host) && resolved.authTokens === undefined && resolved.insecure !== true) {
+    throw new Error(
+      `refusing to bind ${resolved.host} without --auth-tokens: the hub has no authentication, ` +
+      'so every client that can reach the port would be trusted. Pass --auth-tokens <file> ' +
+      '(recommended), or --insecure to accept the risk on an already-isolated network.',
+    )
+  }
+  // Without a credential there is nothing to check against: any client that can
+  // reach the port may claim a manager id. That is tolerable on loopback (the
+  // same OS user could read the token file anyway), but it must be said out loud
+  // once the hub is reachable from anywhere else.
+  if (managerToken === undefined && resolved.managerPeers !== 'all' && !isLoopbackHost(resolved.host)) {
+    log.warn(
+      `manager peer ids are claimable by any client that can reach ${resolved.host}:${resolved.port} — ` +
+      'set --manager-token (or run with --auth-tokens) to require a credential',
+    )
+  }
+  // Both credentials read the same `Authorization` header, so they cannot be in
+  // force at once: with a token table every request is authenticated by it, and
+  // presentedManagerToken never sees the manager secret.
+  if (managerToken !== undefined && resolved.authTokens !== undefined) {
+    log.warn(
+      'both --manager-token and --auth-tokens are set: the token table owns the Authorization header, ' +
+      'so the manager token is ignored. Grant manager rights with `auth add <peer> --role manager` instead.',
+    )
+  }
   // Assigned right after the hub is constructed; the event callbacks below
   // only fire once requests flow, never before the assignment runs.
   let mcp: McpStreamableHttpServer
@@ -194,24 +284,52 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
   let dbStore: SQLiteStateStore | undefined
   /** Push the full roster to every open SSE stream (roster info is public). */
   const pushRoster = (): void => {
-    mcp.notifyAll('notifications/message', {
+    // Broadcast on purpose — the one place this file does. `peers_changed` carries
+    // a full roster SNAPSHOT (idempotent state), not a delivery to one recipient;
+    // rotating it would leave every other client's roster stale, which is worse
+    // than the duplicate. Every per-recipient push below goes to exactly one
+    // stream — see oneStreamPer.
+    mcp.notifyAll(SSE_METHOD, {
       level: 'info',
       logger: 'bridge',
-      data: { event: 'peers_changed', peers: rosterFor(hub, registry) },
+      data: { event: SSE_EVENT_PEERS_CHANGED, peers: rosterFor(hub, registry) },
     })
+  }
+  /** Pick exactly ONE stream from `candidates`, rotating between calls.
+   *
+   *  The spec (2025-06-18, Multiple Connections) requires the server to send each
+   *  of its JSON-RPC messages on only one stream, and under N:1 the several
+   *  sessions of one peer are several streams to the same client. Picking a fixed
+   *  one (the first) deterministically starved the others: with two desktop
+   *  windows sharing the default `agent-hub-cli` peer, the second never saw a
+   *  push hint again. Rotating keeps "one stream per message" while sharing the
+   *  load. Prefers a session that actually has a stream open, so the message is
+   *  not written into the void. */
+  const streamCursor = new Map<string, number>()
+  const oneStreamPer = (key: string, candidates: string[]): string[] => {
+    if (candidates.length === 0) return []
+    const streamed = registry.liveSessions()
+    const open = candidates.filter(id => streamed.has(id))
+    const pool = open.length > 0 ? open : candidates
+    const at = (streamCursor.get(key) ?? 0) % pool.length
+    streamCursor.set(key, (at + 1) % pool.length)
+    return [pool[at]!]
   }
   /** Give a queued message's recipient sessions a push hint so UIs can skip
    * polling; delivery itself stays via bridge_wait / bridge_poll. */
   const pushQueued = (message: BridgeMessage, target: string): void => {
-    mcp.notify(registry.sessionsForPeer(target), 'notifications/message', {
+    // Delivery is unchanged; this is only the skip-polling hint, and
+    // bridge_poll / bridge_wait still work if it is missed.
+    mcp.notify(oneStreamPer(`peer:${target}`, registry.sessionsForPeer(target)), SSE_METHOD, {
       level: 'info',
       logger: 'bridge',
-      data: { event: 'message', message: present(message) },
+      data: { event: SSE_EVENT_MESSAGE, message: present(message) },
     })
   }
-  /** Manager surface for the relay view. Mirror of the requireManager gate
-   * in hub-tools.ts: a manager-role token, or membership of managerPeers
-   * ('all' = every registered peer). */
+  /** Manager surface for the relay view. MUST use the same predicate as the
+   * tool gate (isManagerCaller): when the two drifted, an unauthenticated peer
+   * that had claimed a manager id received every message on the hub over SSE
+   * while the credential-holding session received none. */
   const managerSet: ReadonlySet<string> | undefined = resolved.managerPeers === 'all' ? undefined : new Set(resolved.managerPeers)
   /** Push EVERY message to manager sessions — the relay stream (relay) view: a
    * manager watches the whole hub's traffic live, not just messages
@@ -222,15 +340,15 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     for (const sessionId of registry.liveSessions()) {
       const peer = registry.peerFor(sessionId)
       if (peer === undefined) continue
-      if (registry.tokenFor(sessionId)?.role === 'manager' || managerSet === undefined || managerSet.has(peer)) {
+      if (isManagerCaller(registry, sessionId, peer, { managerPeers: managerSet, managerTokenRequired: managerToken !== undefined })) {
         managers.push(sessionId)
       }
     }
     if (managers.length > 0) {
-      mcp.notify(managers, 'notifications/message', {
+      mcp.notify(oneStreamPer('relay', managers), SSE_METHOD, {
         level: 'info',
         logger: 'bridge',
-        data: { event: 'message', message: present(message) },
+        data: { event: SSE_EVENT_MESSAGE, message: present(message) },
       })
     }
   }
@@ -267,12 +385,77 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     }, 500)
     saveTimer.unref?.()
   }
+  /** Filled in once the herdr adapter exists (see below); the task hook only
+   *  ever fires while the hub is already serving. */
+  let runnerRegistry: RunnerRegistry | undefined
+  /** One run per peer at a time: two runners sharing a terminal (or a CLI that is
+   *  not reentrant) would interleave their input and corrupt both answers. */
+  const runnerQueue = new Map<string, Promise<void>>()
+
+  /** The task payload a runner needs, read back out of the message content. */
+  const taskPayload = (content: string): { prompt: string; context?: string; deliverable?: string; threadId?: string } => {
+    try {
+      const parsed = JSON.parse(content) as Record<string, unknown>
+      return {
+        prompt: typeof parsed.prompt === 'string' ? parsed.prompt : content,
+        ...(typeof parsed.context === 'string' ? { context: parsed.context } : {}),
+        ...(typeof parsed.deliverable === 'string' ? { deliverable: parsed.deliverable } : {}),
+        ...(typeof parsed.threadId === 'string' ? { threadId: parsed.threadId } : {}),
+      }
+    } catch {
+      // Not JSON (a task always is, but never assume): run the raw content.
+      return { prompt: content }
+    }
+  }
+
+  /** Hand a queued task to its peer's runner, if it has one. Absence of a runner
+   *  is not an error — the mailbox delivery simply stands. */
+  function runTask(message: BridgeMessage, target: string): void {
+    const runner = runnerRegistry?.get(target)
+    if (runner === undefined) return
+    const previous = runnerQueue.get(target) ?? Promise.resolve()
+    const next = previous.then(async () => {
+      const payload = taskPayload(message.content)
+      hub.noteEvent('runner_started', { peer: target, detail: { taskId: message.id, runner: runner.name } })
+      try {
+        const result = await runner.run({ taskId: message.id, peer: target, ...payload })
+        hub.noteEvent('runner_finished', { peer: target, detail: { taskId: message.id, runner: runner.name, status: result.status } })
+        hub.ackForRunner(target, message.id, { status: result.status, note: result.note })
+        log.info(`runner ${runner.name}: task ${message.id} for '${target}' -> ${result.status}`)
+      } catch (error) {
+        hub.noteEvent('runner_finished', { peer: target, detail: { taskId: message.id, runner: runner.name, status: 'failed', error: (error as Error).message } })
+        // A runner that throws must not leave the task pending forever: that is
+        // exactly the state this feature exists to prevent.
+        try {
+          hub.ackForRunner(target, message.id, { status: 'failed', note: `runner error: ${(error as Error).message}` })
+        } catch {
+          // The task may already be terminal (acked or timed out) — fine.
+        }
+        log.warn(`runner ${runner.name} errored on task ${message.id}: ${(error as Error).message}`)
+      }
+    })
+    runnerQueue.set(target, next.catch(() => {}))
+  }
+
   const hub = new AgentHub({
     maxQueue: resolved.maxQueue,
     historyLimit: resolved.historyLimit,
     waitTimeoutMs: resolved.waitTimeoutMs,
     connectedWindowMs: resolved.connectedWindowMs,
     peerIdleTimeoutMs: resolved.peerIdleTimeoutMs,
+    parkedTtlMs: resolved.parkedTtlMs,
+    leaseTtlMs: resolved.leaseTtlMs,
+    maxAttempts: resolved.maxAttempts,
+    ratePerMin: resolved.ratePerMin,
+    // A parked mailbox that expires is data loss: say so, and make the store
+    // re-snapshot so the dropped rows cannot resurrect on the next restart.
+    onMailboxExpired: (peerId, dropped) => {
+      log.warn(`parked mailbox for '${peerId}' expired after ${resolved.parkedTtlMs ?? DEFAULT_PARKED_TTL_MS}ms: ${dropped} message(s) dropped`)
+      if (dbStore !== undefined) {
+        dbDirty = true
+        scheduleSave()
+      }
+    },
     onPeerGc: peerId => registry.unbindPeerId(peerId),
     // Remote persistence: buffer every history append; re-snapshot when a
     // mailbox is consumed so drained messages cannot resurrect on restart.
@@ -329,6 +512,17 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
         log.warn(`message notification failed: ${(error as Error).message}`)
       }
     },
+    // A task that reached a mailbox has nobody polling for it. If this peer has
+    // a runner configured, wake it — that is the whole point of a runner.
+    // `runnerRegistry` is filled in below, once the herdr adapter exists; this
+    // hook only ever fires after the hub is serving.
+    onTaskQueued: (message, target) => {
+      try {
+        runTask(message, target)
+      } catch (error) {
+        log.warn(`runner dispatch failed for '${target}': ${(error as Error).message}`)
+      }
+    },
   })
   const registry = new SessionRegistry()
   // Boot restore. SQLite (when configured) is authoritative for profiles,
@@ -383,6 +577,11 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     socketPath: resolved.herdrSocketPath,
     sendRequest: resolved.herdrSendRequest,
   })
+  // Executors: built here because a `herdr` runner needs the adapter above.
+  // A bad runner config throws right now — silently downgrading a task to a
+  // mailbox nobody reads is the failure mode this whole feature exists to fix.
+  runnerRegistry = new RunnerRegistry(resolved.runners ?? [], { herdr })
+  if (runnerRegistry.size > 0) log.info(`runners configured for: ${runnerRegistry.peers().join(', ')}`)
   // Remote auth: token file -> per-request bearer lookup. The transport
   // authenticates EVERY request; initialize additionally binds the session
   // to the token identity, which then decides auto-registration (hub-tools).
@@ -411,6 +610,9 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     // loopback + allowJoin: same sentinel path.
     auth = req => ({ peer: ANON_JOIN_PEER, role: 'agent', anonymous: true })
   }
+  // The manager gate lives in requireManager (hub-tools): it checks the PRIVILEGE,
+  // not the peer id, because the shipped desktop GUI identifies itself as
+  // `agent-hub-cli` at initialize and must keep connecting either way.
   mcp = new McpStreamableHttpServer(
     hubTools(hub, registry, {
       defaultWaitMs: resolved.defaultWaitMs,
@@ -418,6 +620,7 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       herdr,
       herdrControlPeers: resolved.herdrControlPeers === 'all' || resolved.herdrControlPeers === undefined ? 'all' : new Set(resolved.herdrControlPeers),
       managerPeers: resolved.managerPeers === 'all' ? 'all' : new Set(resolved.managerPeers ?? DEFAULT_CONFIG.managerPeers),
+      managerTokenRequired: managerToken !== undefined,
     }),
     { name: SERVER_NAME, version: SERVER_VERSION },
     registry,
@@ -448,11 +651,19 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     auth,
     authTokensAdmin(resolved.authTokens, authReload),
     resolved.heartbeatMs,
+    resolved.allowOrigins === undefined || resolved.allowOrigins.length === 0
+      ? undefined
+      : { allow: new Set(resolved.allowOrigins) },
+    managerToken,
+    resolved.sessionTtlMs,
   )
   const server = createServer()
   mcp.attach(server, resolved.path)
   server.on('error', error => log.warn(`hub http server error: ${(error as Error).message}`))
-  server.listen(resolved.port, resolved.host, () => {
+  // Trim before binding: `isLoopbackHost` trims when it classifies the host, so a
+  // value like "127.0.0.1 " passes the guard above and then fails getaddrinfo —
+  // leaving a hub handle that looks alive and never listens.
+  server.listen(resolved.port, resolved.host.trim(), () => {
     log.info(`agent-comm-hub listening on http://${resolved.host}:${resolved.port}${resolved.path}`)
   })
   return {

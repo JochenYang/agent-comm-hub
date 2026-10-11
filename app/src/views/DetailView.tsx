@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMessagesStore } from '@/stores/messagesStore'
-import type { PresentedMessage, TaskContent, AckContent } from '@/lib/tauri'
+import { tauri, type PresentedMessage, type TaskContent, type AckContent, type TaskRecord } from '@/lib/tauri'
 import { SELF_PEER_ID } from '@/lib/self'
 import { Markdown } from '@/lib/markdown'
 import { useTranslation } from '@/i18n'
@@ -13,19 +13,60 @@ interface Props {
 const ACK_TONE: Record<AckContent['status'], string> = {
   accepted: 'bg-info/15 text-info ring-info/30',
   working: 'bg-info/15 text-info ring-info/30',
+  // An interrupt, not a result: toned like a warning so it reads as "needs you".
+  'input-required': 'bg-warning/15 text-warning ring-warning/30',
   done: 'bg-success/15 text-success ring-success/30',
   rejected: 'bg-warning/15 text-warning ring-warning/30',
-  failed: 'bg-destructive/15 text-destructive ring-destructive/30'
+  failed: 'bg-destructive/15 text-destructive ring-destructive/30',
+  canceled: 'bg-muted text-muted-foreground ring-border'
 }
+
+/** The statuses the ACK row offers, in the order it offers them. `canceled` is
+ *  deliberately absent: cancelling goes through its own button below, because the
+ *  hub routes it to the OTHER side and updates every assignee row — an ack could
+ *  not do that (see bridge_task_cancel). */
+const ACK_CHOICES = ['accepted', 'working', 'input-required', 'rejected', 'done', 'failed'] as const
 
 /** Detail column: compact mono style, renders task / ack / chat separately. */
 export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Element {
   const { t } = useTranslation()
-  const { messages, selectedId, selectMessage, sendAck, markPeerRead } = useMessagesStore()
+  const { messages, selectedId, selectMessage, sendAck, cancelTask, taskInput, markPeerRead } = useMessagesStore()
   const [ackSending, setAckSending] = useState<string | null>(null)
+  const [inputDraft, setInputDraft] = useState<string>('')
+  const [cancelReason, setCancelReason] = useState<string>('')
+  const [taskBusy, setTaskBusy] = useState<boolean>(false)
+  /** The hub's ledger for the selected task. DetailView can derive a PARTIAL
+   *  status from the acks in the pool, but not the hub's own events: a `timeout`
+   *  is synthesized by the hub, and artifacts live only on the ledger. */
+  const [ledger, setLedger] = useState<TaskRecord | null>(null)
   const [ackNote, setAckNote] = useState<string>('')
   const [showJson, setShowJson] = useState<boolean>(false)
-
+  // Refetch when the task changes or when another ack for it lands, so a timeout
+  // or a late ack shows up without the user having to reselect the message.
+  const ackCountForSelected = useMemo(
+    () => (selectedId === null ? 0 : messages.filter((m) => m.kind === 'ack' && m.ref === selectedId).length),
+    [messages, selectedId]
+  )
+  useEffect(() => {
+    if (selectedId === null) {
+      setLedger(null)
+      return
+    }
+    let alive = true
+    void tauri.invoke
+      .bridgeTaskStatus(selectedId)
+      .then((r) => {
+        if (alive) setLedger(r?.task ?? null)
+      })
+      // Not a task, or the hub is down: the derived view still works, just without
+      // the ledger-only facts. Never surface this as an error.
+      .catch(() => {
+        if (alive) setLedger(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [selectedId, ackCountForSelected])
   const selected = useMemo<PresentedMessage | null>(() => {
     if (selectedId === null) return null
     return messages.find((m) => m.id === selectedId) ?? null
@@ -74,6 +115,39 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
       ? (lastAck.content as AckContent).status
       : null
   const terminalAcked = lastStatus === 'done' || lastStatus === 'rejected' || lastStatus === 'failed'
+  // The OTHER side's acks: for a task I sent, that is the assignee reporting back.
+  // The hub routes acks to the task's sender, so they are in the pool already.
+  const theirStatus: AckContent['status'] | null = (() => {
+    const last = messages
+      .filter((m) => m.kind === 'ack' && m.from !== selfPeerId && m.ref === selected.id)
+      .sort((a, b) => a.ts - b.ts)
+      .at(-1)
+    if (last === undefined || typeof last.content !== 'object' || last.content === null) return null
+    return 'status' in last.content ? (last.content as AckContent).status : null
+  })()
+  const closed = theirStatus === 'done' || theirStatus === 'failed' || theirStatus === 'rejected' || theirStatus === 'canceled'
+  // Cancelling is for a task I am part of and that has not closed yet; answering
+  // an interrupt is only for the SENDER (the assignee is the side that asked).
+  const canCancel = selected.kind === 'task' && (isMine || selected.to === selfPeerId) && !closed
+  const canAnswer = selected.kind === 'task' && isMine && theirStatus === 'input-required'
+
+  /** Human SLA line. `null` when the task has no deadline or has already closed —
+   *  a countdown on a finished task is noise. A hub-side `timeout` is called out
+   *  explicitly because it is the one status the pool cannot show. */
+  const deadlineLabel: string | null = (() => {
+    if (ledger === null || ledger.deadlineAt === undefined) return null
+    if (ledger.status === 'timeout') return t('detail.task_timed_out')
+    if (ledger.status === 'done' || ledger.status === 'failed' || ledger.status === 'rejected' || ledger.status === 'canceled') {
+      return null
+    }
+    const ms = ledger.deadlineAt - Date.now()
+    if (ms <= 0) return t('detail.task_overdue')
+    const minutes = Math.ceil(ms / 60_000)
+    return minutes >= 60
+      ? t('detail.task_due_hours', { n: Math.round(minutes / 60) })
+      : t('detail.task_due_minutes', { n: minutes })
+  })()
+
   const canAck =
     selected.kind === 'task' && (selected.to === selfPeerId || selected.to === 'all') && !isMine && !terminalAcked
 
@@ -200,7 +274,7 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
               className="mb-2 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             />
             <div className="flex flex-wrap gap-1.5">
-              {(['accepted', 'working', 'rejected', 'done', 'failed'] as const).map((s) => (
+              {ACK_CHOICES.map((s) => (
                 <button
                   key={s}
                   type="button"
@@ -214,6 +288,113 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
                 </button>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* Sender-side task controls (W33). The assignee already has the ack row
+            above; these are the two things only the OTHER side can do: answer an
+            interrupt, and stop the task. */}
+        {canAnswer === true && (
+          <div className="mt-4 rounded-md border border-warning/40 bg-warning/5 p-2">
+            <p className="mb-1.5 font-mono text-[11px] uppercase tracking-wider text-foreground/80">
+              {t('detail.input_required_block')}
+            </p>
+            <input
+              type="text"
+              value={inputDraft}
+              onChange={(e) => setInputDraft(e.target.value)}
+              placeholder={t('detail.input_placeholder')}
+              className="mb-2 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button
+              type="button"
+              disabled={taskBusy || inputDraft.trim() === ''}
+              onClick={() => {
+                setTaskBusy(true)
+                void taskInput(selected.id, inputDraft.trim()).finally(() => {
+                  setTaskBusy(false)
+                  setInputDraft('')
+                })
+              }}
+              className="rounded-md bg-primary px-2 py-1 font-mono text-[11px] uppercase tracking-wider text-primary-foreground disabled:opacity-50"
+            >
+              {t('detail.send_input')}
+            </button>
+          </div>
+        )}
+
+        {canCancel === true && (
+          <div className="mt-4 rounded-md border border-destructive/30 bg-destructive/5 p-2">
+            <p className="mb-1.5 font-mono text-[11px] uppercase tracking-wider text-foreground/80">
+              {t('detail.cancel_block')}
+            </p>
+            <input
+              type="text"
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder={t('detail.cancel_reason_placeholder')}
+              className="mb-2 w-full rounded-md border border-input bg-background px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            <button
+              type="button"
+              disabled={taskBusy}
+              onClick={() => {
+                setTaskBusy(true)
+                void cancelTask(selected.id, cancelReason.trim() === '' ? undefined : cancelReason.trim()).finally(() => {
+                  setTaskBusy(false)
+                  setCancelReason('')
+                })
+              }}
+              className="rounded-md bg-destructive px-2 py-1 font-mono text-[11px] uppercase tracking-wider text-destructive-foreground disabled:opacity-50"
+            >
+              {t('detail.cancel_task')}
+            </button>
+          </div>
+        )}
+
+        {/* Task ledger (W33): what the hub knows and the pool cannot tell us —
+            the authoritative status (including a hub-synthesized `timeout`), the
+            SLA deadline, and any artifacts an ack attached. */}
+        {ledger !== null && selected.kind === 'task' && (
+          <div className="mt-4 rounded-md border border-border bg-background p-2">
+            <p className="mb-1.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+              {t('detail.task_ledger')}
+            </p>
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 font-mono text-[11px]">
+              <span>
+                <span className="text-muted-foreground">{t('detail.task_status')}: </span>
+                <span className="uppercase tracking-wider">{ledger.status}</span>
+              </span>
+              {deadlineLabel !== null && (
+                <span className={ledger.status === 'timeout' ? 'text-destructive' : 'text-muted-foreground'}>
+                  {deadlineLabel}
+                </span>
+              )}
+            </div>
+            {ledger.artifacts !== undefined && ledger.artifacts.length > 0 && (
+              <ul className="mt-2 space-y-1.5 border-t border-border pt-2">
+                {ledger.artifacts.map((artifact, i) => (
+                  <li key={`${artifact.name}-${i}`} className="font-mono text-[11px]">
+                    <span className="text-muted-foreground">{artifact.name}</span>
+                    {artifact.text !== undefined && (
+                      <pre className="mt-0.5 max-h-40 overflow-auto rounded border border-border bg-card p-1.5 text-[10px] leading-relaxed text-foreground/80">
+                        {artifact.text}
+                      </pre>
+                    )}
+                    {artifact.url !== undefined && (
+                      <a
+                        href={artifact.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ml-1 text-info underline underline-offset-2"
+                      >
+                        {artifact.url}
+                      </a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 

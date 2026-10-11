@@ -17,6 +17,13 @@ use crate::hub_process::{hub_cli_command, HubConfig, HubProcess, HubState, HubSt
 use crate::mcp_client::{ClientInfo, McpError, McpClient};
 use crate::sqlite_store::{MessageRecord, PeerRecord, Store, UnreadRecord};
 
+/// The hub's SSE wire contract (src/protocol.ts is the source of truth). Matching
+/// these as NAMED constants, not string literals, so a rename on the hub side
+/// breaks this build instead of silently never matching.
+const SSE_METHOD: &str = "notifications/message";
+const SSE_EVENT_PEERS_CHANGED: &str = "peers_changed";
+const SSE_EVENT_MESSAGE: &str = "message";
+
 /// Local suppression set of kicked peers (P3-2 race defense; semantics in sync_roster_to_store).
 /// The critical section is a constant-size set operation, so a std Mutex suffices — no async lock needed.
 pub(crate) type KickedPeers = Arc<std::sync::Mutex<HashSet<String>>>;
@@ -185,9 +192,14 @@ async fn tools_call_checked(state: &AppState, name: &str, args: Value) -> CmdRes
     match mcp.tools_call(name, args).await {
         Ok(raw) => unwrap_tool_result(raw),
         Err(e) => {
-            if matches!(e, McpError::Http(_) | McpError::NotConnected) {
+            // `SessionGone` (the hub answered 404) belongs here too: the session
+            // the client holds is dead, so the reference MUST be dropped or
+            // require_mcp will hand the same dead client back forever and every
+            // later call fails with "no MCP session". Dropping it makes the next
+            // call rebuild + re-initialize (and re-register the peer).
+            if matches!(e, McpError::Http(_) | McpError::NotConnected | McpError::SessionGone) {
                 *state.mcp.write().await = None;
-                log::warn!("bridge_{name} connect failed; dropped mcp ref, waiting for lazy reconnect: {e}");
+                log::warn!("bridge_{name} connection unusable; dropped mcp ref, waiting for lazy reconnect: {e}");
             }
             Err(CommandError::from(e.to_string()))
         }
@@ -320,11 +332,29 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
     }
     // Explicit bridge_register "agent-hub-cli" (auto-register already sanitizes clientInfo.name
     // into a same-name peer; the explicit register is redundant but idempotent, ensuring the connection semantics).
-    if let Err(e) = client
-        .tools_call("bridge_register", json!({ "peerId": SELF_PEER_ID }))
-        .await
-    {
-        log::warn!("bridge_register {SELF_PEER_ID} failed: {e}");
+    //
+    // The receipt's `from` is the identity the HUB actually bound this session to.
+    // That is the only trustworthy answer to "who am I": `managerPeers` defaults to
+    // `agent-hub-cli`, so if the hub bound us to anything else the app silently loses
+    // roster powers and a 3s global-history poll, and its own messages show up under
+    // the wrong name. Check it here, on every (re)connect, and say so out loud.
+    match client.tools_call("bridge_register", json!({ "peerId": SELF_PEER_ID })).await {
+        Ok(raw) => match unwrap_tool_result(raw) {
+            Ok(value) => {
+                let bound = value.get("from").and_then(|v| v.as_str()).unwrap_or("");
+                if bound != SELF_PEER_ID {
+                    log::warn!(
+                        "self peer id check FAILED: the hub bound this session to '{bound}', not '{SELF_PEER_ID}'. \
+Manager privileges, the roster entry and the relay view all belong to '{bound}'; restart the app or \
+free the '{SELF_PEER_ID}' peer id on the hub."
+                    );
+                } else {
+                    log::info!("self peer id check ok: {SELF_PEER_ID}");
+                }
+            }
+            Err(e) => log::warn!("bridge_register {SELF_PEER_ID}: could not read the receipt: {e:?}"),
+        },
+        Err(e) => log::warn!("bridge_register {SELF_PEER_ID} failed: {e}"),
     }
 
     // Publish the client BEFORE spawning the SSE watchdog: every watchdog
@@ -373,10 +403,10 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
                                 Ok(Some(notif)) => {
                                     let method =
                                         notif.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                                    if method == "notifications/message" {
+                                    if method == SSE_METHOD {
                                         let data = notif.pointer("/params/data");
                                         match data.and_then(|d| d.get("event")).and_then(Value::as_str) {
-                                            Some("peers_changed") => {
+                                            Some(SSE_EVENT_PEERS_CHANGED) => {
                                                 match data.and_then(|d| d.get("peers")).and_then(Value::as_array) {
                                                     Some(peers) => {
                                                         sync_roster_to_store(&store, &kicked, peers);
@@ -388,7 +418,7 @@ async fn ensure_mcp_initialized(app: &AppHandle, state: &AppState, _status: &Hub
                                                     }
                                                 }
                                             }
-                                            Some("message") => match data.and_then(|d| d.get("message")) {
+                                            Some(SSE_EVENT_MESSAGE) => match data.and_then(|d| d.get("message")) {
                                                 Some(msg) => {
                                                     let _ = app.emit("hub:message", msg);
                                                 }
@@ -907,6 +937,57 @@ pub async fn bridge_task_status(state: State<'_, AppState>, ref_id: String) -> C
     tools_call_checked(&state, "bridge_task_status", json!({ "ref": ref_id })).await
 }
 
+/// `bridge_task_cancel`: cancel a delegated task. Either side may — the sender
+/// stops work it no longer wants, an assignee reports it will not finish. The hub
+/// routes the cancel to the other side, so the UI must refresh after calling it.
+#[tauri::command]
+pub async fn bridge_task_cancel(
+    state: State<'_, AppState>,
+    ref_id: String,
+    reason: Option<String>,
+) -> CmdResult<Value> {
+    let mut args = json!({ "ref": ref_id });
+    if let Some(r) = reason {
+        if !r.is_empty() {
+            args["reason"] = json!(r);
+        }
+    }
+    tools_call_checked(&state, "bridge_task_cancel", args).await
+}
+
+/// `bridge_task_input`: answer a task whose assignee acked `input-required`.
+/// Only the task's SENDER may call this; the answer reaches the waiting assignee
+/// and the task resumes to `working`.
+#[tauri::command]
+pub async fn bridge_task_input(
+    state: State<'_, AppState>,
+    ref_id: String,
+    input: String,
+) -> CmdResult<Value> {
+    tools_call_checked(&state, "bridge_task_input", json!({ "ref": ref_id, "input": input })).await
+}
+
+/// `tools/list` from the hub, as plain names.
+///
+/// The app mirrors the hub's tool names by hand (it cannot import the main repo),
+/// and that hand-keeping has already drifted twice. Exposing the advertised list
+/// lets the frontend compare it against what it actually calls at startup, so a
+/// rename shows up as a warning instead of an "unknown tool" mid-conversation.
+#[tauri::command]
+pub async fn hub_tools_list(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let mcp = require_mcp(&state).await?;
+    match mcp.tools_list().await {
+        Ok(tools) => Ok(tools.into_iter().map(|t| t.name).collect()),
+        Err(e) => {
+            // Same self-heal as tools_call_checked: a dead session must not be
+            // handed back forever, and the caller gets a clear error either way.
+            if matches!(e, McpError::Http(_) | McpError::NotConnected | McpError::SessionGone) {
+                *state.mcp.write().await = None;
+            }
+            Err(CommandError::from(e.to_string()))
+        }
+    }
+}
 // -------- Auto-start on login (PRD F-13 / SPEC AC-9) --------
 
 /// `service_install`: run `agent-comm-hub service install` (Windows Run key / Linux systemd /
@@ -1111,6 +1192,20 @@ pub async fn config_get(state: State<'_, AppState>) -> CmdResult<Value> {
         .map(|r| r.value)
         .unwrap_or_default();
     out.insert("auth_token".into(), json!(auth_token));
+    // Display-window settings are the frontend's own — they shape what a view
+    // renders, not what the hub does — but they live in the same config table so
+    // the settings panel round-trips them like everything else. Absent means 0,
+    // i.e. no limit, which is the pre-existing behaviour.
+    for key in ["display_window_hours", "display_max_messages"] {
+        let value = state
+            .store
+            .get_config(key)
+            .ok()
+            .flatten()
+            .map(|r| r.value)
+            .unwrap_or_else(|| "0".to_string());
+        out.insert(key.into(), json!(value));
+    }
     Ok(Value::Object(out))
 }
 
@@ -1167,13 +1262,18 @@ pub async fn hub_restart_with_saved_config(
 pub async fn unread_list(state: State<'_, AppState>) -> CmdResult<Vec<UnreadRecord>> {
     wrap(state.store.list_unread())
 }
-
+/// Persist the read watermark for one peer. `ts` is the moment the frontend
+/// considers read (a message's own timestamp when the user opened that message,
+/// or "now" when they opened the conversation) — the server must store THAT
+/// value, not its own clock, or a restart would mark unread messages as read.
+/// Omitted means now.
 #[tauri::command]
 pub async fn unread_clear(
     state: State<'_, AppState>,
     peer_id: String,
+    ts: Option<i64>,
 ) -> CmdResult<()> {
-    wrap(state.store.clear_unread(&peer_id, now_ms()))
+    wrap(state.store.clear_unread(&peer_id, ts.unwrap_or_else(now_ms)))
 }
 
 // -------- herdr's 11 tools (T-2.8 / T-2.9) --------
