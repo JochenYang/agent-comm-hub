@@ -1,12 +1,18 @@
 {
   "name": "agent-comm-hub-app",
   "private": false,
-  "version": "1.5.0",
+  "version": "1.6.0",
   "type": "module",
   "description": "Desktop GUI for agent-comm-hub — Tauri 2 + React + Zinc+Cyan devtool theme",
   "license": "MIT",
   "packageManager": "pnpm@11.7.0",
-  "keywords": ["agent-comm-hub", "mcp", "tauri", "desktop", "gui"],
+  "keywords": [
+    "agent-comm-hub",
+    "mcp",
+    "tauri",
+    "desktop",
+    "gui"
+  ],
   "author": "Jochen",
   "scripts": {
     "dev": "vite",

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "agent-comm-hub-app",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "identifier": "com.agent-comm-hub.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -34,19 +34,35 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi", "deb", "appimage", "app", "dmg"],
-    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "targets": [
+      "nsis",
+      "msi",
+      "deb",
+      "appimage",
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Desktop GUI for agent-comm-hub",
     "longDescription": "Multi-peer MCP hub desktop manager: spawn hub, view peers, send messages, run herdr control tools, persist to SQLite.",
     "resources": [],
     "externalBin": [],
     "windows": {
-      "wix": { "language": ["en-US"] },
+      "wix": {
+        "language": [
+          "en-US"
+        ]
+      },
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "installMode": "currentUser",
-        "languages": ["English"],
+        "languages": [
+          "English"
+        ],
         "displayLanguageSelector": false
       }
     },

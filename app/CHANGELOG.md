@@ -5,6 +5,34 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-10-11
+
+### Added
+
+- The hub's new observability surfaces are mirrored: SSE event names are matched
+  as named constants (`SSE_METHOD` / `SSE_EVENT_PEERS_CHANGED` /
+  `SSE_EVENT_MESSAGE`, source of truth `src/protocol.ts`), so a hub-side rename
+  fails this build instead of silently dropping pushes.
+- The bundled hub (hub ≥ 0.10.0) ships with session lifecycle, per-peer mailbox
+  rate limiting (`--rate-per-min`) and message `priority` (0|1|2).
+
+### Fixed
+
+- A foreign access token could attach its SSE stream to ANOTHER user's session
+  and receive that user's pushes (including message content) while locking the
+  real owner out. The GET/SSE path now enforces the same session-ownership rule
+  the POST path always did.
+- A second SSE stream on the same session id no longer goes silent when the
+  first one closes.
+- Read-state persistence: the vestigial `unread.count` column is dropped
+  (schema v4, with a migration); the watermark survives restarts unchanged.
+- Thread/channel chips render in the message list (hop is withheld until the
+  hub-side value is carried through the Rust layer).
+
+### Removed
+
+- The `lint` npm script (eslint was never a devDependency; it could never run).
+  SPEC NFR-6/7 updated to match; `tsc --noEmit` remains the TS gate.
 ## [1.5.0] — 2026-09-29
 
 ### Added
