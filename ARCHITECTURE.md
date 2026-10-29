@@ -52,12 +52,15 @@ opencode listening loop: bridge_wait() returns → rebuts → … (loop = live d
 "Listening" = the agent loops `bridge_wait` inside its turn. Without a loop,
 messages are not lost — they queue until the agent polls.
 
-## 4. Tools (37, symmetric on every side)
+## 4. Tools (39, symmetric on every side)
 
-Message tools (16): `bridge_register` · `bridge_unregister` · `bridge_rename` ·
-`bridge_chat` · `bridge_notice` · `bridge_task` · `bridge_ack` · `bridge_wait` ·
-`bridge_poll` · `bridge_commit` · `bridge_nack` · `bridge_status` ·
-`bridge_peers` · `bridge_history` · `bridge_tasks` · `bridge_task_status`
+Message + observability tools (22): `bridge_register` · `bridge_unregister` ·
+`bridge_rename` · `bridge_chat` · `bridge_notice` · `bridge_task` ·
+`bridge_ack` · `bridge_wait` · `bridge_poll` · `bridge_commit` ·
+`bridge_nack` · `bridge_status` · `bridge_peers` · `bridge_history` ·
+`bridge_tasks` · `bridge_task_status` · `bridge_task_cancel` ·
+`bridge_task_input` · `bridge_announce` · `bridge_discover` ·
+`bridge_metrics` · `bridge_events`
 
 Group tools (6): `bridge_group_create` · `bridge_group_send` ·
 `bridge_group_list` · `bridge_group_delete` · `bridge_group_add_member` ·
@@ -105,8 +108,8 @@ src/
 agents/             # per-agent config templates + registry.json + SKILL.md
                     #   (install-all.ps1 is a deprecated shim over `setup`)
 admin/              # web console workspace (Vite + React + Tailwind + beui)
-test/               # the six committed suites: smoke (169) + setup (46) + ops (11)
-                    #   + herdr (35) + discover (33) + e2e (20) = 314 checks
+test/               # the six committed suites: smoke (286) + setup (46) + ops (11)
+                    #   + herdr (35) + discover (33) + e2e (35) = 446 checks
 ```
 
 ## 6. Installing & syncing to agents
@@ -150,13 +153,17 @@ They coexist: ports 18763 vs 18764.
 
 ## 9. Facts
 
-- Version 0.10.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
-- Test suite 169/169 smoke + 46/46 setup + 11/11 ops + 35/35 herdr + 33/33 discovery + 20/20 e2e (314): registration/rename/unregister, routing, broadcast, ack routing,
+- Version 0.11.0, Node ≥ 22, MIT, npm name `agent-comm-hub` reserved.
+- Test suite 286/286 smoke + 46/46 setup + 11/11 ops + 35/35 herdr + 33/33 discovery + 35/35 e2e (446): registration/rename/unregister, routing, broadcast, ack routing,
   task ledger (delivery timestamps, terminal lock, timeouts incl. multi-day SLAs),
-  a reply chain that survives a restart, filtered waits, connect-time auto-registration, shared identity, SSE
+  a reply chain that survives a restart, filtered waits (`statuses` / `terminalOnly`),
+  ack authorisation (assignee only), drop reconciliation that leaves a task open,
+  lease accounting and dead-letter bounds, the peer/group id namespace,
+  `task_changed` pushes, connect-time auto-registration, shared identity, SSE
   liveness, idle GC, error paths, control-tool argv passthrough, permission
   gating, missing CLI, registry validation, PATH/PATHEXT probing, npm scoped
-  dirs, os filtering, per-platform service dry-runs.
+  dirs, os filtering, per-platform service dry-runs, and the restart-durability
+  cases (open lease, `input-required`, `priority`).
 - Verified live with mcode (10 tools listed via `mcode exec`), opencode, and
   kimi-code (`kimi -p` listed all 10 tools). herdr control tools verified
   against the real herdr CLI (0.8.0-preview) on Windows.

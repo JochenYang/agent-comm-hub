@@ -39,6 +39,14 @@ export const HUB_PEER = 'hub'
 export const SSE_METHOD = 'notifications/message'
 export const SSE_EVENT_PEERS_CHANGED = 'peers_changed'
 export const SSE_EVENT_MESSAGE = 'message'
+/** A task's LEDGER state moved. Pushed only to the task's sender and its
+ *  assignees (never broadcast), and only when the status actually changed — so a
+ *  consumer can treat it as "this task moved", not as a stream of every ack.
+ *  `data` carries `{taskId, status, a2aState, updatedAt}`.
+ *
+ *  Additive wire event: a consumer that does not know it ignores it (the desktop
+ *  app's SSE dispatcher is a catch-all), so an old client keeps working. */
+export const SSE_EVENT_TASK_CHANGED = 'task_changed'
 
 /** Max depth of a **task re-delegation** chain (a task replying to a task), like
  *  MiMo session-chat's 5-hop cap. Delivered either way: the depth SATURATES at the
@@ -210,6 +218,12 @@ export type AckStatus = 'accepted' | 'working' | 'input-required' | 'rejected' |
  * the schema alone left the handler rejecting it). */
 export const CLIENT_ACK_STATUSES = ['accepted', 'working', 'input-required', 'rejected', 'done', 'failed'] as const
 
+/** Every ack status that can appear on the wire, `canceled` included (only
+ *  `bridge_task_cancel` sends that one). `bridge_wait { statuses }` validates
+ *  against this list, so the filter accepts exactly what an ack can carry and a
+ *  typo is an error instead of a wait that can never match. */
+export const ALL_ACK_STATUSES = [...CLIENT_ACK_STATUSES, 'canceled'] as const satisfies readonly AckStatus[]
+
 /** Severity of a {@link NoticeContent}, mirroring a log level. */
 export type NoticeLevel = 'info' | 'warn' | 'error'
 
@@ -231,6 +245,26 @@ export type TaskStatus = 'pending' | 'accepted' | 'working' | 'input-required' |
 /** Terminal statuses: further acks are recorded on the timeline (applied:false)
  *  but never reopen the task. */
 export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] = ['rejected', 'done', 'failed', 'timeout', 'canceled']
+
+/** Every status the ledger can hold, in lifecycle order.
+ *
+ *  It exists because this list used to be hand-written in four places (the tool
+ *  schema, its filter validation, the persistence importer and the assignee-row
+ *  importer) and they drifted: `input-required` — a status the ledger produces
+ *  itself — was accepted by `bridge_ack` and then rejected by `bridge_tasks`, and
+ *  a persisted task in that state was dropped on restart. `satisfies` rejects a
+ *  member that is not a {@link TaskStatus}. */
+export const ALL_TASK_STATUSES = [
+  'pending',
+  'accepted',
+  'working',
+  'input-required',
+  'rejected',
+  'done',
+  'failed',
+  'timeout',
+  'canceled',
+] as const satisfies readonly TaskStatus[]
 
 /** Map a semantic ack onto a task status. */
 export function ackToTaskStatus(ack: AckStatus): TaskStatus {
@@ -313,7 +347,14 @@ export interface TaskAckEvent {
 export interface AssigneeState {
   peerId: string
   status: TaskStatus
-  /** When this assignee first received the task (waiter handoff / queue drain). */
+  /** When this assignee first had the task ENTER ITS MAILBOX (queued, or handed
+   *  to a live waiter) — delivery evidence, not read evidence. It is
+   *  deliberately NOT cleared when the message is later dropped in transit
+   *  (expiry, overflow, a dead letter): "it once reached that peer" stays true,
+   *  and that is what a consumer of this field needs to know. The one exception
+   *  is a terminal drop (the peer itself is gone — see
+   *  `failTaskForDroppedMessage`), where the booking is undone because the
+   *  mailbox it describes no longer exists. */
   deliveredMs?: number
   acks: TaskAckEvent[]
 }
@@ -340,6 +381,12 @@ export interface TaskRecord {
   timeoutMs?: number
   /** Absolute epoch ms when the SLA fires. */
   deadlineAt?: number
+  /** INTERNAL bookkeeping, not part of the task contract: the timestamp of the
+   *  first delivery of this task that was dropped in transit, once the sender
+   *  has been told about it. A fan-out task can be dropped at many recipients
+   *  and the sender must hear about it once, or the notices fill its mailbox
+   *  just as fast as the drops did. */
+  dropNotified?: number
   threadId?: string
   createdAt: number
   updatedAt: number
@@ -388,6 +435,13 @@ export interface DeliveredBatch {
 export interface WaitTimeout {
   type: 'timeout'
   waitedMs: number
+  /** Ledger snapshot of the `ref` this wait was filtering on, when the caller
+   *  passed one and the hub still holds that task. Without it a sender that
+   *  waited to the ceiling could not tell "nobody answered me" apart from "the
+   *  hub already judged this task timeout/done". Additive: the three fields it
+   *  adds are optional, so a consumer that only reads `type`/`waitedMs` is
+   *  unaffected. */
+  ref?: { status: TaskStatus; a2aState: A2ATaskState }
 }
 
 export type WaitResult = Delivered | DeliveredBatch | WaitTimeout

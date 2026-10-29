@@ -38,11 +38,16 @@ Optional: call `bridge_register(peerId)` to claim a readable id
   task `timeout` if no terminal ack arrives in time. `ref` names the task this
   one answers; a task answering a task is a re-delegation, and that chain is
   capped at 5 hops.
-- `bridge_ack(ref, status, note?, progress?)` — acknowledge a task.
-  Statuses: `accepted` | `working` | `rejected` | `done` | `failed`.
-  `working` + `progress` (0–100) report intermediate state. Terminal
-  statuses lock the task (later acks are recorded on the timeline but do
-  not reopen it). The ack is auto-routed to the original sender of `ref`.
+- `bridge_ack(ref, status, note?, progress?, artifacts?)` — acknowledge a task.
+  Statuses: `accepted` | `working` | `input-required` | `rejected` | `done` |
+  `failed`. `working` + `progress` (0–100) report intermediate state.
+  `input-required` is an interrupt: it asks the delegator for information
+  without ending the task (it answers with `bridge_task_input`; the task resumes
+  `working`). Terminal statuses lock the task (later acks are recorded on the
+  timeline but do not reopen it). `artifacts` (`[{name, mimeType?, text?|url?}]`)
+  is how you hand back what you produced — it is kept on the ledger, so
+  `bridge_task_status` shows it later. The ack is auto-routed to the original
+  sender of `ref`.
 - `bridge_task_status(ref)` — one task's ledger state, per-assignee state,
   and full ack timeline (also carries the A2A aliases `taskId` / `contextId` /
   `a2aState`).
@@ -59,10 +64,12 @@ Optional: call `bridge_register(peerId)` to claim a readable id
 - `bridge_discover(skill?, tag?, acceptsTasks?, idleOnly?)` — find a peer to hand
   work to. Returns matches with their current load (`queued` / `waiting` /
   `running`); by default only peers that accept tasks.
-- `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?)` — long-poll for the next
-  message (default 30 s; `ref` waits for that task's ack; `threadId` narrows
-  to one dialog). Loop it to hold a real-time conversation. `ack: "manual"`
-  LEASES the message instead of consuming it.
+- `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?, statuses?, terminalOnly?)` —
+  long-poll for the next message (default 30 s). `ref` waits for that task's
+  reply — an ack OR the chat an assignee answers with; `statuses` and
+  `terminalOnly` narrow that to the ack you actually want (see the workflows
+  below). `threadId` narrows to one dialog. Loop it to hold a real-time
+  conversation. `ack: "manual"` LEASES the message instead of consuming it.
 - `bridge_poll(from?, ack?)` — non-blocking drain of every queued message.
 - `bridge_commit(ids)` — confirm you have finished with leased messages. Until you
   do, they are handed out again when the lease expires (with `attempts` growing),
@@ -93,7 +100,10 @@ Optional: call `bridge_register(peerId)` to claim a readable id
 4. On receiving a `task` (content is `{prompt, context?, deliverable?}`):
    - `bridge_ack(ref, "accepted")` when you take it on
    - `bridge_ack(ref, "working", note?, progress?)` for long-running work
-   - `bridge_ack(ref, "done"[, note])` when finished
+   - `bridge_ack(ref, "input-required", note?)` when you need information from
+     the delegator before you can continue (it answers with `bridge_task_input`)
+   - `bridge_ack(ref, "done"[, note, artifacts?])` when finished — `artifacts`
+     is where the result belongs
    - `bridge_ack(ref, "rejected")` to decline (with a reason)
    - `bridge_ack(ref, "failed")` when it could not be completed (with a note)
 5. Unsure whether the peer is online: check `bridge_peers()` first.
@@ -107,14 +117,23 @@ Follow the scenario directly (tool names stay as-is):
   say "got it, starting".
 - For work that takes a while: `bridge_ack(ref, "working", note, progress)`
   so the delegator can see it is moving.
-- When done: send the result and a delivery note back to the delegator
-  (`bridge_chat` / `bridge_task`), then `bridge_ack(ref, "done", note)` so it
-  can review.
+- Need something before you can finish: `bridge_ack(ref, "input-required",
+  note)` — the task waits, the delegator answers with `bridge_task_input`, and
+  your work resumes.
+- When done: `bridge_ack(ref, "done", note, artifacts)` — put the result in
+  `artifacts` (`[{name, text}]`, or `url` for a file you left on disk) so it is
+  recorded on the ledger the delegator reads with `bridge_task_status`. Add a
+  `bridge_chat { ref }` when the delegator should also see the result as a
+  message in its mailbox.
 - If you can't do it: `bridge_ack(ref, "rejected")` with the reason.
 
 **2. You delegate to someone else (wait vs don't-wait)**
-- Wait for delivery: after `bridge_task`, loop `bridge_wait({ref})` until the
-  terminal ack arrives, then take the result over.
+- Wait for the outcome: after `bridge_task`, loop
+  `bridge_wait({ref, terminalOnly: true})` until the terminal ack arrives, then
+  take the result over. Without `terminalOnly` a `ref` wait resolves on the
+  FIRST reply — an `accepted` or `working` beat, or the chat the assignee answers
+  with — so you would take over before the work is done. `statuses` is the same
+  knob spelled out (`["done"]`, `["rejected", "failed"]`, …).
 - Don't wait: send it and move on; the peer sends the result back when done —
   collect it later with `bridge_poll()` / `bridge_wait()` /
   `bridge_history()` (messages queue while you are away).
@@ -137,8 +156,11 @@ Follow the scenario directly (tool names stay as-is):
   means nothing arrived — try again.
 - Cadence: use 10–30 s short polls when the peer is active; check
   `bridge_peers()` when unsure.
-- Task terminal states (`done`/`failed`/`rejected`/`timeout`) cannot be
-  reopened; start a new task instead of re-acking.
+- Task terminal states (`done`/`failed`/`rejected`/`timeout`/`canceled`) cannot be
+  reopened; start a new task instead of re-acking. `terminalOnly: true` on a
+  `bridge_wait {ref}` resolves on the terminal ack (or the cancel message) —
+  the outcome, not "it started". An SLA `timeout` produces no ack at all, so it
+  never resolves a wait: read the `ref` snapshot a timed-out wait returns.
 - **Reply chains are counted, not enforced — nothing is ever refused.**
   Every message carrying `ref` sits one hop deeper than the message it points at.
   A plain conversation (chat / ack replies) counts up to **50** hops; a **task
@@ -154,6 +176,11 @@ Follow the scenario directly (tool names stay as-is):
   your row. When you are waiting you may also receive a `notice` whose `from` is
   the reserved id `hub` — `bridge_wait { from: "hub" }` subscribes to exactly
   those. `all` and `hub` are reserved: you cannot register or rename into them.
+  A `from` filter never hides a hub notice either: `bridge_wait { from: <assignee> }`
+  still receives one. When a **task you sent** is dropped on the
+  way (rate, overflow, expiry, dead letter) you get exactly one of these notices
+  naming the task; the task stays open on purpose, because a dead letter can
+  still be revived with `bridge_nack`.
 - **Need at-least-once instead of best-effort?** Take messages with
   `bridge_wait { ack: "manual" }` (or `bridge_poll { ack: "manual" }`) and call
   `bridge_commit` once you have really handled them. Uncommitted messages come

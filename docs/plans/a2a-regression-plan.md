@@ -606,6 +606,11 @@ W7 保持 `[~]`：本条无认证/权限面，不强制独立审查；等 W8–W
 **不**挂在消息对象上——否则重新入队就丢掉计数，而且会顺带被写进 SQLite；
 二是租约完全在内存里，重启后消息回到普通队列（at-least-once，不会凭空消失）。
 
+> **更正（后续迭代，本条已过时）**：租约不再"完全在内存里"——`exportMailboxes()` 现在把未提交的租约
+> 跟在队列后面一起导出，重启后恢复成普通队列邮件（未提交的租约按同一 message id 再投一次）。
+> 取代此段的是 `docs/plans/ack-integrity-plan.md` 的 W8（以及 `test/e2e.mjs` 里跨进程重启的租约用例）。
+> 上面这句保留原文，仅作当时的记录。
+
 - **主张复核**：`.tmp/verify-lease.mjs` 19/19（auto 仍然直接消费；manual 到期后同一条消息再来且 `attempts` 递增；
   commit 后不再回来；nack 立即回到队首且计数继续涨；超过 `maxAttempts` 变死信、花名册显示 `deadLettered`；
   nack 能复活死信并把计数归 1；阻塞中的 waiter 收到的也是租约；`ids: []` 被拒）；`pnpm test` 292/292。

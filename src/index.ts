@@ -21,8 +21,16 @@ import { autoRegisterPeer, hubTools, isManagerCaller, livePeersFor, present, ros
 import { McpStreamableHttpServer, SessionRegistry, isLoopbackHost } from './mcp-server.js'
 import { ANON_JOIN_PEER, bearerFromHeaders, watchTokenFile, addToken, removeToken, readTokens, type TokenIdentity, type TokenTable } from './auth.js'
 import { SQLiteStateStore } from './persist.js'
-import type { BridgeMessage } from './protocol.js'
-import { SSE_METHOD, SSE_EVENT_PEERS_CHANGED, SSE_EVENT_MESSAGE } from './protocol.js'
+import {
+  SSE_METHOD,
+  SSE_EVENT_PEERS_CHANGED,
+  SSE_EVENT_MESSAGE,
+  SSE_EVENT_TASK_CHANGED,
+  a2aState,
+  type BridgeMessage,
+  type TaskRecord,
+  type TaskStatus,
+} from './protocol.js'
 
 export { HerdrCtl, type HerdrAgent, type HerdrPane, type HerdrRead, type HerdrSettled, AGENT_STATUSES } from './herdr-ctl.js'
 export { RunnerRegistry, createRunner, validateRunnerConfig, DEFAULT_RUN_TIMEOUT_MS, MAX_RUN_NOTE_CHARS, type Runner, type RunnerConfig, type RunnerDeps, type RunRequest, type RunResult } from './runner.js'
@@ -37,7 +45,7 @@ export * from './protocol.js'
 export const SERVER_NAME = 'agent-comm-hub'
 
 /** Current package version (kept in sync with package.json). */
-export const SERVER_VERSION = '0.10.0'
+export const SERVER_VERSION = '0.11.0'
 
 /** Default bind address; keep loopback unless you know why not. */
 export const DEFAULT_HOST = '127.0.0.1'
@@ -352,6 +360,39 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       })
     }
   }
+  /** How many tasks `lastTaskPush` remembers. Memory-only bookkeeping, so a
+   *  bound is all it needs: it is keyed by task id and the ledger evicts old
+   *  tasks, so a long-running hub would otherwise keep a row per task ever seen. */
+  const MAX_TASK_PUSH_MEMORY = 512
+  /** Last `task_changed` status pushed for a task (see the hook below). */
+  const lastTaskPush = new Map<string, TaskStatus>()
+  /** Push one task's ledger state to its SENDER and its ASSIGNEES — nobody else.
+   *
+   *  Deliberately not a broadcast (like `peers_changed`) and deliberately not
+   *  part of the manager relay: the payload names a task id and its status, and a
+   *  task is a private arrangement between two parties. A manager loses nothing —
+   *  every transition is caused by an ack (relayed already) or by a hub timer
+   *  (readable through bridge_tasks / bridge_events), and widening the audience
+   *  is how task ids and their state leak to peers that were never a party. */
+  const pushTaskChanged = (task: TaskRecord): void => {
+    const data = {
+      event: SSE_EVENT_TASK_CHANGED,
+      taskId: task.id,
+      status: task.status,
+      // A2A naming, so a client that speaks A2A does not have to carry the
+      // ledger's own vocabulary — same mapping bridge_task_status publishes.
+      a2aState: a2aState(task.status),
+      updatedAt: task.updatedAt,
+    }
+    const seen = new Set<string>()
+    for (const peer of [task.from, ...task.assignees.map(assignee => assignee.peerId)]) {
+      if (seen.has(peer)) continue
+      seen.add(peer)
+      const sessions = registry.sessionsForPeer(peer)
+      if (sessions.length === 0) continue
+      mcp.notify(oneStreamPer(`task:${peer}`, sessions), SSE_METHOD, { level: 'info', logger: 'bridge', data })
+    }
+  }
   // Persistence: one debounced saver covers both stores — the legacy JSON
   // roster (stateFile) and the SQLite state DB (db). Either may be absent
   // (programmatic default); the CLI opts both in by default.
@@ -480,11 +521,43 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
     },
     // Task ledger transitions (ack folding, SLA timeout, first delivery) are
     // their own persistence trigger: without it a crash between two roster
-    // events loses the ledger state the admin board reads back.
-    onTaskChanged: () => {
-      if (dbStore === undefined) return
-      dbDirty = true
-      scheduleSave()
+    // events loses the ledger state the admin board reads back. They are also
+    // the SSE `task_changed` signal for the two parties of a task.
+    onTaskChanged: task => {
+      if (dbStore !== undefined) {
+        dbDirty = true
+        scheduleSave()
+      }
+      // Only a REAL status change is worth a notification. This hook also fires
+      // for events that moved nothing — an `applied: false` ack on a closed task,
+      // the Nth `working` beat, the first-delivery booking — and re-announcing
+      // the same status would turn the stream into an ack-by-ack echo of a value
+      // that did not change. A consumer that needs the detail reads the ledger.
+      if (lastTaskPush.get(task.id) === task.status) return
+      try {
+        pushTaskChanged(task)
+      } catch (error) {
+        log.warn(`task_changed notification failed: ${(error as Error).message}`)
+      }
+      // Recorded AFTER the push, and deliberately even when the push reached no
+      // live session. `pushTaskChanged` skips a party that has no open stream,
+      // so recording first lost the transition for good: "working while
+      // disconnected → done" was neither pushed nor remembered, and that party
+      // never heard the change at all. Recording it anyway is the right trade —
+      // the status being remembered is the one nobody was listening for, so
+      // nothing that could have been received is lost, and replaying it after a
+      // reconnect would announce a past state as news (a reconnecting consumer
+      // reads the CURRENT state from bridge_task_status / bridge_tasks; this
+      // stream reports transitions that happen while it is open).
+      // Delete-then-set keeps the map in LRU order, so trimming below drops the
+      // task that moved longest ago rather than an arbitrary one.
+      lastTaskPush.delete(task.id)
+      lastTaskPush.set(task.id, task.status)
+      while (lastTaskPush.size > MAX_TASK_PUSH_MEMORY) {
+        const oldest = lastTaskPush.keys().next().value
+        if (oldest === undefined) break
+        lastTaskPush.delete(oldest)
+      }
     },
     onGroupsChanged: () => {
       if (dbStore === undefined) return
@@ -547,9 +620,15 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
         log.info(`roster restored: ${importedProfiles} profile(s) from ${resolved.db}`)
       }
       const restoredMessages = hub.importHistory(state.messages)
-      const restoredQueued = hub.importMailboxes(state.mailboxes)
+      // Order matters: the ledger (tasks) has to exist before any mailbox is
+      // restored, because a mailbox that has to evict on restore reconciles the
+      // task it dropped — with an empty ledger it would record the loss and
+      // leave the task pending forever. Groups come before tasks for the same
+      // kind of reason: `importTasks` rejects a sender that is a group id, and
+      // `importGroups` refuses an id a peer or profile already holds.
       const restoredGroups = hub.importGroups(state.groups)
       const restoredTasks = hub.importTasks(state.tasks)
+      const restoredQueued = hub.importMailboxes(state.mailboxes)
       if (restoredMessages + restoredQueued + restoredGroups > 0) {
         log.info(`state restored from ${resolved.db}: ${restoredMessages} message(s), ${restoredQueued} queued, ${restoredGroups} group(s)`)
         dbDirty = true
@@ -621,6 +700,14 @@ export function startHub(config: Partial<HubConfig> = {}, log: HubLogger = conso
       herdrControlPeers: resolved.herdrControlPeers === 'all' || resolved.herdrControlPeers === undefined ? 'all' : new Set(resolved.herdrControlPeers),
       managerPeers: resolved.managerPeers === 'all' ? 'all' : new Set(resolved.managerPeers ?? DEFAULT_CONFIG.managerPeers),
       managerTokenRequired: managerToken !== undefined,
+      // Token identities are an authorization fact of the TABLE, not of the live
+      // sessions: `bridge_rename` must not re-key onto a configured id whose
+      // owner has not connected yet. Read from the file on every call because
+      // the token admin API adds/removes rows at runtime (and `readTokens`
+      // returns [] in loopback mode, where no id is reserved).
+      ...(resolved.authTokens === undefined
+        ? {}
+        : { tokenPeers: () => new Set(readTokens(resolved.authTokens!).map(row => row.peer)) }),
     }),
     { name: SERVER_NAME, version: SERVER_VERSION },
     registry,

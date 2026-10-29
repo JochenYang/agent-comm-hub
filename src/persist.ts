@@ -18,7 +18,7 @@ import type { GroupState, PeerProfile } from './hub.js'
 const KIND_NAMES: readonly string[] = ['chat', 'task', 'notice', 'ack']
 
 function messageToRow(message: BridgeMessage): (string | number | null)[] {
-  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts, message.hop ?? null, message.seq ?? null, message.expiresAt ?? null]
+  return [message.id, message.from, message.to, message.kind, message.content, message.ref ?? null, message.channel ?? null, message.threadId ?? null, message.ts, message.hop ?? null, message.seq ?? null, message.expiresAt ?? null, message.priority ?? null]
 }
 
 function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
@@ -48,6 +48,17 @@ function rowToMessage(row: Record<string, unknown>): BridgeMessage | undefined {
     // Deadline: restored so a message that expired while the hub was down is
     // dropped rather than delivered late.
     ...(typeof row.expires_at === 'number' && Number.isFinite(row.expires_at) && row.expires_at > 0 ? { expiresAt: row.expires_at } : {}),
+    // Delivery priority: ONLY a real 0 | 1 | 2 restores. Anything else — NULL
+    // from a database written before this column existed, or an out-of-range
+    // value — restores as UNSET, deliberately not as 0. An absent priority is a
+    // different claim from "the sender asked for 0": `compose` keeps an unset
+    // one off the wire and `priorityOf` reads absent as 0 anyway, so writing 0
+    // here would hand every restored message a priority its sender never gave.
+    // That matters because a restored message is re-inserted (lease return,
+    // nack, mail queued while the hub was down) and `insertByPriority` +
+    // overflow dropping then act on it: a p2 instruction restored as p0 loses
+    // its slot to chatter, which is exactly the bug this column prevents.
+    ...(row.priority === 0 || row.priority === 1 || row.priority === 2 ? { priority: row.priority } : {}),
     ts,
   }
 }
@@ -79,11 +90,11 @@ export class SQLiteStateStore {
       );
       CREATE TABLE IF NOT EXISTS messages (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER, mseq INTEGER, expires_at INTEGER
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER, mseq INTEGER, expires_at INTEGER, priority INTEGER
       );
       CREATE TABLE IF NOT EXISTS mailboxes (
         peer TEXT NOT NULL, seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, from_peer TEXT NOT NULL,
-        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER, mseq INTEGER, expires_at INTEGER
+        to_peer TEXT NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, ref TEXT, channel TEXT, thread_id TEXT, ts INTEGER NOT NULL, hop INTEGER, mseq INTEGER, expires_at INTEGER, priority INTEGER
       );
       CREATE TABLE IF NOT EXISTS groups (
         id TEXT PRIMARY KEY, name TEXT, members TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -96,7 +107,7 @@ export class SQLiteStateStore {
     // destructive). A column that already exists throws — the normal path on
     // every boot after the one that added it.
     for (const table of ['messages', 'mailboxes']) {
-      for (const column of ['thread_id TEXT', 'hop INTEGER', 'mseq INTEGER', 'expires_at INTEGER']) {
+      for (const column of ['thread_id TEXT', 'hop INTEGER', 'mseq INTEGER', 'expires_at INTEGER', 'priority INTEGER']) {
         try {
           this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`)
         } catch {
@@ -121,14 +132,14 @@ export class SQLiteStateStore {
   /** Insert buffered messages and re-snapshot mailboxes/profiles/groups/tasks. */
   flush(snapshot: { mailboxes: Record<string, BridgeMessage[]>; profiles: PeerProfile[]; groups: GroupState[]; tasks: TaskRecord[] }): void {
     const insert = this.db.prepare(
-      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop, mseq, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop, mseq, expires_at, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const message of this.buffer.splice(0, this.buffer.length)) {
       insert.run(...messageToRow(message))
     }
     this.db.exec('DELETE FROM mailboxes')
     const insertMail = this.db.prepare(
-      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop, mseq, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO mailboxes (peer, id, from_peer, to_peer, kind, content, ref, channel, thread_id, ts, hop, mseq, expires_at, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
     for (const [peer, queue] of Object.entries(snapshot.mailboxes)) {
       for (const message of queue) insertMail.run(peer, ...messageToRow(message))

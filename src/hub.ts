@@ -6,7 +6,12 @@
 
 import { randomUUID } from 'node:crypto'
 import {
+  ALL_ACK_STATUSES,
+  ALL_TASK_STATUSES,
   BROADCAST,
+  a2aState,
+  ackToTaskStatus,
+  decodeContent,
   encodeContent,
   HUB_PEER,
   KINDS,
@@ -41,8 +46,14 @@ interface Waiter {
   onAbort: () => void
   /** Optional sender filter: only messages from this peer match. */
   from?: string
-  /** Optional ack-ref filter: only `ack` messages whose `ref` matches. */
+  /** Optional `ref` filter: only messages answering this ref match — an `ack`
+   *  (the status beat) or a `chat` (an assignee handing the result back, which
+   *  is what agents/SKILL.md teaches). */
   ref?: string
+  /** With `ref`: only an `ack` carrying one of these statuses matches. */
+  statuses?: readonly AckStatus[]
+  /** With `ref`: only a TERMINAL ack matches (see {@link TERMINAL_TASK_STATUSES}). */
+  terminalOnly?: boolean
   /** Optional thread filter: only messages carrying this threadId match. */
   threadId?: string
   /** Hand the message out under a manual-ack lease instead of consuming it. */
@@ -179,6 +190,22 @@ const MAX_PROFILES = 512
  * long-running hub cannot grow the map without bound; pending tasks stay. */
 const MAX_TASKS = 1024
 
+/** Cap for ONE peer's dead letters. A message that keeps failing should not be
+ *  allowed to pile up copies, and a hub with a poison producer would otherwise
+ *  grow the list forever. The OLDEST entry is evicted (a revived dead letter is
+ *  the newest thing in the list), and the eviction is COUNTED — see deadLetter. */
+const MAX_DEAD_LETTERS = 200
+
+/** Cap for a task's ack timeline. The timeline is append-only and an assignee
+ *  that streams `working`/`progress` acks can grow it without bound — and it is
+ *  re-snapshotted into SQLite on every flush. Newest events win; among equals an
+ *  `applied: false` event is evicted first (it changed no ledger state). */
+const MAX_TASK_ACKS = 200
+
+/** Cap for a task's flat artifact list. Results are read as a tail ("what came
+ *  back"), so the newest entries are the ones worth keeping. */
+const MAX_TASK_ARTIFACTS = 50
+
 /** Largest delay `setTimeout` honors: the delay is a signed 32-bit int, and a
  * bigger value overflows to a ~1 ms timer (Node fires it immediately and only
  * warns). Longer waits are re-armed in segments — see scheduleTaskTimeout. */
@@ -312,6 +339,44 @@ export class AgentHub {
   noteEvent(kind: HubEventKind, input: { peer?: string; detail?: Record<string, unknown> } = {}): void {
     this.recordEvent(kind, input)
   }
+
+  /** Append one event to a task's ack timeline, keeping the timeline bounded
+   *  (see {@link MAX_TASK_ACKS}). */
+  private pushAckEvent(record: TaskRecord, event: TaskAckEvent): void {
+    record.acks.push(event)
+    this.trimAcks(record.acks)
+  }
+
+  /** Append one event to one assignee's timeline, with the SAME bound
+   *  ({@link MAX_TASK_ACKS}). A single assignee that keeps acking `working`
+   *  grows its own timeline without limit otherwise — and `exportTasks`
+   *  serializes the whole ledger on every flush. */
+  private pushAssigneeAck(assignee: AssigneeState, event: TaskAckEvent): void {
+    assignee.acks.push({ ...event })
+    this.trimAcks(assignee.acks)
+  }
+
+  /** Evict from one ack timeline until it fits {@link MAX_TASK_ACKS}.
+   *
+   *  Order, oldest first within each class:
+   *   1. a `system: true` event is protected to the very end. Those rows are the
+   *      DROP EVIDENCE (`noteTaskDeliveryDropped` writes `applied: false,
+   *      system: true`), and a long task acking `working` 200 times would
+   *      otherwise throw away "this delivery was lost" before a single chatty
+   *      status update — the one thing a reader must be able to find out.
+   *   2. then an `applied: false` ack: it recorded a rejection and moved no
+   *      ledger state.
+   *   3. then any non-system ack (the audited transitions a reader wants).
+   *   4. only if the timeline is STILL over the limit: a system row. */
+  private trimAcks(events: TaskAckEvent[]): void {
+    while (events.length > MAX_TASK_ACKS) {
+      let victim = events.findIndex(item => item.system !== true && item.applied !== true)
+      if (victim < 0) victim = events.findIndex(item => item.system !== true)
+      if (victim < 0) victim = 0
+      events.splice(victim, 1)
+    }
+  }
+
   private readonly waiters = new Map<string, Waiter[]>()
   private readonly historyRing: BridgeMessage[] = []
   /** Structured operational events, newest last. A ring, not a log: the hub is a
@@ -390,17 +455,17 @@ export class AgentHub {
         continue
       }
       if (now - parkedMs <= ttl) continue
-      const queue = this.queues.get(peerId) ?? []
-      this.queues.delete(peerId)
-      this.parkedAt.delete(peerId)
-      // A dropped TASK must not leave the ledger reading `pending` forever: the
-      // recipient is gone for good, and `bridge_tasks` has to be able to tell that
-      // apart from "still working on it". Reconcile BEFORE reporting the drop, so
-      // a reader reacting to the notice already sees the terminal state.
-      for (const message of queue) {
-        if (message.kind === 'task') this.failTaskForGoneAssignee(message.id, peerId, now, ttl)
-      }
-      const dropped = queue.length
+      // The whole mailbox goes, not just its queue: an in-flight lease or a dead
+      // letter left behind would be requeued under a peer that is neither
+      // registered nor parked any more, and no TTL sweep would ever see it again.
+      // A dropped TASK must not leave the ledger reading `pending` forever either:
+      // the recipient is gone for good, and `bridge_tasks` has to be able to tell
+      // that apart from "still working on it". Reconcile BEFORE reporting the
+      // drop, so a reader reacting to the notice already sees the terminal state.
+      const dropped = this.dropMailboxState(
+        peerId,
+        message => this.failTaskForGoneAssignee(message.id, peerId, now, ttl),
+      ).length
       // Only report when something was actually lost: an empty parked mailbox is
       // just bookkeeping, and calling back with 0 made the caller log "parked
       // mailbox ... : 0 message(s) dropped" and re-snapshot the store for nothing.
@@ -430,23 +495,149 @@ export class AgentHub {
       status: 'failed',
       note: `recipient '${peerId}' never came back: its parked mailbox expired after ${ttl}ms and the task was dropped with it`,
       ts: now,
-      messageId: `expired-${taskId}`,
+      messageId: syntheticEventId(taskId, 'expired'),
       applied: true,
       system: true,
     }
-    record.acks.push(event)
+    this.pushAckEvent(record, event)
     assignee.status = 'failed'
-    assignee.acks.push({ ...event })
+    this.pushAssigneeAck(assignee, event)
     record.status = aggregateTaskStatus(record.assignees)
     record.updatedAt = now
-    // The task can no longer time out: it is already terminal, and a later SLA
-    // firing would append a second, contradictory system event.
-    const timer = this.taskTimers.get(taskId)
-    if (timer !== undefined) {
-      clearTimeout(timer)
-      this.taskTimers.delete(taskId)
-    }
+    // One assignee failing is not the task failing: a fan-out whose other
+    // recipients are still working must keep its SLA backstop armed (the timer
+    // is cleared when the task goes terminal, and nothing else re-arms it).
+    this.realignTaskTimer(record)
     this.taskChanged(this.taskOf(taskId)!)
+    this.notifyTaskEnded(record, `recipient '${peerId}' never came back: its parked mailbox expired after ${ttl}ms and its copy of the task was dropped with it`)
+  }
+
+  /** Tell the SENDER of `record` that this delivery is over for good — the one
+   *  thing it has to act on (re-send the task, or abandon it).
+   *
+   *  Guarded by the same reachability precheck as {@link noteTaskDeliveryDropped}:
+   *  a sender that has itself left the hub has nobody to warn, and `route` would
+   *  throw on the drop path. Best effort by design — a terminal verdict is
+   *  already in the ledger whether or not the notice can be delivered. */
+  private notifyTaskEnded(record: TaskRecord, why: string): void {
+    if (!this.lastSeen.has(record.from) && !this.parkedAt.has(record.from)) return
+    this.route(HUB_PEER, record.from, 'notice', encodeContent({
+      message: `task ${record.id}: ${why}. That copy of the task can never be picked up or acked (task status: ${record.status}) — bridge_task can re-send it, or consider it abandoned.`,
+      level: 'warn',
+    }), undefined, record.threadId, undefined, true)
+  }
+
+  /** Reconcile the task ledger after a `task` message was dropped for `peerId`
+   *  because the PEER ITSELF is gone.
+   *
+   *  This is one of exactly TWO drops that write a terminal state, and both mean
+   *  the same thing — the recipient can never recover the task: this one (the
+   *  peer left the hub, or a manager kicked it) and
+   *  {@link failTaskForGoneAssignee} (its parked mailbox expired after
+   *  `parkedTtlMs`). Terminal is right there on purpose: the assignee no longer
+   *  exists, so there is no path back — no revival, no later ack — and a
+   *  `pending` row would leave the sender waiting forever. Every other drop
+   *  reason (`expired`, `rate`, `overflow`, dead-letter) stays NON-terminal
+   *  instead (see {@link noteTaskDeliveryDropped}), because:
+   *   - a dead letter can be revived with `bridge_nack`, and a task already
+   *     marked `failed` would then refuse the revived assignee's `done`
+   *     (`nextTaskStatus('failed', 'done')` is null → `applied: false`), so the
+   *     sender would see a failure the hub itself declared unfixable;
+   *   - `overflow` and `rate` are driven by THIRD-PARTY traffic — any peer
+   *     sending ~maxQueue messages can push a task out of someone else's mailbox
+   *     — so a terminal write there is a veto any peer can exercise over a task
+   *     it was never assigned.
+   *
+   *  Like the parked-mail reconcile, the failure is a SYSTEM event (nobody acked
+   *  anything), only this assignee's row is marked — a fan-out task's other
+   *  recipients keep their state — and the aggregate is recomputed the way every
+   *  other transition does it. `reason` is the drop kind the caller counted, so
+   *  the note and the `mailbox_dropped` event can be read together. */
+  private failTaskForDroppedMessage(message: BridgeMessage, peerId: string, reason: string, now: number): void {
+    const record = this.taskLedger.get(message.id)
+    if (record === undefined) return
+    if (TERMINAL_TASK_STATUSES.includes(record.status)) return
+    const assignee = record.assignees.find(a => a.peerId === peerId)
+    if (assignee === undefined || TERMINAL_TASK_STATUSES.includes(assignee.status)) return
+    const event: TaskAckEvent = {
+      from: peerId,
+      status: 'failed',
+      note: `message dropped for '${peerId}' (${reason}): the task will never be handed to it and cannot be acked`,
+      ts: now,
+      messageId: syntheticEventId(record.id, reason),
+      applied: true,
+      system: true,
+    }
+    this.pushAckEvent(record, event)
+    assignee.status = 'failed'
+    // A booking made when the message reached the mailbox is undone here: the
+    // task was squeezed out before anyone read it, and a `deliveredMs` would
+    // report a delivery that no longer exists.
+    delete assignee.deliveredMs
+    this.pushAssigneeAck(assignee, event)
+    record.status = aggregateTaskStatus(record.assignees)
+    record.updatedAt = now
+    // Only a task that really ended loses its timer. For a fan-out task the
+    // aggregate can still be open (another recipient is working), and that task
+    // must keep its deadline — clearing it here left a task that could never
+    // time out, i.e. permanently non-terminal.
+    this.realignTaskTimer(record)
+    this.taskChanged(this.taskOf(record.id)!)
+    this.notifyTaskEnded(record, reason === 'dead-letter-evicted'
+      ? `its last copy for '${peerId}' was evicted from the dead letters (${reason}) and can never be revived`
+      : `'${peerId}' left the hub (${reason}) and its queued copy of the task went with it`)
+  }
+
+  /** Record that one delivery of a task was dropped, WITHOUT closing the task.
+   *
+   *  Two things happen and nothing else (`expired` / `rate` / `overflow` /
+   *  dead-letter drops all land here; `unregister` keeps the terminal reconcile
+   *  above):
+   *   1. the ledger gets a `system: true, applied: false` event naming the drop —
+   *      `applied: false` is the whole point, it says "recorded, state untouched";
+   *   2. the task's SENDER gets a `notice` from the hub: it is the only party
+   *      that can react (re-send, or revive a dead letter with `bridge_nack`).
+   *      ONE notice per task, not per dropped copy — see `dropNotified`.
+   *
+   *  See {@link failTaskForDroppedMessage} for why a terminal write here would
+   *  be wrong. */
+  private noteTaskDeliveryDropped(message: BridgeMessage, peerId: string, reason: string, now: number): void {
+    const record = this.taskLedger.get(message.id)
+    if (record === undefined) return
+    this.pushAckEvent(record, {
+      from: peerId,
+      status: 'failed',
+      note: `a delivery of this task to '${peerId}' was dropped (${reason}); the task itself is unchanged and still waiting`,
+      ts: now,
+      messageId: syntheticEventId(record.id, reason),
+      applied: false,
+      system: true,
+    })
+    // A finished task has nobody left to tell, and the notice would claim it is
+    // "still waiting". The event above is recorded either way.
+    if (TERMINAL_TASK_STATUSES.includes(record.status)) return
+    // ONE notice per task, however many of its copies were dropped: a broadcast
+    // task evicted at K recipients used to hand the sender K notices, and those
+    // notices queue in — and push out — the sender's own mailbox. The ledger
+    // above keeps every drop; only the warning is deduplicated.
+    if (record.dropNotified !== undefined) return
+    // The sender may have left the hub since it delegated the task; `route`
+    // refuses an unreachable recipient, and there is nobody to warn in that case.
+    if (!this.lastSeen.has(record.from) && !this.parkedAt.has(record.from)) return
+    record.dropNotified = now
+    // The hint has to be an action the RECIPIENT of this notice (the task's
+    // sender) can actually take. `bridge_nack` only ever touches the caller's OWN
+    // leases and dead letters, so pointing a sender at it was a dead end: the
+    // dead-lettered copy is filed under the ASSIGNEE, and the sender's `nack`
+    // answers `requeued: 0`. Name the peer that owns the copy and offer the
+    // sender its own way out.
+    const hint = reason === 'dead-letter'
+      ? ` — the copy is parked in the dead letters of '${peerId}', so only that peer can revive it (bridge_nack { ids: ["${message.id}"] }); you can also re-issue the task`
+      : ' — bridge_task_status shows the task, bridge_notice or bridge_task can re-send it'
+    this.route(HUB_PEER, record.from, 'notice', encodeContent({
+      message: `task ${record.id}: a delivery of it to '${peerId}' was dropped (${reason}). The task is still open${hint}.`,
+      level: 'warn',
+    }), undefined, record.threadId, undefined, true)
   }
 
   /** All registered peer ids, insertion order. */
@@ -456,9 +647,34 @@ export class AgentHub {
 
   /** Register a peer; throws if the id is already taken. Client metadata
    * (when provided) refreshes the profile — with same-name sessions sharing a
-   * peer, the freshest connect wins, which self-heals stale metadata. */
-  register(peerId: string, client?: { name?: string; version?: string }): void {
+   * peer, the freshest connect wins, which self-heals stale metadata.
+   *
+   * `reclaim` is the caller asserting "this id is my own identity coming back":
+   * a parked peer still owns its mailbox, and only the identity may unwrap it
+   * into use again (see {@link ownsMailbox}). Every caller has to say so
+   * explicitly, so a new path cannot inherit someone else's mail by accident. */
+  register(peerId: string, client?: { name?: string; version?: string }, options?: { reclaim?: boolean }): void {
+    // The reserved ids are refused HERE, not only in the tool layer: this is the
+    // one place every registration path goes through (auto-registration, an
+    // explicit bridge_register, a restore), and a peer called `all` or `hub`
+    // would impersonate the broadcast address or the hub's own notices.
+    if (peerId === BROADCAST) throw new Error(`reserved peer id: ${peerId} (it is the broadcast address)`)
+    if (peerId === HUB_PEER) throw new Error(`reserved peer id: ${peerId} (the hub uses it for its own notices)`)
+    // The same shared `to` namespace in the other direction: a peer registered
+    // under a group's id would be shadowed by that group in dispatch(), so
+    // everything addressed to it became a fan-out. Symmetric to createGroup().
+    if (this.groups.has(peerId)) {
+      throw new Error(`peer id '${peerId}' collides with a group: peer and group ids share one 'to' namespace, and the group would take every message addressed to it`)
+    }
     if (this.lastSeen.has(peerId)) throw new Error(`peer already registered: ${peerId}`)
+    // Parking is not a release of the identity. A parked id keeps its mailbox
+    // (`queues` is untouched) and its profile, so registering under it without
+    // being its identity is the same takeover `renamePeer` refuses: the new
+    // owner inherits mail addressed to someone else, and that owner's return
+    // then fails with `peer already registered` above.
+    if (!(options?.reclaim === true) && this.ownsMailbox(peerId)) {
+      throw new Error(`peer id '${peerId}' is parked: it still owns a mailbox for the peer that went quiet (only that identity can reclaim it; a manager can release it with bridge_unregister { peer })`)
+    }
     this.lastSeen.set(peerId, Date.now())
     // A returning peer is no longer parked: its mailbox (if any) is deliverable
     // again and must not be swept by the TTL.
@@ -496,8 +712,13 @@ export class AgentHub {
       this.recordEvent('peer_parked', { peer: peerId, detail: { queued: queue.length } })
     } else {
       this.recordEvent('peer_left', { peer: peerId, detail: { queued: queue.length } })
-      this.queues.delete(peerId)
-      this.parkedAt.delete(peerId)
+      // The mail goes with the peer: a task inside it can never be picked up now,
+      // so leaving the hub also settles the ledger instead of leaving it pending.
+      // This is the one drop that writes a terminal `failed` — the assignee is
+      // gone, so there is no revival to be blocked by it (see
+      // failTaskForDroppedMessage).
+      const now = Date.now()
+      this.dropMailboxState(peerId, message => this.failTaskForDroppedMessage(message, peerId, 'unregistered', now))
     }
     for (const waiter of this.waiters.get(peerId) ?? []) {
       clearTimeout(waiter.timer)
@@ -506,6 +727,37 @@ export class AgentHub {
     this.waiters.delete(peerId)
     this.lastSeen.delete(peerId)
     this.options.onPeersChanged?.(this.peers())
+  }
+
+  /** Forget EVERYTHING a mailbox owns — queue, in-flight leases, dead letters
+   *  and the per-message attempt counters — in one step, calling `reconcile` on
+   *  the tasks found in any of them.
+   *
+   *  The pieces have to go together. Anything left behind does not just leak: a
+   *  lease that outlives its mailbox is re-queued by the next reap under a peer
+   *  that has neither a registration nor a `parkedAt`, so no take and no TTL
+   *  sweep ever sees it and the message (and its task) stays pending forever.
+   *  Both callers — an explicit `unregister` (the peer left) and
+   *  `expireParkedMailboxes` (the parked TTL ran out) — mean the same thing
+   *  here, and only the ledger verdict differs, which is why that is the
+   *  parameter. Returns every message that went with the mailbox. */
+  private dropMailboxState(peerId: string, reconcile: (message: BridgeMessage) => void): BridgeMessage[] {
+    const queue = this.queues.get(peerId) ?? []
+    const inFlight = (this.leases.get(peerId) ?? []).map(lease => lease.message)
+    const deadLettered = this.deadLetters.get(peerId) ?? []
+    this.leases.delete(peerId)
+    this.deadLetters.delete(peerId)
+    // Prefix scan is exact: a lease key is `<peerId>\u0000<messageId>`.
+    for (const key of [...this.leaseAttempts.keys()]) {
+      if (key.startsWith(`${peerId}\u0000`)) this.leaseAttempts.delete(key)
+    }
+    this.queues.delete(peerId)
+    this.parkedAt.delete(peerId)
+    const all = [...queue, ...inFlight, ...deadLettered]
+    for (const message of all) {
+      if (message.kind === 'task') reconcile(message)
+    }
+    return all
   }
 
   /** Identity metadata for `peerId`, if the hub ever saw it. */
@@ -575,7 +827,7 @@ export class AgentHub {
       if (typeof raw !== 'object' || raw === null) continue
       const candidate = raw as Record<string, unknown>
       const id = candidate.id
-      if (typeof id !== 'string' || !PEER_ID_PATTERN.test(id) || id === BROADCAST) continue
+      if (typeof id !== 'string' || !PEER_ID_PATTERN.test(id) || id === BROADCAST || id === HUB_PEER) continue
       if (this.profiles.has(id)) continue
       const profile: PeerProfile = {
         id,
@@ -620,6 +872,25 @@ export class AgentHub {
     if (newId === HUB_PEER) throw new Error(`reserved peer id: ${newId}`)
     if (!PEER_ID_PATTERN.test(newId)) throw new Error(`invalid peerId: ${newId} (expected [A-Za-z0-9._:-]{1,64})`)
     if (this.lastSeen.has(newId)) throw new Error(`peer already registered: ${newId}`)
+    // Peer and group ids share ONE `to` namespace, so a peer re-keyed onto a
+    // group's id is shadowed by that group in dispatch() — everything addressed
+    // to it became a fan-out — and `bridge_history {}` / `bridge_tasks` compare
+    // the RAW `to` against the caller's id, so a peer sitting on a group id
+    // reads that whole group's traffic with no manager grant. This is the last
+    // place a peer id is written (bridge_rename and the lossless self-rename via
+    // bridge_register both land here), so the check belongs here too, not only
+    // in register() and createGroup().
+    if (this.groups.has(newId)) {
+      throw new Error(`peer id '${newId}' collides with a group: peer and group ids share one 'to' namespace, and the group would take every message addressed to it`)
+    }
+    // Same reason, other state: a parked id is an identity that is out of the
+    // registry but still holding its mailbox and profile. A rename onto it would
+    // inherit both — and merge the victim's alias/card onto the renaming peer —
+    // while the victim's own return hits `peer already registered`. Nothing may
+    // take a parked id by rename; its owner reclaims it through register().
+    if (this.ownsMailbox(newId)) {
+      throw new Error(`peer id '${newId}' is parked: it still owns a mailbox and will be delivered to when its owner returns (its owner takes it back with bridge_register { peerId }; a manager can release it with bridge_unregister { peer })`)
+    }
     const queue = this.queues.get(oldId)
     const waiters = this.waiters.get(oldId)
     const seen = this.lastSeen.get(oldId) ?? Date.now()
@@ -642,6 +913,33 @@ export class AgentHub {
     this.profiles.delete(oldId)
     if (queue !== undefined) this.queues.set(newId, queue)
     if (waiters !== undefined) this.waiters.set(newId, waiters)
+    // The mailbox's other two halves are STATE, not counters, and they belong to
+    // the same peer as the queue. Left on the old key they were the exact silent
+    // loss `dropMailboxState` warns about: after `bridge_wait { ack: 'manual' }`
+    // + a self-rename, `bridge_commit { ids }` found no lease (silently
+    // `committed: 0`), the next take requeued the message under an id with
+    // neither a registration nor a `parkedAt` (so no take and no TTL sweep ever
+    // saw it again), and the ledger row this method just rewrote onto the new id
+    // could never leave `pending`.
+    const leases = this.leases.get(oldId)
+    const deadLetters = this.deadLetters.get(oldId)
+    this.leases.delete(oldId)
+    this.deadLetters.delete(oldId)
+    if (leases !== undefined) this.leases.set(newId, leases)
+    if (deadLetters !== undefined) this.deadLetters.set(newId, deadLetters)
+    // The attempt counter is keyed `<peerId>\u0000<messageId>` and describes a
+    // message leased to THIS peer, so it follows the same re-key (the separator
+    // comes from leaseKey, never from a hand-written literal).
+    const oldLeasePrefix = AgentHub.leaseKey(oldId, '')
+    for (const key of [...this.leaseAttempts.keys()]) {
+      if (!key.startsWith(oldLeasePrefix)) continue
+      const attempts = this.leaseAttempts.get(key)
+      this.leaseAttempts.delete(key)
+      if (attempts !== undefined) this.leaseAttempts.set(AgentHub.leaseKey(newId, key.slice(oldLeasePrefix.length)), attempts)
+    }
+    // `drops` / `traffic` / `buckets` deliberately do NOT move: operational
+    // counters are per id and restart on rename (the roster row for the new id
+    // starts clean, and the rate bucket does not carry a stranger's debt).
     this.lastSeen.set(newId, seen)
     if (profile !== undefined) {
       const merged: PeerProfile = {
@@ -668,7 +966,97 @@ export class AgentHub {
       if (message.from === oldId) message.from = newId
       if (message.to === oldId) message.to = newId
     }
+    // The ledger is identity too, and since ack authorization is "is this peer an
+    // assignee?", a renamed peer whose assignee row still carried the old id
+    // could no longer ack the task it was handed. Same rewrite as history, for
+    // the same reason: routing and attribution follow the new id.
+    for (const record of this.taskLedger.values()) {
+      if (record.from === oldId) record.from = newId
+      // `from` is always a peer, `to` is not: peer ids and group ids share one
+      // namespace, so `to === oldId` may name a GROUP that happens to be called
+      // like the renaming peer. Rewriting it would re-point a group task at a
+      // peer, and every group-based check (listTasks' membership test,
+      // bridge_task_status' group-member read) would silently stop matching.
+      if (record.to === oldId && !this.groups.has(oldId)) record.to = newId
+      for (const event of record.acks) if (event.from === oldId) event.from = newId
+      for (const assignee of record.assignees) {
+        if (assignee.peerId === oldId) assignee.peerId = newId
+        for (const event of assignee.acks) if (event.from === oldId) event.from = newId
+      }
+      this.foldDuplicateAssignees(record)
+    }
+    // Group MEMBERSHIP is identity too. Leaving the old id in `members` locked
+    // the peer out of every group it belonged to (the new id was not a member),
+    // while the old id — now nobody — kept its seat: `bridge_group_send` from the
+    // renamed peer was refused, and a group task still resolved to a ghost. The
+    // dedupe matters because a group could legitimately have held both ids.
+    let groupsChanged = false
+    for (const group of this.groups.values()) {
+      if (!group.members.includes(oldId)) continue
+      group.members = [...new Set(group.members.map(member => (member === oldId ? newId : member)))]
+      groupsChanged = true
+    }
+    // Membership is persisted state, so the roster edit has to reach the store.
+    if (groupsChanged) this.options.onGroupsChanged?.()
     this.options.onPeersChanged?.(this.peers())
+  }
+
+  /** Collapse assignee rows that ended up sharing a `peerId` (a rename onto an
+   *  id the task already had a row for).
+   *
+   *  Duplicate rows break the ledger: `applyAckToLedger` finds the FIRST row for
+   *  the acking peer, so the second one never advances and the aggregate can sit
+   *  on a status no row supports. The merge prefers the row that is still open
+   *  (a rename must not close a task), keeps both timelines, and keeps the
+   *  EARLIEST delivery booking. */
+  private foldDuplicateAssignees(record: TaskRecord): void {
+    const seen = new Set<string>()
+    let duplicated = false
+    for (const assignee of record.assignees) {
+      if (seen.has(assignee.peerId)) {
+        duplicated = true
+        break
+      }
+      seen.add(assignee.peerId)
+    }
+    if (!duplicated) return
+    const wasTerminal = TERMINAL_TASK_STATUSES.includes(record.status)
+    const byPeer = new Map<string, AssigneeState>()
+    const folded: AssigneeState[] = []
+    for (const assignee of record.assignees) {
+      const first = byPeer.get(assignee.peerId)
+      if (first === undefined) {
+        const copy: AssigneeState = { ...assignee, acks: [...assignee.acks] }
+        byPeer.set(assignee.peerId, copy)
+        folded.push(copy)
+        continue
+      }
+      // The more recent row wins UNLESS it is terminal and the earlier one is
+      // still open — then the open one survives, so a merge cannot close work
+      // that is still running.
+      const firstOpen = !TERMINAL_TASK_STATUSES.includes(first.status)
+      if (!(firstOpen && TERMINAL_TASK_STATUSES.includes(assignee.status))) {
+        first.status = assignee.status
+      }
+      first.acks.push(...assignee.acks)
+      // Two bounded timelines make one over-long one; the merge keeps the same
+      // bound as every other append.
+      this.trimAcks(first.acks)
+      if (assignee.deliveredMs !== undefined
+        && (first.deliveredMs === undefined || assignee.deliveredMs < first.deliveredMs)) {
+        first.deliveredMs = assignee.deliveredMs
+      }
+    }
+    record.assignees = folded
+    record.status = aggregateTaskStatus(folded)
+    // A fold can re-open a task (one row still running, the other terminal), but
+    // the SLA timer was cleared when the task went terminal. Without re-arming,
+    // a task that is non-terminal again has lost its timeout backstop for good:
+    // `deadlineAt` stays authoritative and nothing else calls
+    // scheduleTaskTimeout outside create/import.
+    if (wasTerminal && record.deadlineAt !== undefined && !TERMINAL_TASK_STATUSES.includes(record.status)) {
+      this.scheduleTaskTimeout(record)
+    }
   }
 
   /** Keep the profile map bounded: drop the oldest profiles of peers that are
@@ -694,6 +1082,14 @@ export class AgentHub {
   /** Is the peer currently registered? */
   has(peerId: string): boolean {
     return this.lastSeen.has(peerId)
+  }
+
+  /** Does `peerId` still own state it never released — a parked record or a
+   *  queued mailbox? This is identity, not liveness: `has()` is false for such a
+   *  peer, yet the id is still taken. `register({ reclaim })` and `renamePeer`
+   *  both key off this, so "taken" cannot drift between the two write points. */
+  ownsMailbox(peerId: string): boolean {
+    return this.parkedAt.has(peerId) || this.queues.has(peerId)
   }
 
   /** Is the peer parked — gone from the live registry through idle GC, but still
@@ -737,7 +1133,14 @@ export class AgentHub {
 
   /** Send an acknowledgement back to the sender of `ref`. Updates the task
    * ledger when `ref` is a known task (looked up in the ledger first, so acks
-   * survive history-ring eviction); chat/notice refs still route via history. */
+   * survive history-ring eviction); chat/notice refs still route via history.
+   *
+   * Only an ASSIGNEE may ack a task. Everyone else could otherwise close someone
+   * else's task — and land their own artifacts in it — just by learning the
+   * message id. A ref that is not a task carries no ledger row to protect, so an
+   * ack for chat/notice keeps routing without any permission check. The single
+   * place this is decided is here: `bridge_ack` adds no rule of its own, so the
+   * direct API (`ackForRunner`, an assignee by construction) is unaffected. */
   sendAck(from: string, ref: string, ack: { status: AckStatus; note?: string; progress?: number; artifacts?: TaskArtifact[] }): BridgeMessage {
     const task = this.taskLedger.get(ref)
     let target: string
@@ -746,6 +1149,13 @@ export class AgentHub {
     // the outcome of the task it is tracking.
     let threadId: string | undefined
     if (task !== undefined) {
+      if (!task.assignees.some(assignee => assignee.peerId === from)) {
+        // Deliberately does NOT list the assignees: the task id alone is enough
+        // to reach this error (bridge_events hands out task ids), and echoing the
+        // roster back would turn a refusal into an unauthenticated
+        // "task id → assignee list" lookup.
+        throw new Error('only an assignee of this task can ack it')
+      }
       target = task.from
       threadId = task.threadId
     } else {
@@ -812,9 +1222,9 @@ export class AgentHub {
         messageId: message.id,
         applied: true,
       }
-      record.acks.push(event)
+      this.pushAckEvent(record, event)
       assignee.status = 'canceled'
-      assignee.acks.push({ ...event })
+      this.pushAssigneeAck(assignee, event)
       last = message
     }
     if (last === undefined) throw new Error(`task ${ref} has no assignee left to cancel`)
@@ -844,10 +1254,10 @@ export class AgentHub {
     for (const assignee of targets) {
       const message = this.route(from, assignee.peerId, 'ack', JSON.stringify(ack), ref, record.threadId)
       const event: TaskAckEvent = { from, status: 'working', note: input, ts: message.ts, messageId: message.id, applied: true }
-      record.acks.push(event)
+      this.pushAckEvent(record, event)
       if (assignee.status === 'input-required') {
         assignee.status = 'working'
-        assignee.acks.push({ ...event })
+        this.pushAssigneeAck(assignee, event)
       }
       last = message
     }
@@ -940,11 +1350,11 @@ export class AgentHub {
       applied: true,
       system: true,
     }
-    record.acks.push(event)
+    this.pushAckEvent(record, event)
     for (const assignee of record.assignees) {
       if (!TERMINAL_TASK_STATUSES.includes(assignee.status)) {
         assignee.status = 'timeout'
-        assignee.acks.push({ ...event })
+        this.pushAssigneeAck(assignee, event)
       }
     }
     record.status = 'timeout'
@@ -959,6 +1369,26 @@ export class AgentHub {
       clearTimeout(timer)
       this.taskTimers.delete(taskId)
     }
+  }
+
+  /** Bring the SLA timer back in line with the AGGREGATE status after a
+   *  per-assignee write ({@link failTaskForGoneAssignee},
+   *  {@link failTaskForDroppedMessage}).
+   *
+   *  A terminal task must not fire a second, contradictory timeout. A task that
+   *  is still open — a fan-out with one recipient lost and another working —
+   *  must keep its deadline: clearing the timer there left a task that stays
+   *  non-terminal forever, because `deadlineAt` is only read by the timer. */
+  private realignTaskTimer(record: TaskRecord): void {
+    if (TERMINAL_TASK_STATUSES.includes(record.status)) {
+      this.clearTaskTimer(record.id)
+      return
+    }
+    if (record.deadlineAt === undefined) return
+    // Already armed (this path never cleared it): do not stack a second timer on
+    // the first — `taskTimers` holds one per task and the older one would leak.
+    if (this.taskTimers.has(record.id)) return
+    this.scheduleTaskTimeout(record)
   }
 
   /** Note that `target` has taken delivery of a task (waiter handoff / queue). */
@@ -986,15 +1416,15 @@ export class AgentHub {
   ): void {
     const record = this.taskLedger.get(ref)
     if (record === undefined) return
-    const next = nextTaskStatus(record.status, ack.status)
-    // For multi-assignee tasks the transition is judged per assignee; the
-    // aggregate status is recomputed afterwards. Single-target tasks use the
-    // aggregate (== the one assignee) as the gate.
+    // The transition is judged per assignee, and the task's own status is derived
+    // from those rows afterwards — one rule for 1:1 and fan-out tasks alike.
     const assignee = record.assignees.find(a => a.peerId === from)
     const assigneeNext = assignee === undefined ? null : nextTaskStatus(assignee.status, ack.status)
-    const applied = record.assignees.length <= 1
-      ? next !== null
-      : assigneeNext !== null
+    // `applied` means "this ack moved the ledger", and only a row that belongs to
+    // the acking peer can move. Judging a 1:1 task by its single status field let
+    // an ack from a peer with no row of its own count as applied — which closed
+    // the task and merged that peer's artifacts into its results.
+    const applied = assignee !== undefined && assigneeNext !== null
 
     const event: TaskAckEvent = {
       from,
@@ -1008,25 +1438,29 @@ export class AgentHub {
       messageId: message.id,
       applied,
     }
-    record.acks.push(event)
+    this.pushAckEvent(record, event)
     // The flat list is what a consumer reads (`bridge_task_status`); the timeline
     // keeps the per-event grouping. Only APPLIED events contribute, so a rejected
     // or post-terminal ack cannot smuggle output into the task's results.
     if (applied && event.artifacts !== undefined) {
-      record.artifacts = [...(record.artifacts ?? []), ...event.artifacts]
+      const merged = [...(record.artifacts ?? []), ...event.artifacts]
+      // Newest wins: an assignee acking results in a loop would otherwise grow
+      // the ledger (and its SQLite snapshot) without bound.
+      record.artifacts = merged.length > MAX_TASK_ARTIFACTS ? merged.slice(-MAX_TASK_ARTIFACTS) : merged
     }
 
     if (assignee !== undefined && assigneeNext !== null) {
       assignee.status = assigneeNext
-      assignee.acks.push({ ...event })
+      this.pushAssigneeAck(assignee, event)
     }
 
-    if (record.assignees.length <= 1) {
-      if (next !== null) record.status = next
-    } else {
-      record.status = aggregateTaskStatus(record.assignees)
-    }
-    record.updatedAt = message.ts
+    // Always re-derived, never taken from the ack: an ack that was not applied
+    // moves no status, and for a 1:1 task the aggregate IS the single row, so the
+    // two can never disagree.
+    if (record.assignees.length > 0) record.status = aggregateTaskStatus(record.assignees)
+    // Only a real transition touches `updatedAt`: an unapplied ack must not
+    // reorder the task list or reset its LRU position.
+    if (applied) record.updatedAt = message.ts
     if (TERMINAL_TASK_STATUSES.includes(record.status)) this.clearTaskTimer(record.id)
     this.taskChanged(this.taskOf(record.id)!)
   }
@@ -1051,7 +1485,10 @@ export class AgentHub {
     const record = this.taskLedger.get(ref)
     if (record === undefined) return undefined
     return {
-      ...record,
+      // `dropNotified` is INTERNAL bookkeeping (see protocol.ts). A shallow
+      // spread used to hand it to bridge_task_status / bridge_tasks, which made
+      // an implementation detail part of the published task shape.
+      ...omit(record, 'dropNotified'),
       acks: record.acks.map(a => ({ ...a })),
       assignees: record.assignees.map(a => ({ ...a, acks: a.acks.map(e => ({ ...e })) })),
     }
@@ -1092,6 +1529,37 @@ export class AgentHub {
     return [...this.taskLedger.values()].map(record => this.taskOf(record.id)!).filter(Boolean)
   }
 
+  /** Accept a peer id read from a persisted snapshot, or `undefined` when the
+   *  row that carries it is unusable. A state file is external input and the
+   *  ledger is an AUTHORIZATION source (ack rights, `bridge_task_status`,
+   *  `bridge_task_input`), so a row attributed to `hub`, to the broadcast
+   *  address, to a malformed id or to a group id would hand that identity rights
+   *  over someone else's task. Every place a snapshot names a peer goes through
+   *  here — the task sender, an ack author, an assignee — so the four fields
+   *  cannot drift apart. */
+  private importPeerRef(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined
+    if (!PEER_ID_PATTERN.test(value) || value === BROADCAST || value === HUB_PEER) return undefined
+    if (this.groups.has(value)) return undefined
+    return value
+  }
+
+  /** Accept an ACK AUTHOR read from a persisted snapshot.
+   *
+   *  Deliberately weaker than {@link importPeerRef} in exactly one direction: an
+   *  ack row authorizes nothing (the ledger's authorization sources are the
+   *  sender and the assignee rows, both checked strictly), while the hub itself
+   *  authors terminal markers under the task's RECIPIENT address — `from: "hub"`
+   *  for the "restored as unattributable" marker and `from: record.to` (a group
+   *  id, or `all`) for a fan-out timeout. Refusing those ids here would delete the
+   *  evidence that a task timed out, and the unattributable marker would be
+   *  re-appended on every boot because its idempotency test looks for the stored
+   *  `import-<id>` row. Malformed ids are still refused. */
+  private importAckRef(value: unknown): string | undefined {
+    if (typeof value !== 'string' || !PEER_ID_PATTERN.test(value)) return undefined
+    return value
+  }
+
   /** Restore the task ledger at boot (and re-arm SLA timers). */
   importTasks(tasks: unknown): number {
     if (!Array.isArray(tasks)) return 0
@@ -1100,14 +1568,25 @@ export class AgentHub {
       if (typeof raw !== 'object' || raw === null) continue
       const t = raw as Record<string, unknown>
       if (typeof t.id !== 'string' || typeof t.from !== 'string' || typeof t.to !== 'string' || typeof t.prompt !== 'string') continue
-      if (typeof t.status !== 'string' || !(TERMINAL_TASK_STATUSES as readonly string[]).includes(t.status) && t.status !== 'pending' && t.status !== 'accepted' && t.status !== 'working') continue
+      if (typeof t.status !== 'string' || !(ALL_TASK_STATUSES as readonly string[]).includes(t.status)) continue
+      // `from` is a peer by definition and the ledger is an authorization source
+      // (`bridge_task_status` / `bridge_task_input` / the manager-gated list all
+      // compare against it), so the SAME namespace rules as a live registration
+      // apply to a restored row: a state file is external input, and a task whose
+      // sender is `hub`, `all` or a group id would hand that identity rights over
+      // someone else's task. Skipped, like every other unusable persisted row.
+      const from = this.importPeerRef(t.from)
+      if (from === undefined) continue
       const acks: TaskAckEvent[] = Array.isArray(t.acks)
         ? t.acks.flatMap(rawAck => {
             if (typeof rawAck !== 'object' || rawAck === null) return []
             const a = rawAck as Record<string, unknown>
-            if (typeof a.from !== 'string' || typeof a.status !== 'string' || typeof a.ts !== 'number' || typeof a.messageId !== 'string') return []
+            const ackFrom = this.importAckRef(a.from)
+            if (ackFrom === undefined || typeof a.status !== 'string'
+              || !(ALL_ACK_STATUSES as readonly string[]).includes(a.status)
+              || typeof a.ts !== 'number' || typeof a.messageId !== 'string') return []
             return [{
-              from: a.from,
+              from: ackFrom,
               status: a.status as AckStatus,
               ...(typeof a.note === 'string' ? { note: a.note } : {}),
               ...(typeof a.progress === 'number' ? { progress: a.progress } : {}),
@@ -1118,21 +1597,25 @@ export class AgentHub {
             }]
           })
         : []
-      const assignees: AssigneeState[] = Array.isArray(t.assignees) && t.assignees.length > 0
+      const storedAssignees: AssigneeState[] = Array.isArray(t.assignees)
         ? t.assignees.flatMap(rawA => {
             if (typeof rawA !== 'object' || rawA === null) return []
             const a = rawA as Record<string, unknown>
-            if (typeof a.peerId !== 'string' || typeof a.status !== 'string') return []
+            const assigneeId = this.importPeerRef(a.peerId)
+            if (assigneeId === undefined || typeof a.status !== 'string' || !(ALL_TASK_STATUSES as readonly string[]).includes(a.status)) return []
             return [{
-              peerId: a.peerId,
+              peerId: assigneeId,
               status: a.status as TaskStatus,
               ...(typeof a.deliveredMs === 'number' ? { deliveredMs: a.deliveredMs } : {}),
               acks: Array.isArray(a.acks) ? a.acks.flatMap(rawE => {
                 if (typeof rawE !== 'object' || rawE === null) return []
                 const e = rawE as Record<string, unknown>
-                if (typeof e.from !== 'string' || typeof e.status !== 'string' || typeof e.ts !== 'number' || typeof e.messageId !== 'string') return []
+                const eventFrom = this.importAckRef(e.from)
+                if (eventFrom === undefined || typeof e.status !== 'string'
+                  || !(ALL_ACK_STATUSES as readonly string[]).includes(e.status)
+                  || typeof e.ts !== 'number' || typeof e.messageId !== 'string') return []
                 return [{
-                  from: e.from,
+                  from: eventFrom,
                   status: e.status as AckStatus,
                   ...(typeof e.note === 'string' ? { note: e.note } : {}),
                   ts: e.ts,
@@ -1142,10 +1625,25 @@ export class AgentHub {
               }) : [],
             }]
           })
-        : [{ peerId: t.to, status: t.status as TaskStatus, acks: [] }]
+        : []
+      // A row synthesized from `t.to` is only a real assignee when `to` names a
+      // PEER. For a broadcast task it is the broadcast address and for a group
+      // task it is the group id — either way not an identity, and since ack
+      // authorization is "is this peer an assignee?", a fabricated row would make
+      // the record un-ackable for every real peer (its ack would be refused) and
+      // freeze the task in `pending` forever. Such a record cannot be attributed
+      // at all, so it is restored as failed with a system note instead of being
+      // left hanging.
+      const unattributable = storedAssignees.length === 0
+        && (t.to === BROADCAST || this.groups.has(t.to) || !PEER_ID_PATTERN.test(t.to))
+      const assignees: AssigneeState[] = storedAssignees.length > 0
+        ? storedAssignees
+        : unattributable
+          ? []
+          : [{ peerId: t.to, status: t.status as TaskStatus, acks: [] }]
       const record: TaskRecord = {
         id: t.id,
-        from: t.from,
+        from,
         to: t.to,
         prompt: t.prompt,
         ...(typeof t.context === 'string' ? { context: t.context } : {}),
@@ -1159,6 +1657,29 @@ export class AgentHub {
         createdAt: typeof t.createdAt === 'number' ? t.createdAt : Date.now(),
         updatedAt: typeof t.updatedAt === 'number' ? t.updatedAt : Date.now(),
       }
+      if (unattributable) {
+        record.status = 'failed'
+        // Idempotent: this branch runs on EVERY boot for the same stored record,
+        // so an unconditional append grew the timeline by one event per restart.
+        // The stored rows are the record of what already happened; re-announcing
+        // it adds nothing a reader wants.
+        if (!record.acks.some(event => event.messageId === `import-${record.id}`)) {
+          this.pushAckEvent(record, {
+            from: HUB_PEER,
+            status: 'failed',
+            note: `restored as failed: the stored record has no assignee row and its recipient '${t.to}' is not a peer id, so the task cannot be attributed to anyone and can never be acked`,
+            ts: record.updatedAt,
+            messageId: `import-${record.id}`,
+            applied: true,
+            system: true,
+          })
+        }
+      }
+      // The stored status can contradict the stored assignee rows (a crash
+      // between the two writes, or a version that judged a 1:1 task by one field
+      // only). In memory the aggregate is always the authority, so restore to it
+      // rather than trusting a status the rows do not support.
+      if (assignees.length > 0) record.status = aggregateTaskStatus(assignees)
       this.taskLedger.set(record.id, record)
       this.scheduleTaskTimeout(record)
       count++
@@ -1212,6 +1733,22 @@ export class AgentHub {
   createGroup(id: string, members: string[], createdBy: string, name?: string): GroupState {
     if (this.groups.has(id)) throw new Error(`group already exists: ${id}`)
     if (!PEER_ID_PATTERN.test(id)) throw new Error(`invalid group id: ${id} (expected [A-Za-z0-9._:-]{1,64})`)
+    // A group id and a peer id share the SAME `to` namespace: compose() looks the
+    // recipient up as a group first and dispatch() fans out when it is one, so a
+    // group wearing a peer's id would hijack every unicast to that peer into a
+    // broadcast (and every task to it into a fan-out). Refused here, and
+    // symmetric in register().
+    if (id === BROADCAST) throw new Error(`group id '${id}' is taken: it is the broadcast address in the namespace peer and group ids share`)
+    if (id === HUB_PEER) throw new Error(`group id '${id}' is taken: the hub uses it for its own notices`)
+    // Same three-way test `renamePeer` uses, through the SAME predicate: a live
+    // peer, a peer that still OWNS a mailbox (parked, or holding queued mail —
+    // `ownsMailbox`), or an id with a persisted profile. Checking only `lastSeen`
+    // and `profiles` let a peer whose mailbox was still parked be swamped by a
+    // group: its owner came back to `register` and was refused the id forever,
+    // while every unicast to it fanned out to the group instead.
+    if (this.lastSeen.has(id) || this.ownsMailbox(id) || this.profiles.has(id)) {
+      throw new Error(`group id '${id}' collides with a peer: peer and group ids share one 'to' namespace, and a group would win every message addressed to that peer`)
+    }
     const unique = [...new Set(members)]
     if (unique.length === 0) throw new Error('a group needs at least one member')
     for (const member of unique) {
@@ -1269,11 +1806,14 @@ export class AgentHub {
 
   /** Send a chat message to every member of a group except the sender;
    * members that went offline are skipped (they read the group history).
-   * The message carries `to` and `channel` = the group id. */
+   * The message carries `to` and `channel` = the group id.
+   *
+   *  Membership is enforced once, in {@link compose} — the single path this and
+   *  a plain `bridge_chat { to: <group> }` both go through. The `unknown group`
+   *  check stays here so a caller naming a non-group gets that error instead of
+   *  compose's generic "unknown recipient". */
   sendToGroup(from: string, groupId: string, content: string): BridgeMessage {
-    const group = this.groups.get(groupId)
-    if (group === undefined) throw new Error(`unknown group: ${groupId}`)
-    if (!group.members.includes(from)) throw new Error(`peer '${from}' is not a member of group '${groupId}'`)
+    if (!this.groups.has(groupId)) throw new Error(`unknown group: ${groupId}`)
     return this.route(from, groupId, 'chat', content)
   }
 
@@ -1291,6 +1831,11 @@ export class AgentHub {
       if (typeof raw !== 'object' || raw === null) continue
       const candidate = raw as Record<string, unknown>
       if (typeof candidate.id !== 'string' || !PEER_ID_PATTERN.test(candidate.id) || this.groups.has(candidate.id)) continue
+      // The namespace half of createGroup's rule, applied on restore too: a
+      // persisted group whose id also names a peer (or the reserved addresses)
+      // would hijack that peer's unicast traffic, so it is not restored at all.
+      if (candidate.id === BROADCAST || candidate.id === HUB_PEER) continue
+      if (this.lastSeen.has(candidate.id) || this.profiles.has(candidate.id)) continue
       if (!Array.isArray(candidate.members) || candidate.members.length === 0) continue
       const members = [...new Set(candidate.members.filter((m): m is string => typeof m === 'string' && PEER_ID_PATTERN.test(m)))]
       if (members.length === 0) continue
@@ -1301,6 +1846,14 @@ export class AgentHub {
         createdAt: typeof candidate.createdAt === 'number' && Number.isFinite(candidate.createdAt) ? candidate.createdAt : Date.now(),
         ...(typeof candidate.name === 'string' && candidate.name !== '' ? { name: candidate.name } : {}),
       })
+      // Groups are restored BEFORE mailboxes and tasks (index.ts), so this
+      // cleanup is the belt to importMailboxes' braces: a queue sitting under a
+      // group's id is deliverable to nobody (no peer can ever be called `G`
+      // again) and would be inherited by whoever claimed the id. `importMailboxes`
+      // refuses such a mailbox outright, and this delete covers any caller that
+      // restores groups after mail; the queue cannot exist yet at boot.
+      this.queues.delete(candidate.id)
+      this.parkedAt.delete(candidate.id)
       count++
     }
     return count
@@ -1309,7 +1862,11 @@ export class AgentHub {
   // ---- persistence import/export (remote-mode SQLite store) -----------
 
   /** Restore the history ring at boot. Shape-invalid rows are dropped; only
-   * the newest {@link HubOptions.historyLimit} survive. */
+   * the newest {@link HubOptions.historyLimit} survive.
+   *
+   * Restoring is a FIELD WHITELIST: a wire field that is not listed here is
+   * silently lost across a restart (that is how `priority` went missing), so
+   * every new field on {@link BridgeMessage} has to be added below. */
   importHistory(messages: unknown): number {
     if (!Array.isArray(messages)) return 0
     const valid: BridgeMessage[] = []
@@ -1334,6 +1891,9 @@ export class AgentHub {
         // state for history that predates the cursor.
         ...(typeof m.seq === 'number' && Number.isFinite(m.seq) && m.seq > 0 ? { seq: m.seq } : {}),
         ...(typeof m.expiresAt === 'number' && Number.isFinite(m.expiresAt) && m.expiresAt > 0 ? { expiresAt: m.expiresAt } : {}),
+        // Same guard as compose: only a real 0 | 1 | 2 is written back, an
+        // absent one stays absent so no reader has to tell 0 from "unset".
+        ...(m.priority === 0 || m.priority === 1 || m.priority === 2 ? { priority: m.priority } : {}),
         ts: m.ts,
       })
     }
@@ -1346,20 +1906,60 @@ export class AgentHub {
     return Math.min(valid.length, this.options.historyLimit)
   }
 
-  /** Snapshot of every offline mailbox, keyed by peer (persistence). */
+  /** Snapshot of every offline mailbox, keyed by peer (persistence).
+   *
+   *  Manual-ack leases ride along inside the peer's queue array: appended after
+   *  the queued mail, in lease order, and deliberately NOT re-sorted (the
+   *  restore path re-orders, see {@link importMailboxes}). A lease is a
+   *  delivery in progress — the message left the queue but was never committed
+   *  — and leaving it out is how an uncommitted message used to be in neither
+   *  `queues` nor SQLite and vanished on restart.
+   *
+   *  EVERY lease is exported, expired or not: this is a snapshot of what the
+   *  hub knows was handed out, not a reachability verdict. Expiry is decided by
+   *  the CONSUMER (`poll` / `wait` / `reapLeases`), which drops an expired
+   *  message, counts it as `droppedExpired` and reconciles the ledger. Filtering
+   *  on `expiresAt` here created a window with no owner at all: a lease that
+   *  expired but was never reaped (no take, and `gcTick` does not run when
+   *  `peerIdleTimeoutMs` is 0) was written out by the next unrelated flush or
+   *  by a graceful shutdown — i.e. neither in the queue nor in the snapshot —
+   *  and the message was gone for good.
+   *
+   *  No new top-level key on purpose: an older hub reading this snapshot sees
+   *  ordinary queued mail and redelivers it once, which is exactly the
+   *  at-least-once half of the lease contract.
+   *
+   *  `attempts` does NOT survive: the counter lives in `leaseAttempts` (memory
+   *  only), so a restarted hub starts the message over at attempt 1. Treat
+   *  `maxAttempts` as a bound per PROCESS, not per message lifetime. */
   exportMailboxes(): Record<string, BridgeMessage[]> {
     const out: Record<string, BridgeMessage[]> = {}
     for (const [peer, queue] of this.queues) {
       if (queue.length > 0) out[peer] = queue.map(message => ({ ...message }))
     }
+    for (const [peer, leases] of this.leases) {
+      if (leases.length === 0) continue
+      const messages = out[peer] ?? (out[peer] = [])
+      for (const lease of leases) messages.push({ ...lease.message })
+    }
     return out
   }
 
-  /** Restore offline mailboxes at boot (peer reconnects and drains later). */
+  /** Restore offline mailboxes at boot (peer reconnects and drains later).
+   *
+   * Like {@link importHistory} this is a FIELD WHITELIST — a new wire field
+   * must be added in both places or it is lost across a restart. */
   importMailboxes(mailboxes: unknown): number {
     if (typeof mailboxes !== 'object' || mailboxes === null) return 0
     let count = 0
     for (const [peer, queue] of Object.entries(mailboxes as Record<string, unknown>)) {
+      // The restore path obeys the same namespace rules as a live registration:
+      // a state file is external input (a tampered or older DB is entirely
+      // possible), and a mailbox under `hub`, under the broadcast address, under
+      // a malformed id or under a group's id would either impersonate the hub's
+      // notices (`audience()` fans `hub` out like a peer) or hand a stranger the
+      // group's mail the moment they claim that id.
+      if (!PEER_ID_PATTERN.test(peer) || peer === BROADCAST || peer === HUB_PEER || this.groups.has(peer)) continue
       if (!Array.isArray(queue) || queue.length === 0) continue
       const restored: BridgeMessage[] = []
       for (const raw of queue) {
@@ -1382,15 +1982,40 @@ export class AgentHub {
           // cursor has to stay continuous across a restart.
           ...(typeof m.seq === 'number' && Number.isFinite(m.seq) && m.seq > 0 ? { seq: m.seq } : {}),
           ...(typeof m.expiresAt === 'number' && Number.isFinite(m.expiresAt) && m.expiresAt > 0 ? { expiresAt: m.expiresAt } : {}),
+          // Priority decides both the mailbox order and what overflow drops, so
+          // dropping it here would quietly downgrade restored mail to FIFO.
+          ...(m.priority === 0 || m.priority === 1 || m.priority === 2 ? { priority: m.priority } : {}),
           ts: m.ts,
         })
       }
       if (restored.length > 0) {
-        this.queues.set(peer, restored.slice(-this.options.maxQueue))
+        // Order the restored mailbox for DELIVERY, not in snapshot order. The
+        // snapshot appends leases after the queued mail, and a lease can carry a
+        // HIGHER priority than mail that arrived after it was handed out — so
+        // without this a priority-2 in-flight message came back behind
+        // priority-0 mail. Reuses the helper the live queue orders with.
+        const mailbox: BridgeMessage[] = []
+        insertByPriority(mailbox, [...restored].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)))
+        // Once leases ride along in the snapshot, a full queue exports MORE than
+        // `maxQueue` rows — so trimming here is reachable, and `slice` did it by
+        // silently cutting the oldest rows with no count and no reconciliation.
+        // Evict the way `deliver` does instead: lowest priority first, oldest
+        // within that priority, every loss counted and (for a task) recorded in
+        // the ledger.
+        const now = Date.now()
+        while (mailbox.length > this.options.maxQueue) {
+          const victimIndex = lowestPriorityIndex(mailbox)
+          if (victimIndex < 0) break
+          const [evicted] = mailbox.splice(victimIndex, 1)
+          if (evicted === undefined) break
+          this.countDrop(peer, 'overflow', now, evicted)
+          if (evicted.kind === 'task') this.noteTaskDeliveryDropped(evicted, peer, 'overflow', now)
+        }
+        this.queues.set(peer, mailbox)
         // Restored mail belongs to a peer that is not registered yet: mark it
         // parked so the TTL sweep covers it and the roster can show it.
         if (!this.lastSeen.has(peer)) this.parkedAt.set(peer, Date.now())
-        count += restored.length
+        count += mailbox.length
       }
     }
     return count
@@ -1601,12 +2226,27 @@ export class AgentHub {
     return true
   }
 
-  private countDrop(peerId: string, kind: 'overflow' | 'expired' | 'rate', now: number): void {
+  /** Count a dropped message. `message` (when the caller has it) names the loss
+   *  in the event detail: the counter alone told an operator that something went
+   *  missing, never what — and a dropped task is reconciled in the ledger, which
+   *  has to be matchable back to this event. */
+  private countDrop(peerId: string, kind: 'overflow' | 'expired' | 'rate', now: number, message?: BridgeMessage): void {
     const stats = this.drops.get(peerId) ?? { overflow: 0, expired: 0, rate: 0 }
     stats[kind] += 1
     this.drops.set(peerId, stats)
     const total = stats.overflow + stats.expired + stats.rate
-    this.recordEvent('mailbox_dropped', { peer: peerId, detail: { reason: kind, total } })
+    this.recordEvent('mailbox_dropped', {
+      peer: peerId,
+      detail: {
+        reason: kind,
+        total,
+        ...(message !== undefined ? { messageId: message.id } : {}),
+        // The ledger is keyed by the task's message id, so this repeats
+        // `messageId` today; it is spelled out so a consumer looking for "the
+        // task this drop killed" does not have to know that.
+        ...(message !== undefined && message.kind === 'task' ? { taskId: message.id } : {}),
+      },
+    })
     const notice: BridgeMessage = {
       id: randomUUID(),
       seq: ++this.seqCounter,
@@ -1655,12 +2295,7 @@ export class AgentHub {
    *  was handed over. */
   private deliverToWaiter(target: string, message: BridgeMessage): boolean {
     const list = this.waiters.get(target) ?? []
-    const index = list.findIndex(waiter => {
-      if (waiter.from !== undefined && waiter.from !== message.from) return false
-      if (waiter.ref !== undefined && !(message.kind === 'ack' && message.ref === waiter.ref)) return false
-      if (waiter.threadId !== undefined && message.threadId !== waiter.threadId) return false
-      return true
-    })
+    const index = list.findIndex(waiter => matchesWaiter(waiter, message, this.taskLedger))
     if (index < 0) return false
     const [waiter] = list.splice(index, 1)
     this.waiters.set(target, list)
@@ -1673,15 +2308,35 @@ export class AgentHub {
     return `${peerId}\u0000${messageId}`
   }
 
-  /** Return expired leases to the FRONT of the queue (order preserved), or
-   *  dead-letter them once they have been handed out too many times. Called
-   *  before every take, so expiry needs no timer of its own. */
+  /** Drop every queued message of `peerId` whose deadline passed, counting each
+   *  loss. Shared by `poll` and `wait`: an expired message must never be handed
+   *  out, and it must not sit at the head of the mailbox looking deliverable
+   *  either.
+   *
+   *  The attempt counter goes with it. Nothing can hand the message out again,
+   *  so keeping the key would leak one `leaseAttempts` entry per expired message
+   *  in a long-running process. */
+  private sweepExpired(peerId: string, queue: BridgeMessage[], now: number): void {
+    for (let i = queue.length - 1; i >= 0; i--) {
+      const queued = queue[i]!
+      if (queued.expiresAt === undefined || queued.expiresAt > now) continue
+      queue.splice(i, 1)
+      this.leaseAttempts.delete(AgentHub.leaseKey(peerId, queued.id))
+      this.countDrop(peerId, 'expired', now, queued)
+      if (queued.kind === 'task') this.noteTaskDeliveryDropped(queued, peerId, 'expired', now)
+    }
+  }
+
+  /** Return expired leases to the queue in priority order, or dead-letter them
+   *  once they have been handed out too many times. Called before every take, so
+   *  expiry needs no timer of its own. */
   private reapLeases(peerId: string, now: number): void {
     const list = this.leases.get(peerId)
     if (list === undefined || list.length === 0) return
     const max = this.options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
     const still: { message: BridgeMessage; expiresAt: number }[] = []
     const back: BridgeMessage[] = []
+    const dead: BridgeMessage[] = []
     for (const lease of list) {
       if (lease.expiresAt > now) {
         still.push(lease)
@@ -1689,20 +2344,75 @@ export class AgentHub {
       }
       const attempts = this.leaseAttempts.get(AgentHub.leaseKey(peerId, lease.message.id)) ?? 0
       if (max > 0 && attempts >= max) {
-        const dead = this.deadLetters.get(peerId) ?? []
+        // The hub has stopped handing this message out until someone revives it.
+        // The ledger records the drop but keeps the task open: `bridge_nack` puts
+        // the dead letter back in the queue and the assignee must still be able
+        // to finish it (see deadLetter / noteTaskDeliveryDropped).
         dead.push(lease.message)
-        this.deadLetters.set(peerId, dead)
         continue
       }
       back.push(lease.message)
     }
     if (still.length > 0) this.leases.set(peerId, still)
     else this.leases.delete(peerId)
-    if (back.length > 0) {
-      const queue = this.queues.get(peerId) ?? []
-      insertByPriority(queue, back)
-      this.queues.set(peerId, queue)
-      this.options.onMailboxesChanged?.()
+    if (back.length > 0) this.requeue(peerId, back, now)
+    if (dead.length > 0) this.deadLetter(peerId, dead, now)
+  }
+
+  /** Put messages back into `peerId`'s mailbox, trimming to `maxQueue`.
+   *
+   *  A message coming BACK competes for a slot exactly like arriving mail, so it
+   *  can never grow a full mailbox: `insertByPriority` orders it, then the tail
+   *  (lowest priority, newest) is what does not fit. Those go to the dead letters
+   *  instead of being dropped — a requeued message is a message the hub promised
+   *  to keep, and `bridge_nack` can still revive it. Returns how many really made
+   *  it into the queue. */
+  private requeue(peerId: string, messages: BridgeMessage[], now: number): number {
+    if (messages.length === 0) return 0
+    const queue = this.queues.get(peerId) ?? []
+    insertByPriority(queue, messages)
+    this.queues.set(peerId, queue)
+    const overflow: BridgeMessage[] = []
+    while (queue.length > this.options.maxQueue) overflow.push(queue.pop()!)
+    this.options.onMailboxesChanged?.()
+    if (overflow.length > 0) this.deadLetter(peerId, overflow, now)
+    // Count what the RETURNED messages actually kept, not `messages.length -
+    // overflow.length`: when a returned message has the higher priority it is a
+    // message that was ALREADY queued that gets popped, so the old subtraction
+    // reported a message as back in the queue while it was really in the dead
+    // letters (and vice versa).
+    const inQueue = new Set(queue)
+    return messages.reduce((kept, message) => kept + (inQueue.has(message) ? 1 : 0), 0)
+  }
+
+  /** Park messages that can no longer be handed out (attempts exhausted, or no
+   *  room in the mailbox). One bounded list per peer — see MAX_DEAD_LETTERS.
+   *
+   *  The OLDEST entry is evicted first: it is the one a `bridge_nack` is least
+   *  likely to still want, and reviving resets attempts anyway. The eviction is
+   *  COUNTED (`droppedOverflow` + a `mailbox_dropped` event naming the message)
+   *  rather than silent, so a full dead-letter list is still visible.
+   *
+   *  An evicted TASK is the exception: it settles as a terminal failure. A dead
+   *  letter is the last copy of a message the hub promised to keep, and the
+   *  sender was told `bridge_nack` can revive it — once it is evicted, no
+   *  revival path exists, so leaving the ledger non-terminal would keep
+   *  promising something that cannot happen (same rule as `unregistered`). */
+  private deadLetter(peerId: string, messages: readonly BridgeMessage[], now: number): void {
+    const dead = this.deadLetters.get(peerId) ?? []
+    dead.push(...messages)
+    const evicted = dead.length > MAX_DEAD_LETTERS ? dead.splice(0, dead.length - MAX_DEAD_LETTERS) : []
+    this.deadLetters.set(peerId, dead)
+    // Same rule as every other non-terminal drop: the ledger records it and the
+    // task stays open, because the dead letter can still be revived.
+    for (const message of messages) {
+      if (message.kind === 'task') this.noteTaskDeliveryDropped(message, peerId, 'dead-letter', now)
+    }
+    for (const message of evicted) {
+      // Gone for good now, so its attempt counter has nothing left to bound.
+      this.leaseAttempts.delete(AgentHub.leaseKey(peerId, message.id))
+      this.countDrop(peerId, 'overflow', now, message)
+      if (message.kind === 'task') this.failTaskForDroppedMessage(message, peerId, 'dead-letter-evicted', now)
     }
   }
 
@@ -1717,6 +2427,10 @@ export class AgentHub {
     const list = this.leases.get(peerId) ?? []
     list.push({ message, expiresAt })
     this.leases.set(peerId, list)
+    // A live lease is part of what `exportMailboxes` snapshots (it is mail in
+    // transit, not mail consumed), so the store has to re-snapshot here: without
+    // it the hand-out lived only in memory until the next unrelated roster event.
+    this.options.onMailboxesChanged?.()
     return { ...message, attempts, leaseExpiresAt: expiresAt }
   }
 
@@ -1725,12 +2439,23 @@ export class AgentHub {
     const wanted = new Set(ids)
     const list = this.leases.get(peerId)
     if (list === undefined) return 0
-    const still = list.filter(lease => !wanted.has(lease.message.id))
-    const released = list.length - still.length
-    for (const id of wanted) this.leaseAttempts.delete(AgentHub.leaseKey(peerId, id))
+    const still: { message: BridgeMessage; expiresAt: number }[] = []
+    const released: BridgeMessage[] = []
+    for (const lease of list) {
+      if (wanted.has(lease.message.id)) released.push(lease.message)
+      else still.push(lease)
+    }
+    // ONLY a lease that was actually released forgets its attempt count. Deleting
+    // for every id in `ids` let a caller `nack` a message (which intentionally
+    // KEEPS the count) and then `commit` it: the lease was already back in the
+    // queue, so nothing was released, yet the counter was wiped — one nack +
+    // commit per round is an unlimited number of hand-outs, i.e. `maxAttempts`
+    // gone.
+    for (const message of released) this.leaseAttempts.delete(AgentHub.leaseKey(peerId, message.id))
     if (still.length > 0) this.leases.set(peerId, still)
     else this.leases.delete(peerId)
-    return released
+    if (released.length > 0) this.options.onMailboxesChanged?.()
+    return released.length
   }
 
   /** Give messages back NOW — from live leases or from the dead letters. Attempts
@@ -1761,12 +2486,7 @@ export class AgentHub {
       if (still.length > 0) this.deadLetters.set(peerId, still)
       else this.deadLetters.delete(peerId)
     }
-    if (back.length === 0) return 0
-    const queue = this.queues.get(peerId) ?? []
-    insertByPriority(queue, back)
-    this.queues.set(peerId, queue)
-    this.options.onMailboxesChanged?.()
-    return back.length
+    return this.requeue(peerId, back, Date.now())
   }
 
   /** Non-blocking drain of everything queued for `peer` (optionally from one sender). */
@@ -1777,13 +2497,7 @@ export class AgentHub {
     // Sweep the deadline BEFORE draining: an expired message must not be handed
     // out, and doing it here means the notice about it is part of this same
     // drain rather than one the caller has to know to ask for again.
-    for (let i = queue.length - 1; i >= 0; i--) {
-      const queued = queue[i]!
-      if (queued.expiresAt !== undefined && queued.expiresAt <= now) {
-        queue.splice(i, 1)
-        this.countDrop(peerId, 'expired', now)
-      }
-    }
+    this.sweepExpired(peerId, queue, now)
     const drained = from === undefined ? queue.splice(0, queue.length) : drainFrom(queue, from)
     if (drained.length > 0) this.options.onMailboxesChanged?.()
     return drained.map(message => this.handOut(peerId, message, options?.manual === true, now))
@@ -1793,20 +2507,55 @@ export class AgentHub {
    * Long-poll for the next message addressed to `peer`: resolves immediately
    * when a matching one is queued, otherwise waits up to `timeoutMs` (capped
    * by `waitTimeoutMs`) or until `signal` aborts. `from` narrows to one sender.
-   * `ref` narrows to the ack of a specific task message id.
+   * `ref` narrows to that task's reply — an ack, or the `chat` an assignee hands
+   * the result back in — with `statuses` / `terminalOnly` narrowing the ack half
+   * (see {@link matchesWaiter}).
    *
    * Takes ONLY the first matching queued message. Calling poll() here would
    * drain the whole mailbox and discard every message after the first —
    * a multi-message burst (or a reconnect with a full queue) would silently
    * lose messages that never reach wait/poll again.
    */
-  wait(peerId: string, timeoutMs: number, from?: string, signal?: AbortSignal, ref?: string, threadId?: string, manual?: boolean, maxMessages = 1): Promise<WaitResult> {
+  wait(
+    peerId: string,
+    timeoutMs: number,
+    from?: string,
+    signal?: AbortSignal,
+    ref?: string,
+    threadId?: string,
+    manual?: boolean,
+    maxMessages = 1,
+    statuses?: readonly AckStatus[],
+    terminalOnly?: boolean,
+  ): Promise<WaitResult> {
     const startedAt = Date.now()
-    const matches = (message: BridgeMessage): boolean => {
-      if (from !== undefined && message.from !== from) return false
-      if (ref !== undefined && !(message.kind === 'ack' && message.ref === ref)) return false
-      if (threadId !== undefined && message.threadId !== threadId) return false
-      return true
+    // Same predicate the two delivery paths use (see matchesWaiter): a `from`
+    // filter narrows to one sender but never hides the hub's own notices.
+    const matches = (message: BridgeMessage): boolean => matchesWaiter({ from, ref, statuses, terminalOnly, threadId }, message, this.taskLedger)
+    // A wait that ran out is only useful if it says WHAT the ref ended up as:
+    // "nobody answered" and "the hub already judged it timeout" are different
+    // problems for the sender. Read at settle time, not at wait time.
+    //
+    // Only the two PARTIES of the task get that snapshot. The ledger lookup alone
+    // turned any timeout into a state oracle for a task id the caller only had to
+    // guess or overhear (`bridge_events` publishes ids, with no manager gate): a
+    // stranger could enumerate ids with `bridge_wait { ref, timeoutMs: 1 }` and
+    // read `{status, a2aState}` off the answer. A task is a private arrangement
+    // between its sender and its assignees (see pushTaskChanged in index.ts), and
+    // that privacy has to hold where the state is READ, not only where it is
+    // pushed. Omitting the field (rather than setting it to `undefined`) keeps
+    // every tool result lossless JSON.
+    const isParty = (record: TaskRecord): boolean => record.from === peerId
+      || record.assignees.some(assignee => assignee.peerId === peerId)
+    const timedOut = (): WaitResult => {
+      const record = ref === undefined ? undefined : this.taskLedger.get(ref)
+      return {
+        type: 'timeout',
+        waitedMs: Date.now() - startedAt,
+        ...(record !== undefined && isParty(record)
+          ? { ref: { status: record.status, a2aState: a2aState(record.status) } }
+          : {}),
+      }
     }
     // Expired leases come back before anything is matched, so a peer that waits
     // again sees what it never committed.
@@ -1814,15 +2563,7 @@ export class AgentHub {
     const queue = this.queues.get(peerId)
     // Same deadline sweep as poll: an expired message must not match, and it
     // must not sit at the head of the queue blocking nothing but looking real.
-    if (queue !== undefined) {
-      for (let i = queue.length - 1; i >= 0; i--) {
-        const queued = queue[i]!
-        if (queued.expiresAt !== undefined && queued.expiresAt <= startedAt) {
-          queue.splice(i, 1)
-          this.countDrop(peerId, 'expired', startedAt)
-        }
-      }
-    }
+    if (queue !== undefined) this.sweepExpired(peerId, queue, startedAt)
     if (queue !== undefined && queue.length > 0) {
       // Take up to `maxMessages` matching messages in one call: a burst (or a
       // reconnect with a full mailbox) otherwise costs one round-trip each.
@@ -1854,7 +2595,7 @@ export class AgentHub {
       }
       const onAbort = (): void => {
         removeFromRegistry()
-        settle({ type: 'timeout', waitedMs: Date.now() - startedAt })
+        settle(timedOut())
       }
       const removeFromRegistry = (): void => {
         const list = this.waiters.get(peerId)
@@ -1862,7 +2603,7 @@ export class AgentHub {
       }
       const timer = setTimeout(() => {
         removeFromRegistry()
-        settle({ type: 'timeout', waitedMs: Date.now() - startedAt })
+        settle(timedOut())
       }, budget)
       if (signal?.aborted) {
         onAbort()
@@ -1876,6 +2617,8 @@ export class AgentHub {
         onAbort,
         ...(from !== undefined ? { from } : {}),
         ...(ref !== undefined ? { ref } : {}),
+        ...(statuses !== undefined ? { statuses } : {}),
+        ...(terminalOnly === true ? { terminalOnly } : {}),
         ...(threadId !== undefined ? { threadId } : {}),
         ...(manual === true ? { manual } : {}),
         // A batch request keeps the batch SHAPE even when the wait ends with a
@@ -1914,6 +2657,16 @@ export class AgentHub {
     const known = this.lastSeen.has(to) || this.parkedAt.has(to)
     if (to !== BROADCAST && group === undefined && !known) {
       throw new Error(`unknown recipient: ${to} (registered peers: ${this.peers().join(', ') || 'none'})`)
+    }
+    // Group membership is decided HERE, not only in sendToGroup. `to` is one
+    // namespace for peers and groups, so bridge_chat / bridge_notice / bridge_task
+    // reach a group through the same field — and they used to fan out to every
+    // member without asking whether the sender belonged, which let any registered
+    // peer write into a channel it was never added to. `system` is the exemption:
+    // it is only ever set by hub-internal senders (the hub's own notices, a
+    // runner's ack), and a session can never set it.
+    if (group !== undefined && !system && !group.members.includes(from)) {
+      throw new Error(`peer '${from}' is not a member of group '${to}'`)
     }
     // Chain depth along a `ref` parent. Two different chains ride on `ref` and
     // they need different ceilings:
@@ -1999,19 +2752,16 @@ export class AgentHub {
     // a stale instruction is worse than none — and counted per recipient, so a
     // broadcast that expired tells every recipient's operator.
     if (message.expiresAt !== undefined && message.expiresAt <= Date.now()) {
-      this.countDrop(target, 'expired', Date.now())
+      const now = Date.now()
+      this.countDrop(target, 'expired', now, message)
+      if (message.kind === 'task') this.noteTaskDeliveryDropped(message, target, 'expired', now)
       return
     }
     const list = this.waiters.get(target) ?? []
-    const index = list.findIndex(waiter => {
-      if (waiter.from !== undefined && waiter.from !== message.from) return false
-      if (waiter.ref !== undefined && !(message.kind === 'ack' && message.ref === waiter.ref)) return false
-      if (waiter.threadId !== undefined && message.threadId !== waiter.threadId) return false
-      return true
-    })
-    // Task delivery bookkeeping runs for both handoff and queue paths.
-    if (message.kind === 'task') this.markTaskDelivered(message.id, target, message.ts)
+    const index = list.findIndex(waiter => matchesWaiter(waiter, message, this.taskLedger))
     if (index >= 0) {
+      // The handoff below cannot fail, so the task is delivered here.
+      if (message.kind === 'task') this.markTaskDelivered(message.id, target, message.ts)
       const [waiter] = list.splice(index, 1)
       this.waiters.set(target, list)
       // Do NOT run waiter.onAbort here — it would settle the waiter as a
@@ -2026,7 +2776,9 @@ export class AgentHub {
     // Queue path ONLY — the bucket is checked here, after the waiter lookup, so a
     // peer that is actively waiting is always served. See {@link takeToken}.
     if (!this.takeToken(target, Date.now())) {
-      this.countDrop(target, 'rate', Date.now())
+      const now = Date.now()
+      this.countDrop(target, 'rate', now, message)
+      if (message.kind === 'task') this.noteTaskDeliveryDropped(message, target, 'rate', now)
       return
     }
     const queue = this.queues.get(target) ?? []
@@ -2036,13 +2788,15 @@ export class AgentHub {
       // while keeping priority-0 chatter. Among EQUAL priorities the oldest goes
       // first — which is exactly the old "oldest dropped" behaviour whenever nobody
       // sets a priority, i.e. the default.
-      const lowest = priorityOf(queue[queue.length - 1]!)
-      let victim = queue.length - 1
-      while (victim > 0 && priorityOf(queue[victim - 1]!) === lowest) victim--
-      queue.splice(victim, 1)
+      const [evicted] = queue.splice(lowestPriorityIndex(queue), 1)
       // Overflow used to be silent: the message simply vanished. Count it and, if
-      // the recipient is actually waiting, say so.
-      this.countDrop(target, 'overflow', Date.now())
+      // the recipient is actually waiting, say so. The victim — not the arriving
+      // message — is the one that was lost, so that is what gets reconciled.
+      const now = Date.now()
+      // The dropped message keeps no attempt counter: nothing can hand it out again.
+      if (evicted !== undefined) this.leaseAttempts.delete(AgentHub.leaseKey(target, evicted.id))
+      this.countDrop(target, 'overflow', now, evicted)
+      if (evicted !== undefined && evicted.kind === 'task') this.noteTaskDeliveryDropped(evicted, target, 'overflow', now)
     }
     // Insert by (priority desc, seq asc). The mailbox is therefore ALWAYS in
     // delivery order, so `poll` (drains all) and `wait` (takes the first match)
@@ -2052,6 +2806,9 @@ export class AgentHub {
     // one arriving fresh.
     insertByPriority(queue, [message])
     this.queues.set(target, queue)
+    // Booked only here: a task the bucket or the overflow rule threw away above
+    // never reached the mailbox, and a deliveredMs on it would claim it did.
+    if (message.kind === 'task') this.markTaskDelivered(message.id, target, message.ts)
     this.options.onQueued?.(message, target)
     // It reached a MAILBOX, which means there was no waiter to hand it to. For a
     // task that is the "nobody is listening" case a runner exists for.
@@ -2091,18 +2848,34 @@ function insertByPriority(queue: BridgeMessage[], messages: readonly BridgeMessa
   }
 }
 
+/** Index of the message a FULL mailbox gives up first: the LOWEST priority,
+ *  oldest first within that priority — which is plain "oldest dropped" whenever
+ *  nobody sets a priority, i.e. the default. One definition for `deliver` and
+ *  the restore path, so a full mailbox never picks its victim by two rules.
+ *  -1 for an empty queue. */
+function lowestPriorityIndex(queue: readonly BridgeMessage[]): number {
+  if (queue.length === 0) return -1
+  const lowest = priorityOf(queue[queue.length - 1]!)
+  let victim = queue.length - 1
+  while (victim > 0 && priorityOf(queue[victim - 1]!) === lowest) victim--
+  return victim
+}
+
 /** Delivery importance; absent or out-of-range reads as 0 (plain FIFO). */
 function priorityOf(message: BridgeMessage): number {
   const value = message.priority
   return value === 1 || value === 2 ? value : 0
 }
 
-/** Drain only messages from one sender, preserving order. */
+/** Drain only messages from one sender, preserving order. A notice from the hub
+ *  itself always drains too: `from` is a narrow filter, and it must not hide the
+ *  one thing a sender has to act on ("this delivery was dropped") — the same
+ *  rule {@link matchesWaiter} applies to waits. */
 function drainFrom(queue: BridgeMessage[], from: string): BridgeMessage[] {
   const kept: BridgeMessage[] = []
   const drained: BridgeMessage[] = []
   for (const message of queue) {
-    if (message.from === from) drained.push(message)
+    if (message.from === from || message.from === HUB_PEER) drained.push(message)
     else kept.push(message)
   }
   queue.splice(0, queue.length, ...kept)
@@ -2113,4 +2886,108 @@ function drainFrom(queue: BridgeMessage[], from: string): BridgeMessage[] {
 function omit<T extends object, K extends keyof T>(value: T, key: K): Omit<T, K> {
   const { [key]: _dropped, ...rest } = value
   return rest
+}
+
+/** Does one waiter want `message`? The single definition of the filter
+ *  (`deliverToWaiter`, `deliver` and `wait` all use it) — three hand-copied
+ *  predicates had already drifted apart once.
+ *
+ *  A notice from the HUB itself bypasses `from`, `ref`, `statuses` and
+ *  `terminalOnly`: only a `threadId` filter still applies to it (and a hub
+ *  notice carries no threadId, so a thread-scoped wait simply never hears one).
+ *  This is why the bypass has to sit in ONE place for all of them. `from: "hub"`
+ *  is not a peer anyone can send as (see HUB_PEER: register, rename, import and
+ *  every `from` write point refuse it), so widening it cannot open a forgery
+ *  path. Without the bypass, "delegate a task, then wait with
+ *  `ref: <taskId>`" — the pattern tools teach after W13 — was the ONE wait that
+ *  could not hear "your delivery was dropped" or "your assignee is gone": those
+ *  notices carry no `ref`, so the `ref` test killed them before the old
+ *  `from`-only exception could apply.
+ *
+ *  `ref` matches an `ack` **or a `chat`** carrying that ref. The ack is the
+ *  status beat; the chat is how an assignee hands the result back
+ *  (`bridge_chat { ref }`, what agents/SKILL.md teaches). Matching acks only
+ *  meant a delegator following that skill waited to the server ceiling while the
+ *  result it was waiting for sat in its own mailbox.
+ *
+ *  The CHAT half needs a party check the ACK half does not. `sendAck` admits
+ *  only an ASSIGNEE for a task ref, so an ack that reaches a waiter is already
+ *  authorized. A chat has no such gate:
+ *  `bridge_chat { to: <delegator>, ref: <someone else's taskId> }` from any
+ *  registered peer would otherwise resolve that delegator's `ref` wait with a
+ *  stranger's text — and task ids are not secret (`bridge_events` publishes them
+ *  in `task_transition` detail, with no manager gate). The ledger moves nothing,
+ *  so the delegator would read the impostor's words as the assignee's
+ *  deliverable with no way to tell afterwards. The party set here is wider than
+ *  the ack's on purpose: the task's sender may chat back on its own ref (that is
+ *  its own inbox), it just may not ack. A `ref` the ledger does not know is an
+ *  ordinary reply chain, and there is nothing to check it against.
+ *
+ *  `statuses` / `terminalOnly` narrow the ACK half only — a chat reply has no
+ *  status, so it can be neither "terminal" nor one of the listed statuses, and
+ *  both filters therefore skip it. Both are also the reason `ref` alone is not
+ *  enough: an assignee that acks `working` before `done` resolved the wait on
+ *  the FIRST beat, and "accepted" read like "finished". */
+function matchesWaiter(
+  waiter: { from?: string; ref?: string; statuses?: readonly AckStatus[]; terminalOnly?: boolean; threadId?: string },
+  message: BridgeMessage,
+  ledger: ReadonlyMap<string, TaskRecord>,
+): boolean {
+  const fromHub = message.from === HUB_PEER
+  if (!fromHub && waiter.from !== undefined && message.from !== waiter.from) return false
+  if (!fromHub && waiter.ref !== undefined) {
+    if (message.ref !== waiter.ref) return false
+    if (message.kind !== 'ack' && message.kind !== 'chat') return false
+    if (message.kind === 'chat') {
+      const record = ledger.get(waiter.ref)
+      if (record !== undefined && record.from !== message.from
+        && !record.assignees.some(assignee => assignee.peerId === message.from)) return false
+    }
+    if (waiter.statuses !== undefined || waiter.terminalOnly === true) {
+      // A chat cannot satisfy a status filter (no status to compare), and an ack
+      // whose payload does not decode to a status must not either: reading a
+      // malformed payload as "no terminal" would make `terminalOnly` resolve on
+      // garbage, and reading it as anything else would invent a status.
+      const status = ackStatusOf(message)
+      if (status === undefined) return false
+      if (waiter.statuses !== undefined && !waiter.statuses.includes(status)) return false
+      if (waiter.terminalOnly === true && !TERMINAL_TASK_STATUSES.includes(ackToTaskStatus(status))) return false
+    }
+  }
+  if (waiter.threadId !== undefined && message.threadId !== waiter.threadId) return false
+  return true
+}
+
+/** The ack status `message` carries, or `undefined` when it carries none.
+ *
+ *  `decodeContent` falls back to the raw string for a malformed payload, and
+ *  that fallback is deliberate there (a reader still sees what arrived). For
+ *  FILTERING it must not become a status, or a garbage ack would satisfy a
+ *  filter nobody asked it to satisfy — so a non-object payload, a missing status
+ *  and an unknown status all read as "no status here". */
+function ackStatusOf(message: BridgeMessage): AckStatus | undefined {
+  if (message.kind !== 'ack') return undefined
+  const decoded = decodeContent('ack', message.content)
+  if (typeof decoded === 'string') return undefined
+  const status = (decoded as AckContent).status
+  if (typeof status !== 'string') return undefined
+  return (ALL_ACK_STATUSES as readonly string[]).includes(status) ? (status as AckStatus) : undefined
+}
+
+/** Event id for a hub-SYNTHESIZED ledger event about `taskId`.
+ *
+ *  Never the id of the message the event is about: these rows are not messages,
+ *  and reusing a real message id let a synthetic row collide with the ack that
+ *  carries it. Synthesizing also has to stay distinguishable per cause — one
+ *  task can be dropped at several recipients for different reasons — hence a
+ *  prefix per reason, in the same style as `timeout-<id>` / `import-<id>`. */
+function syntheticEventId(taskId: string, reason: string): string {
+  if (reason === 'expired') return `expired-${taskId}`
+  if (reason === 'dead-letter') return `dead-letter-${taskId}`
+  // A dead letter that was itself evicted: no revival path is left, so the row
+  // must not collide with the `dropped-` one a plain dead-lettering wrote.
+  if (reason === 'dead-letter-evicted') return `evicted-${taskId}`
+  if (reason === 'unregistered') return `unregistered-${taskId}`
+  // `overflow` and `rate`: a delivery replaced or refused by mailbox pressure.
+  return `dropped-${taskId}`
 }

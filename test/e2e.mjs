@@ -6,7 +6,9 @@
  *   spawn → /healthz → MCP sessions → SSE push TIMELINESS (the message
  *   reaches passive listeners before any poll) → heartbeat → task/ack →
  *   broadcast → groups → SQLite persistence across a real process restart →
- *   remote-auth mode (token identity, 401s, healthz stays open).
+ *   open manual leases / input-required tasks / priority order across a real
+ *   process restart → remote-auth mode (token identity, 401s, healthz stays
+ *   open).
  *
  * Run after `pnpm run build`:
  *   node test/e2e.mjs
@@ -245,6 +247,194 @@ try {
     check('non-manager token denied peer=all history', zsDenied !== null)
   } finally {
     stopProc(hubB.child)
+  }
+
+  // ========== Scenario C: an OPEN manual lease across a REAL restart ==========
+  // A manual lease is a delivery in progress: the hub handed the message out
+  // but did not forget it. Restarting the process must therefore hand the SAME
+  // message back instead of losing it — that is the at-least-once half of the
+  // lease contract, and the half that had no test. The message is left
+  // UNCOMMITTED on purpose; the restart happens well inside the 60s default
+  // lease TTL, so a real implementation has no excuse for forgetting it.
+  console.log('== E2E C: open manual lease survives a real restart (SQLite) ==')
+  const leaseDb = join(tmp, 'lease.db')
+  const PORT_C = 19030
+  const PORT_C2 = 19031
+  let hubC = await startHubProc(PORT_C, ['--db', leaseDb])
+  try {
+    const baseC = `http://127.0.0.1:${PORT_C}/mcp`
+    const leaseA = makeClient('lease-a', baseC)
+    const leaseB = makeClient('lease-b', baseC)
+    await Promise.all([leaseA.init(), leaseB.init()])
+    await leaseA.call('bridge_chat', { to: 'lease-b', message: 'e2e leased mail' })
+    const leased = await leaseB.call('bridge_wait', { timeoutMs: 2000, ack: 'manual' })
+    const leasedId = leased.message?.id
+    check('a manual-ack wait leases the message (precondition)', leased.type === 'message' && leased.message?.content === 'e2e leased mail', JSON.stringify(leased).slice(0, 200))
+    // No bridge_commit: the lease stays open. Then give the 500ms debounced
+    // snapshot time to reach disk before the process dies.
+    await new Promise(r => setTimeout(r, 900))
+    stopProc(hubC.child)
+    await new Promise(r => setTimeout(r, 500))
+
+    console.log('== E2E C2: restart with the same --db (the lease is still open) ==')
+    hubC = await startHubProc(PORT_C2, ['--db', leaseDb])
+    const baseC2 = `http://127.0.0.1:${PORT_C2}/mcp`
+    const leaseB2 = makeClient('lease-b', baseC2)
+    await leaseB2.init()
+    // Cause isolation: prove this restart really did reload the same SQLite
+    // state, so a message missing below is the lease and not a snapshot that
+    // never reached disk.
+    const leaseHistory = await leaseB2.call('bridge_history')
+    check('the same --db is restored after the restart (history still has it)', leaseHistory.messages?.some(m => m.id === leasedId), `count=${leaseHistory.messages?.length}`)
+    const redelivered = await leaseB2.call('bridge_wait', { timeoutMs: 3000 })
+    check('an uncommitted lease survives a process restart (same message id)', redelivered.type === 'message' && redelivered.message?.id === leasedId, `expected id=${leasedId}, got ${JSON.stringify(redelivered).slice(0, 200)}`)
+    // Guard against a wrong fix: a message that reappears out of the DEAD-LETTER
+    // table would look identical to a correct redelivery, so nothing may have
+    // been dead-lettered at all.
+    const leaseMetrics = await leaseB2.call('bridge_metrics')
+    const leaseBRow = leaseMetrics.peers?.find(row => row.peerId === 'lease-b')
+    check('the redelivered lease is not a dead-letter revival', leaseMetrics.global?.deadLettered === 0 && (leaseBRow?.deadLettered ?? 0) === 0, `global=${leaseMetrics.global?.deadLettered} peer=${JSON.stringify(leaseBRow)}`)
+  } finally {
+    stopProc(hubC.child)
+  }
+
+  // ====== Scenario C3: an EXPIRED, un-reaped lease across a REAL restart ======
+  // Scenario C leaves the lease OPEN on purpose. The other half of the contract
+  // is the lease that expired but was never reaped: no take (so no reap) and no
+  // GC window in between. The snapshot must still contain it — it is evidence
+  // that the hub handed the message out, not a reachability verdict — because a
+  // snapshot that drops it leaves the message in neither the queue nor the store
+  // and a restart loses it for good. The debounce (500ms) is deliberately longer
+  // than the lease TTL (250ms), so the snapshot really is written AFTER expiry.
+  console.log('== E2E C3: an expired, un-reaped lease is still in the snapshot (SQLite) ==')
+  const staleDb = join(tmp, 'lease-stale.db')
+  const PORT_C3 = 19038
+  const PORT_C4 = 19039
+  let hubC3 = await startHubProc(PORT_C3, ['--db', staleDb, '--lease-ttl-ms', '250'])
+  let staleId
+  try {
+    const staleBase = `http://127.0.0.1:${PORT_C3}/mcp`
+    const staleA = makeClient('stale-a', staleBase)
+    const staleB = makeClient('stale-b', staleBase)
+    await Promise.all([staleA.init(), staleB.init()])
+    await staleA.call('bridge_chat', { to: 'stale-b', message: 'leased, expired, never polled' })
+    const staleLease = await staleB.call('bridge_wait', { timeoutMs: 2000, ack: 'manual' })
+    staleId = staleLease.message?.id
+    check('(precondition) the message is leased under a 250ms lease', staleLease.type === 'message' && staleId !== undefined, JSON.stringify(staleLease).slice(0, 200))
+    // NO bridge_poll, NO bridge_commit: the lease expires where it is.
+    await new Promise(r => setTimeout(r, 1500))
+  } finally {
+    stopProc(hubC3.child)
+  }
+  await new Promise(r => setTimeout(r, 500))
+
+  console.log('== E2E C4: restart with the same --db (nobody ever reaped the lease) ==')
+  hubC3 = await startHubProc(PORT_C4, ['--db', staleDb])
+  try {
+    const staleBase2 = `http://127.0.0.1:${PORT_C4}/mcp`
+    const staleB2 = makeClient('stale-b', staleBase2)
+    await staleB2.init()
+    const staleHistory = await staleB2.call('bridge_history')
+    check('the same --db is restored after the restart (history still has it)', staleHistory.messages?.some(m => m.id === staleId), `count=${staleHistory.messages?.length}`)
+    const staleBack = await staleB2.call('bridge_wait', { timeoutMs: 3000 })
+    check(
+      'an expired, never-reaped lease survives the restart (the message is not lost)',
+      staleBack.type === 'message' && staleBack.message?.id === staleId,
+      `expected id=${staleId}, got ${JSON.stringify(staleBack).slice(0, 200)}`,
+    )
+    const staleMetrics = await staleB2.call('bridge_metrics')
+    const staleRow = staleMetrics.peers?.find(row => row.peerId === 'stale-b')
+    check('it comes back as ordinary queued mail, not as a dead-letter revival', (staleRow?.deadLettered ?? 0) === 0 && staleMetrics.global?.deadLettered === 0, JSON.stringify(staleRow))
+  } finally {
+    stopProc(hubC3.child)
+  }
+
+  // ====== Scenario D: an input-required task across a REAL restart ======
+  // `input-required` is a non-terminal interrupt, not a terminal status: the
+  // task is still live and the sender still owes an answer. Dropping it at
+  // import makes bridge_task_status / bridge_task_input fail after a restart,
+  // which strands a task that nobody can close.
+  console.log('== E2E D: input-required task survives a real restart (SQLite) ==')
+  const taskDb = join(tmp, 'task.db')
+  const PORT_D = 19032
+  const PORT_D2 = 19033
+  let hubD = await startHubProc(PORT_D, ['--db', taskDb])
+  try {
+    const baseD = `http://127.0.0.1:${PORT_D}/mcp`
+    const taskA = makeClient('task-a', baseD)
+    const taskB = makeClient('task-b', baseD)
+    await Promise.all([taskA.init(), taskB.init()])
+    await taskA.call('bridge_task', { to: 'task-b', prompt: 'e2e task that needs input' })
+    const taskDelivery = await taskB.call('bridge_wait', { timeoutMs: 3000, from: 'task-a' })
+    const taskRef = taskDelivery.message?.id
+    await taskB.call('bridge_ack', { ref: taskRef, status: 'input-required', note: 'which repo?' })
+    const liveStatus = await taskA.call('bridge_task_status', { ref: taskRef })
+    check('the task sits in input-required before the restart (precondition)', liveStatus.task?.status === 'input-required' && liveStatus.a2aState === 'input-required', JSON.stringify(liveStatus).slice(0, 200))
+    await new Promise(r => setTimeout(r, 900))
+    stopProc(hubD.child)
+    await new Promise(r => setTimeout(r, 500))
+
+    console.log('== E2E D2: restart with the same --db (input-required task) ==')
+    hubD = await startHubProc(PORT_D2, ['--db', taskDb])
+    const baseD2 = `http://127.0.0.1:${PORT_D2}/mcp`
+    const taskA2 = makeClient('task-a', baseD2)
+    await taskA2.init()
+    const restored = await taskA2.call('bridge_task_status', { ref: taskRef }).then(r => r, e => ({ error: String(e.message) }))
+    check('bridge_task_status still reports input-required after a process restart', restored.task?.status === 'input-required' && restored.a2aState === 'input-required', JSON.stringify(restored).slice(0, 200))
+    // `task-b` has to RECONNECT before the answer can be delivered: a restored
+    // profile alone is not an addressable peer. The hub routes to peers that are
+    // registered or parked, and a restart leaves `task-b` neither — so the ack
+    // would be refused as an unknown recipient. This is delivery, not the W5
+    // ledger semantics asserted above (the ledger is already restored here).
+    const taskB2 = makeClient('task-b', baseD2)
+    await taskB2.init()
+    const answered = await taskA2.call('bridge_task_input', { ref: taskRef, input: 'here is the info' }).then(r => r, e => ({ error: String(e.message) }))
+    check('bridge_task_input still answers the task after a process restart', answered.ok === true && answered.ref === taskRef, JSON.stringify(answered).slice(0, 200))
+    const resumed = await taskA2.call('bridge_task_status', { ref: taskRef }).then(r => r, e => ({ error: String(e.message) }))
+    check('the answered task is working again after a process restart', resumed.task?.status === 'working', JSON.stringify(resumed).slice(0, 200))
+    const inputAck = await taskB2.call('bridge_wait', { timeoutMs: 3000, ref: taskRef }).then(r => r, e => ({ error: String(e.message) }))
+    check('the reconnected assignee receives the answer as an ack', inputAck.type === 'message' && inputAck.message?.content?.status === 'working' && inputAck.message?.content?.note === 'here is the info', JSON.stringify(inputAck).slice(0, 200))
+  } finally {
+    stopProc(hubD.child)
+  }
+
+  // ========== Scenario E: priority order across a REAL restart ==========
+  // `priority` orders a mailbox, so it has to be part of the persisted message,
+  // not just of the in-memory queue: a restored mailbox must still hand the
+  // urgent message over first. Nothing polls before the restart on purpose —
+  // the two messages are still queued when the process dies.
+  console.log('== E2E E: priority order survives a real restart (SQLite) ==')
+  const prioDb = join(tmp, 'prio.db')
+  const PORT_E = 19034
+  const PORT_E2 = 19035
+  let hubE = await startHubProc(PORT_E, ['--db', prioDb])
+  try {
+    const baseE = `http://127.0.0.1:${PORT_E}/mcp`
+    const prioP = makeClient('prio-p', baseE)
+    const prioQ = makeClient('prio-q', baseE)
+    await Promise.all([prioP.init(), prioQ.init()])
+    await prioP.call('bridge_chat', { to: 'prio-q', message: 'low-priority', priority: 0 })
+    await prioP.call('bridge_chat', { to: 'prio-q', message: 'high-priority', priority: 2 })
+    await new Promise(r => setTimeout(r, 900))
+    stopProc(hubE.child)
+    await new Promise(r => setTimeout(r, 500))
+
+    console.log('== E2E E2: restart with the same --db (both messages still queued) ==')
+    hubE = await startHubProc(PORT_E2, ['--db', prioDb])
+    const baseE2 = `http://127.0.0.1:${PORT_E2}/mcp`
+    const prioQ2 = makeClient('prio-q', baseE2)
+    await prioQ2.init()
+    const prioPoll = await prioQ2.call('bridge_poll')
+    const order = (prioPoll.messages ?? []).map(m => m.content)
+    check('priority 2 is still delivered before priority 0 after a process restart', order[0] === 'high-priority', `order=${JSON.stringify(order)}`)
+    // The order above can survive by luck (the mailbox is exported in its
+    // already-ordered form), so assert the persisted FIELD too: a message that
+    // comes back with no priority is a priority-0 message in everything but
+    // name, and the next arrival would be ordered against that wrong value.
+    const restoredHigh = (prioPoll.messages ?? []).find(m => m.content === 'high-priority')
+    check('a restored message keeps its priority field', restoredHigh?.priority === 2, `restored=${JSON.stringify(restoredHigh)}`)
+  } finally {
+    stopProc(hubE.child)
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 })

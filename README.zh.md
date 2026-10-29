@@ -169,8 +169,8 @@ agent-comm-hub service uninstall
 | `bridge_unregister()` | 离开 hub（移除 peer、队列与绑定；之后保持离线直到显式注册） |
 | `bridge_chat(to, message)` | 发消息；`to: "all"` 广播 |
 | `bridge_task(to, prompt, context?, deliverable?)` | 派结构化任务 |
-| `bridge_ack(ref, status, note?)` | 回执（accepted/rejected/done/failed），自动回到原发送者 |
-| `bridge_wait(from?, timeoutMs?)` | 长轮询收下一条消息（默认 30s；循环=实时监听） |
+| `bridge_ack(ref, status, note?, progress?, artifacts?)` | 回执（accepted/working/input-required/rejected/done/failed），自动回到原发送者并记入账本；`artifacts` 放产出物。只有该任务的 assignee 能改账本 |
+| `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?, statuses?, terminalOnly?)` | 长轮询收下一条消息（默认 30s；循环=实时监听）。`ref` 匹配该任务的 ack 或 assignee 用 chat 回传的结果；`statuses`/`terminalOnly` 收窄到终态 ack |
 | `bridge_poll(from?)` | 非阻塞取走所有排队消息 |
 | `bridge_status()` | 枢纽健康：各 peer 在线/队列/等待状态 |
 | `bridge_peers()` | 谁在线 |
@@ -210,7 +210,7 @@ agent-comm-hub service uninstall
 
 花名册可落盘：`--state-file`（默认 `~/.agent-comm-hub/roster.json`，`off` 关闭），别名与客户端信息在 hub 重启后保留。
 
-花名册变化与排队消息会通过 SSE 通道以 `notifications/message` 事件推送（`data.event: "peers_changed"` 携带完整花名册，`data.event: "message"` 仅推送给收件人），GUI 与 skill 无需轮询即可感知。
+花名册变化、排队消息与任务跃迁会通过 SSE 通道以 `notifications/message` 事件推送（`data.event: "peers_changed"` 携带完整花名册，`data.event: "message"` 仅推送给收件人，`data.event: "task_changed"` 携带 `{taskId, status, a2aState, updatedAt}` 且只推给该任务的发送方与 assignee），GUI 与 skill 无需轮询即可感知。
 
 所有返回都是 lossless JSON（兼容 DSH 的严格工具注册表）。
 
@@ -276,7 +276,7 @@ const hub = startHub({ port: 18764 }, console) // 返回 { hub, registry, server
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit（strict）
-pnpm test             # 测试套件（314 项：169 冒烟 + 46 安装器 + 11 运维 + 35 herdr + 33 发现 + 20 e2e）
+pnpm test             # 测试套件（446 项：286 冒烟 + 46 安装器 + 11 运维 + 35 herdr + 33 发现 + 35 e2e）
 npm run build:admin   # admin/ 工作区（用 npm）→ 单文件 assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js（零依赖）
 pnpm pack             # 构建 + npm pack（发布产物）

@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.11.0 (2026-10-29)
+
+- **Only a task's assignee can move its ledger**: an ack from any other peer is
+  refused instead of quietly rewriting `status`/`artifacts`. A chat or notice
+  that merely quotes a `ref` still passes through, so correlation is unchanged.
+- **A dropped task is reported, not forgotten**: when a task message is dropped
+  (rate, overflow, expiry, dead letter) the ledger gets a `system` event that
+  moved no state and the sender receives a `from: "hub"` notice naming the task.
+  The task stays open — a dead letter can still be revived, and overflow/rate can
+  be driven by third-party traffic; only a peer that cannot come back
+  (unregister, parked-mailbox expiry) settles a task as `failed`.
+- **Manual-ack leases survive a restart**: an uncommitted lease is exported with
+  the mailbox (expired leases included — expiry is the consumer's decision, not
+  the snapshot's) and is handed out again after the hub starts, so a message can
+  no longer sit in neither the queue nor the database. `attempts` remains
+  memory-only, which makes `maxAttempts` a bound per process.
+- **`input-required` and `priority` survive a restart**: a task waiting for an
+  answer is still `input-required` after a restart (`bridge_task_status` and
+  `bridge_task_input` keep working), and a restored message keeps its priority
+  instead of every message reading back as priority 0.
+- **`bridge_tasks` filters on every ledger status** (`input-required` and
+  `canceled` included) from one shared list, so the filter and the ledger can no
+  longer drift apart.
+- **Peer ids and group ids are one namespace in both directions**: a peer can no
+  longer register under an id a group owns, and a group can no longer be created
+  under a peer's id — either would hijack every unicast to that id into a
+  fan-out. `all` and `hub` stay reserved on both sides.
+- **`bridge_rename` respects a token-bound identity**: a session whose id comes
+  from its access token can no longer re-key itself, or claim an id another token
+  owns, without manager rights.
+- **`bridge_wait` can wait for an outcome**: `terminalOnly` / `statuses` narrow a
+  `ref` wait to the ack you actually want, a plain `ref` wait also matches the
+  chat an assignee sends its result in, and a timeout now carries the task's
+  current ledger status so "nobody answered" is distinguishable from "the hub
+  already judged it done".
+- **New SSE event `task_changed`**: `{taskId, status, a2aState, updatedAt}`, sent
+  when a task's ledger status actually moves, to its sender and assignees only.
+  Additive — a client that does not know the event ignores it.
+- **Sending into a group requires membership**: `bridge_chat` / `bridge_notice` /
+  `bridge_task` addressed to a group id are refused for peers that were never
+  added to it.
+- **Dead letters, ack timelines and lease accounting are bounded**: at most 200
+  dead letters per peer (the oldest is evicted and counted), a per-assignee ack
+  timeline cap that keeps the drop evidence when it trims, and a `bridge_commit`
+  that no longer releases a lease it never held.
+
 ## 0.10.0 (2026-10-11)
 
 - **Session lifecycle**: an unused session (no live SSE stream) is forgotten after

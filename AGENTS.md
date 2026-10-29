@@ -28,7 +28,7 @@ Key facts:
   other. Same-name connections share one peer id (N:1) and one mailbox.
 - **Offline-tolerant**: messages queue per peer (max 200, oldest dropped) and
   are delivered on the next `bridge_wait`/`bridge_poll`.
-- Version `0.10.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
+- Version `0.11.0`, Node ≥ 22, MIT license, npm name `agent-comm-hub`, package
   manager is **pnpm** (single-package repo; `pnpm-workspace.yaml` only carries
   the pnpm 10 `allowBuilds` approval for esbuild). The one exception is the
   `admin/` web-console workspace, which uses **npm** (its own
@@ -45,9 +45,9 @@ layers:
 |---|---|
 | Transport | MCP streamable-http hand-rolled over `node:http`; JSON-RPC + SSE; `Mcp-Session-Id` per connection; `charset=utf-8` on every response; **`Origin` gate** (no Origin / loopback / `--allow-origins` / same-host **with a bearer token**; anything else 403) and CORS that echoes an allowed origin instead of `*`; 1 MB request-body cap |
 | Identity | Auto-registration at `initialize`; `clientInfo.name` → peer id (sanitized, `agent` fallback); `bridge_register` renames; `bridge_unregister` detaches and suppresses re-auto-registration |
-| Routing | Per-peer FIFO mailbox + long-poll waiters; `bridge_wait` (default 30 s, server ceiling 60 s); sender-filtered waits; `ref`-filtered ack waits; `to: "all"` broadcast; ack routed back to the original sender of `ref` |
-| Protocol | Message `{id, seq, from, to, kind, content, ref?, channel?, threadId?, hop?, priority?, expiresAt?, ts}`; `priority` (0\|1\|2, absent = 0) orders the recipient's mailbox and decides what overflow drops (the LEAST important message, oldest first within a priority — unchanged from "oldest dropped" when nobody sets one); `kind` = `chat` \| `task` \| `notice` \| `ack`; the SSE push contract (`SSE_METHOD` / `SSE_EVENT_PEERS_CHANGED` / `SSE_EVENT_MESSAGE`) lives in `src/protocol.ts` and the desktop's Rust side mirrors the same named constants; task/ack/notice payloads are JSON-encoded strings decoded by `decodeContent`; every message carries a monotonic `seq` (never restarts — see `bridge_history { since }`) and may carry an absolute `expiresAt` (dropped and counted as `droppedExpired` instead of delivered late); `bridge_task` records a task ledger (status + ack timeline) with per-assignee delivery times; `ref` chains carry a `hop` depth that persists with the message (a restart cannot reset a chain) and is **counted, not enforced** — two ceilings, `MAX_HOP` (5) for a task re-delegation and `MAX_REPLY_CHAIN` (50) for a plain reply, past which `hop` simply stops counting; the message and its `ref` are always delivered |
-| Delivery | Per-peer mailbox with `maxQueue`; overflow is **counted** (`droppedOverflow`) rather than silent, and a waiting peer gets a `notice` from the reserved id `hub`. An optional per-peer token bucket (`ratePerMin`, 0 = off) limits how fast a mailbox ACCUMULATES — it guards the recipient against a broadcast storm and counts excess as `droppedRate` (no notice is queued for a rate drop, or the notices would fill the mailbox just as fast). Manual-ack leases (`ack: "manual"` + `bridge_commit`/`bridge_nack`, `leaseTtlMs`, `maxAttempts`) give at-least-once handling; `attempts`/`inFlight`/`deadLettered`/`droppedOverflow`/`droppedExpired`/`droppedRate` are visible in the roster |
+| Routing | Per-peer FIFO mailbox + long-poll waiters; `bridge_wait` (default 30 s, server ceiling 60 s); sender-filtered waits (`from: "hub"` always passes — a hub notice bypasses `from`, `ref`, `statuses` and `terminalOnly`; a `threadId` wait does still narrow it, like any other message); `ref`-filtered waits that match an `ack` **or** the `chat` an assignee hands its result back in (a `chat` whose `ref` is a known task is only accepted from that task's sender or one of its assignees — task ids leak through `bridge_events`, so the ledger is what keeps a third party from answering the wait), optionally narrowed by `statuses` / `terminalOnly` (both filter the ack half only: a chat has no status, so it never satisfies them; the two narrow each other, and an always-empty combination is refused at the tool boundary rather than silently waiting out the timeout); a `bridge_wait` timeout carries the ledger snapshot of its `ref` only when the caller is that task's sender or one of its assignees; `to: "all"` broadcast; ack routed back to the original sender of `ref` |
+| Protocol | Message `{id, seq, from, to, kind, content, ref?, channel?, threadId?, hop?, priority?, expiresAt?, ts}`; `priority` (0\|1\|2, absent = 0) orders the recipient's mailbox and decides what overflow drops (the LEAST important message, oldest first within a priority — unchanged from "oldest dropped" when nobody sets one); `kind` = `chat` \| `task` \| `notice` \| `ack`; the SSE push contract (`SSE_METHOD` / `SSE_EVENT_PEERS_CHANGED` / `SSE_EVENT_MESSAGE` / `SSE_EVENT_TASK_CHANGED`) lives in `src/protocol.ts`, and the desktop's Rust side mirrors the two it consumes (`peers_changed` / `message`) while `task_changed` reaches it as an unknown event its catch-all dispatcher ignores; task/ack/notice payloads are JSON-encoded strings decoded by `decodeContent`; every message carries a monotonic `seq` (never restarts — see `bridge_history { since }`) and may carry an absolute `expiresAt` (dropped and counted as `droppedExpired` instead of delivered late); `bridge_task` records a task ledger (status + ack timeline) with per-assignee delivery times; `ref` chains carry a `hop` depth that persists with the message (a restart cannot reset a chain) and is **counted, not enforced** — two ceilings, `MAX_HOP` (5) for a task re-delegation and `MAX_REPLY_CHAIN` (50) for a plain reply, past which `hop` simply stops counting; the message and its `ref` are always delivered |
+| Delivery | Per-peer mailbox with `maxQueue`; overflow is **counted** (`droppedOverflow`) rather than silent, and a waiting peer gets a `notice` from the reserved id `hub`. An optional per-peer token bucket (`ratePerMin`, 0 = off) limits how fast a mailbox ACCUMULATES — it guards the recipient against a broadcast storm and counts excess as `droppedRate` (no notice is queued for a rate drop, or the notices would fill the mailbox just as fast). Manual-ack leases (`ack: "manual"` + `bridge_commit`/`bridge_nack`, `leaseTtlMs`, `maxAttempts`) give at-least-once handling: an uncommitted lease is exported with the mailbox (inside the peer's queue array — no extra top-level key, so an older hub reads it as ordinary queued mail and redelivers it once) and comes back after a restart. **EVERY lease is exported, expired or not**: the snapshot records what the hub handed out, and expiry is decided by the consumer (`poll`/`wait`/`reapLeases`), because filtering on `expiresAt` here left an un-reaped expired lease in neither the queue nor the snapshot. **`attempts` does NOT survive a restart** (the counter is memory-only), so `maxAttempts` bounds a message per PROCESS, not per lifetime, and a message that was requeued competes for a mailbox slot like arriving mail — whatever does not fit is dead-lettered rather than dropped; dead letters are one bounded list per peer (`MAX_DEAD_LETTERS` 200, oldest evicted **and counted**); `attempts`/`inFlight`/`deadLettered`/`droppedOverflow`/`droppedExpired`/`droppedRate` are visible in the roster |
 | Lifecycle | Connected = activity within `connectedWindowMs` (30 s) **or** a live SSE channel; idle GC **parks** peers idle beyond `peerIdleTimeoutMs` (10 min) — the peer leaves the connected set as `reachable: "parked"` but keeps its mailbox and stays addressable; parked mail drops only after `parkedTtlMs` (7 days). An explicit `bridge_unregister` or a manager kick drops both the mailbox and the addressability |
 
 ### Code layout
@@ -128,7 +128,7 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
   the peer id stays
   the immutable routing key while the alias is a mutable display name held in
   `AgentHub.profiles` (survives unregister/GC). `bridge_rename { peerId }`
-  true-renames a registered peer (atomic re-key incl. history rewrite);
+- `bridge_rename { peerId }` true-renames a registered peer (atomic re-key incl. history rewrite, in-flight manual leases and dead letters);
   `bridge_register` self-rename uses the same lossless path when its session
   is the only one attached. Other-peer history reads and
   `bridge_tasks { peer }` are manager-gated. `bridge_task_status` is open to
@@ -137,7 +137,31 @@ scripts/            # release-notes.mjs (drafts GitHub release notes from CHANGE
   group members) exactly as `bridge_tasks` lists it for them. Hub
   pushes SSE notifications:
   `peers_changed` (full roster) to all streams, `message` (queued-mail hint)
-  to the recipient's streams only.
+  to the recipient's streams only, and `task_changed`
+  (`{taskId, status, a2aState, updatedAt}`) to the task's sender plus its
+  assignees — deliberately neither a broadcast nor part of the manager relay: a
+  task is a private arrangement, and a manager loses nothing because every
+  transition is caused by an ack (relayed) or a hub timer (readable through
+  `bridge_tasks`/`bridge_events`). It fires only on a REAL status change, so the
+  stream is not an echo of every `working` beat.
+- **Peer ids and group ids share one `to` namespace, mutually exclusive.** A
+  group is resolved before a peer, so a group wearing a peer's id would turn
+  every unicast to that peer into a fan-out (and every task into a group task).
+  `register`/`renamePeer` refuse an id a group owns (and refuse parked ids
+  unless the caller reclaims them), `createGroup` refuses a live or profiled
+  peer's id, and `importMailboxes` applies the same rule to a restored state
+  file (external input). `all` and `hub` are reserved on both sides; a client
+  whose `clientInfo.name` sanitizes into one of them falls back to
+  `agent-<random>` instead of failing to connect.
+- **A dropped message does NOT write a terminal ledger state.** Per-drop
+  reconciliation records a `system: true, applied: false` event naming the
+  message/task and sends the task's sender a `from: "hub"` notice, and the task
+  stays as it was. The reason is that neither path is final: a dead letter can be
+  revived by `bridge_nack` (a terminal write made the revived assignee's `done`
+  land as `applied: false`), and overflow/rate can be driven by a third party
+  (≈200 chat messages could otherwise veto any pending task). Only a peer that
+  cannot come back — `unregister`/kick, or a parked mailbox reaching
+  `parkedTtlMs` — settles a task as terminal, because no completion path remains.
 
 ## Build and test commands
 
@@ -146,8 +170,8 @@ pnpm install          # install dev deps (typescript, esbuild, @types/node only)
 pnpm typecheck        # tsc --noEmit (strict, ES2023, no emit)
 pnpm test             # build + build:test (esbuild), then node test/smoke.mjs
                       #   + test/setup.mjs + test/ops.mjs + test/herdr.mjs
-                      #   + test/discover.mjs + test/e2e.mjs → 314 checks
-                      #   (169+46+11+35+33+20)
+                      #   + test/discover.mjs + test/e2e.mjs → 446 checks
+                      #   (286+46+11+35+33+35)
 npm run build:admin   # admin/ (npm, not pnpm) → the single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero-dependency bundle)
 pnpm pack             # build + npm pack (publishing artifact)
@@ -164,12 +188,12 @@ pnpm pack             # build + npm pack (publishing artifact)
   an **ubuntu / windows / macos matrix**, `pnpm install --frozen-lockfile` →
   `typecheck` → `test` → `pack` → upload the tarball as an artifact.
 - After any edit, run at least `pnpm typecheck` and the affected suite; before
-  merging, the full `pnpm test` must stay green (verified: 169/169 + 46/46 +
-  11/11 + 35/35 + 33/33 + 20/20 on Node 24 / Windows).
+  merging, the full `pnpm test` must stay green (verified: 286/286 + 46/46 +
+  11/11 + 35/35 + 33/33 + 35/35 on Node 24 / Windows).
 
 ## Testing
 
-- `test/smoke.mjs` (169 checks): three simulated agents over real MCP sessions
+- `test/smoke.mjs` (286 checks): three simulated agents over real MCP sessions
   against a live `startHub()` — registration, duplicate rejection, rename,
   chat routing, sender-filtered waits, task+ack routing back to the original
   sender, task delivery bookkeeping (`deliveredMs` for both the waiter handoff
@@ -193,7 +217,25 @@ pnpm pack             # build + npm pack (publishing artifact)
   persistence (stateFile write + restore), remote auth (401 without/unknown
   token, token identity overrides the
   client name, same-name users land on distinct peers with no mailbox
-  leak, token-bound rename rejection, manager-role token ops).
+  leak, token-bound rename rejection, manager-role token ops), and the
+  ack/ledger integrity block: only an assignee may move a task ledger
+  (non-assignee ack rejected, a broadcast task's other recipients keep their
+  own state), every drop path (rate / overflow / expiry / dead letter) recorded
+  as a `system` event that leaves the task open plus one `from: "hub"` notice to
+  the sender (a fan-out warns once, not once per recipient), unregister and
+  parked-TTL settling as `failed`, `deliveredMs` never booked on a drop, a
+  dead-lettered task still completable after `bridge_nack`, lease accounting
+  that cannot be reset or outgrow `maxQueue`, a requeued lease competing for a
+  slot, dead-letter eviction settling the task it destroys, the per-assignee
+  ack-timeline cap keeping the drop evidence, reserved ids (`all` / `hub`) on
+  every entry point, the shared id namespace (a group's id or a parked mailbox
+  is not claimable by a peer, and a peer's id is not claimable by a group),
+  `bridge_tasks` filtering on the full status list,
+  `bridge_wait { terminalOnly / statuses }` (a chat reply never satisfies a
+  status filter, an unknown status is rejected) with the skipped intermediate
+  ack still in the
+  mailbox, the `task_changed` push reaching the sender and the assignee but not
+  a third party, and the timeout snapshot carrying the task's ledger status.
 - `test/setup.mjs` (46 checks): `runSetup` against a fake home dir — only the
   `agent-hub` key is touched, unrelated config preserved, backups created,
   idempotency (a re-run must report it changed NO file — backup-name counting
@@ -212,12 +254,17 @@ pnpm pack             # build + npm pack (publishing artifact)
   rejected), `~`/wildcard expansion, PATH probing (win32 PATHEXT vs POSIX
   semantics), config-path discovery, npm-global discovery incl. scoped dirs,
   os filtering, source priority.
-- `test/e2e.mjs` (20 checks): end-to-end against the REAL built CLI
+- `test/e2e.mjs` (35 checks): end-to-end against the REAL built CLI
   (`lib/cli.js`) spawned as a subprocess — /healthz, MCP sessions, SSE push
   timeliness (message reaches passive listeners before any poll), heartbeat
   via `--heartbeat-ms`, task/ack, broadcast, groups, SQLite persistence
   across a real process restart, and remote-auth mode (401s, token identity,
-  manager gating). Hand-written and committed like the other suites.
+  manager gating). The restart cases now cover the durability half of the
+  ledger and mailbox: an uncommitted manual lease is handed out again with the
+  same message id (and is not a dead-letter revival), an expired lease nobody
+  ever reaped still comes back as ordinary queued mail, an `input-required`
+  task is still answerable after a restart, and `priority` order survives one.
+  Hand-written and committed like the other suites.
 - Only the `test/*-entry.mjs` files are **esbuild outputs** of the `.ts`
   entries (`entry.ts`, `setup-entry.ts`, `ops-entry.ts`, `herdr-entry.ts`,
   `discover-entry.ts`) and are gitignored — edit the `.ts` files, not the

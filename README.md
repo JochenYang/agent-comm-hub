@@ -258,8 +258,8 @@ with `agent-comm-hub setup --remove` (or only refresh skills via
 | `bridge_chat(to, message, threadId?, priority?, ref?, expiresAt?)` | Send a chat message; `to: "all"` broadcasts. `expiresAt` is an absolute epoch-ms deadline: a message still undelivered after it is dropped and counted, not delivered late. `priority` (0\|1\|2, default 0) orders the recipient's mailbox |
 | `bridge_notice(to, message, level?)` | Send a system-flavoured notice (`info`/`warn`/`error`) — read as a status, not as chat; creates no task |
 | `bridge_task(to, prompt, context?, deliverable?, timeoutMs?, threadId?, ref?, expiresAt?)` | Delegate a structured task (`timeoutMs` is the assignee's SLA once it arrives; `expiresAt` is the delivery deadline) |
-| `bridge_ack(ref, status, note?, progress?)` | Acknowledge a task (`accepted`/`working`/`rejected`/`done`/`failed`), routed back to the original sender |
-| `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?)` | Long-poll for the next message (default 30 s). `ack: "manual"` leases it instead of consuming it; `maxMessages > 1` returns `{type:"messages", messages:[…]}` in one call |
+| `bridge_ack(ref, status, note?, progress?, artifacts?)` | Acknowledge a task (`accepted`/`working`/`input-required`/`rejected`/`done`/`failed`), routed back to the original sender and folded into the ledger. `artifacts` (`[{name, mimeType?, text?\|url?}]`) is where the result goes; only the task's assignee may move its ledger |
+| `bridge_wait(from?, ref?, threadId?, timeoutMs?, ack?, maxMessages?, statuses?, terminalOnly?)` | Long-poll for the next message (default 30 s). `ref` matches that task's ack **or** the chat an assignee answers with; `statuses`/`terminalOnly` narrow it to a terminal ack. `ack: "manual"` leases it instead of consuming it; `maxMessages > 1` returns `{type:"messages", messages:[…]}` in one call |
 | `bridge_poll(from?, ack?)` | Non-blocking drain of queued messages (`ack: "manual"` leases them) |
 | `bridge_commit(ids)` | Acknowledge leased messages; uncommitted ones come back when the lease expires |
 | `bridge_nack(ids)` | Give leased (or dead-lettered) messages back immediately — use when handling failed |
@@ -274,7 +274,7 @@ with `agent-comm-hub setup --remove` (or only refresh skills via
 | `bridge_discover(skill?, tag?, acceptsTasks?, idleOnly?)` | Find a peer to hand work to, with its current load |
 | `bridge_group_create` · `bridge_group_send` · `bridge_group_list` · `bridge_group_delete` · `bridge_group_add_member` · `bridge_group_remove_member` | Named channels for a subset of peers |
 
-That is the full 26 message + group tools; the 11 control tools are below. (37 in total and symmetric on every side — see [ARCHITECTURE.md](ARCHITECTURE.md) §4.)
+That is the full 28 message + observability + group tools; the 11 control tools are below. (39 in total and symmetric on every side — see [ARCHITECTURE.md](ARCHITECTURE.md) §4.)
 
 Two peer ids are reserved and cannot be registered or renamed into: `all` (broadcast) and `hub` (the hub's own drop notices — `bridge_wait { from: "hub" }` subscribes to them).
 
@@ -348,10 +348,11 @@ token table owns the `Authorization` header, so `--manager-token` is ignored the
 Rosters persist: `--state-file` (default `~/.agent-comm-hub/roster.json`,
 `off` to disable) keeps aliases and client info across hub restarts.
 
-Roster changes and queued mail are pushed over the SSE channel as
+Roster changes, queued mail and task moves are pushed over the SSE channel as
 `notifications/message` events (`data.event: "peers_changed"` with the full
-roster, `data.event: "message"` hint scoped to the recipient), so GUIs and
-skills can react without polling.
+roster, `data.event: "message"` hint scoped to the recipient,
+`data.event: "task_changed"` with `{taskId, status, a2aState, updatedAt}` to a
+task's sender and assignees only), so GUIs and skills can react without polling.
 
 Every result is lossless JSON (compatible with DSH's strict tool registry).
 
@@ -486,7 +487,7 @@ const hub = startHub({ port: 18764 }, console) // returns { hub, registry, serve
 ```bash
 pnpm install
 pnpm typecheck        # tsc --noEmit (strict)
-pnpm test             # test suite (314 checks: 169 smoke + 46 setup + 11 ops + 35 herdr + 33 discover + 20 e2e)
+pnpm test             # test suite (446 checks: 286 smoke + 46 setup + 11 ops + 35 herdr + 33 discover + 35 e2e)
 npm run build:admin   # admin/ workspace (npm) → single-file assets/admin.html
 pnpm run build        # esbuild → lib/{cli,index,setup}.js (zero deps)
 pnpm pack             # build + npm pack (publishing artifact)
@@ -537,4 +538,4 @@ Tests cover registration, duplicate rejection, chat routing, sender-filtered wai
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 314-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
+MIT — see [LICENSE](LICENSE). Contributions welcome: keep the 446-check suite green (`pnpm test`) and zero runtime dependencies. Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).

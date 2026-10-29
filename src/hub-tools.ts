@@ -8,7 +8,7 @@
 import type { AgentHub } from './hub.js'
 import type { McpTool, SessionRegistry } from './mcp-server.js'
 import { AGENT_STATUSES, type HerdrCtl } from './herdr-ctl.js'
-import { CLIENT_ACK_STATUSES, a2aState, decodeContent, encodeContent, type AckContent, type AckStatus, type BridgeMessage, BROADCAST, HUB_PEER, type NoticeContent, type NoticeLevel, PEER_ID_PATTERN, type PeerCard, type TaskArtifact, type TaskContent, type TaskStatus, type WaitResult } from './protocol.js'
+import { ALL_ACK_STATUSES, ALL_TASK_STATUSES, CLIENT_ACK_STATUSES, TERMINAL_TASK_STATUSES, a2aState, ackToTaskStatus, decodeContent, encodeContent, type AckContent, type AckStatus, type BridgeMessage, BROADCAST, HUB_PEER, type NoticeContent, type NoticeLevel, PEER_ID_PATTERN, type PeerCard, type TaskArtifact, type TaskContent, type TaskStatus, type WaitResult } from './protocol.js'
 import { ANON_JOIN_PEER } from './auth.js'
 
 /** Default wait budget when a client omits timeoutMs. */
@@ -85,14 +85,32 @@ export function autoRegisterPeer(
   // Sentinel = anonymous walk-in whose initialize-resolution never ran (e.g.
   // it started from an SSE stream): give it a session-unique fallback id so
   // it can never merge with another walk-in.
-  const peerId = tokenPeer === ANON_JOIN_PEER
+  const derived = tokenPeer === ANON_JOIN_PEER
     ? `join-${sanitizePeerId(clientName ?? 'agent')}-${Math.random().toString(36).slice(2, 6)}`
     : (tokenPeer ?? sanitizePeerId(clientName ?? 'agent'))
+  // A client whose reported name sanitizes to a reserved id (`all` / `hub`) or to
+  // a group's id gets a generated one instead of an error: auto-registration runs
+  // on the connect path, and throwing here would simply leave a legitimate client
+  // unable to make ANY tool call for as long as that group exists — a permanent
+  // lockout of a whole class of agents (every `claude-code` session, the moment
+  // someone creates a group called `claude-code`). The fallback only decides what
+  // it is called instead; it still cannot take such an id, so `hub.register`'s
+  // namespace guards hold. Only the explicit paths (bridge_register,
+  // bridge_rename) report the collision as an error: a human-chosen id deserves a
+  // clear message, an auto-derived one does not.
+  //
+  // A PARKED id is deliberately NOT in this fallback: the connect path IS the
+  // identity coming back (same client name, or the token that defines it), and
+  // reclaiming its own mailbox is the whole point of parking. Diverting it to
+  // `agent-xxxx` would strand that mail — and the tasks queued in it.
+  const peerId = derived === BROADCAST || derived === HUB_PEER || hub.groupOf(derived) !== undefined
+    ? `agent-${Math.random().toString(36).slice(2, 6)}`
+    : derived
   if (!hub.has(peerId)) {
     hub.register(peerId, {
       ...(clientName !== undefined ? { name: clientName } : {}),
       ...(clientVersion !== undefined ? { version: clientVersion } : {}),
-    })
+    }, { reclaim: true })
   }
   registry.bindPeer(sessionId, peerId)
   hub.touch(peerId)
@@ -176,7 +194,22 @@ export interface HubToolsOptions {
    * a credential there is nothing to check, and refusing the claim would break
    * every existing loopback setup (the desktop GUI included). */
   managerTokenRequired?: boolean
+  /** Every peer id an access token is bound to, read FRESH on each call (the
+   * table changes at runtime through the token admin API). Optional: when it is
+   * not supplied, `bridge_rename` falls back to the registry's live bindings.
+   *
+   * It has to be a supplier, not a snapshot, and it has to cover tokens with NO
+   * session: the live bindings only know the tokens currently connected, so an
+   * operator id that was configured but had not connected yet looked unclaimed —
+   * and a rename onto it made that operator's next connect ATTACH to the
+   * impostor's mailbox (`autoRegisterPeer` sees `hub.has(peerId)`). */
+  tokenPeers?: () => ReadonlySet<string>
 }
+
+/** Cap for one `ids` array on bridge_commit / bridge_nack. The hub releases
+ *  leases synchronously and one call has no business walking an arbitrarily
+ *  long list; a caller with more than this is told to split the call instead. */
+const MAX_LEASE_IDS = 1000
 
 /**
  * The single definition of "is this session a hub manager?".
@@ -234,9 +267,43 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
   /** Validate an `ids` argument (used by bridge_commit / bridge_nack). */
   const idList = (value: unknown, tool: string): string[] => {
     if (!Array.isArray(value)) throw new Error(`${tool} expects ids: an array of message ids`)
+    if (value.length > MAX_LEASE_IDS) {
+      throw new Error(`${tool} accepts at most ${MAX_LEASE_IDS} ids per call (got ${value.length}); commit or nack in batches`)
+    }
     const ids = value.filter((id): id is string => typeof id === 'string' && id !== '')
     if (ids.length === 0) throw new Error(`${tool} expects at least one message id`)
     return ids
+  }
+  /** Validate the `statuses` filter of bridge_wait. An unknown value is a
+   *  caller mistake worth reporting: silently dropping it would leave a wait
+   *  that can never match, and silently keeping it would compare against a
+   *  status no ack can carry — the same failure, with no clue why.
+   *
+   *  `terminalOnly` takes the INTERSECTION of `statuses` with the terminal acks,
+   *  so `{ statuses: ['working'], terminalOnly: true }` can never match anything
+   *  and would quietly burn the whole `timeoutMs`. Two filters that contradict
+   *  each other are a caller mistake with a definite answer, not a wait to sit
+   *  out — say so at call time, the same way an unknown status is refused. */
+  const ackStatuses = (value: unknown, terminalOnly: boolean): readonly AckStatus[] | undefined => {
+    if (value === undefined) return undefined
+    if (!Array.isArray(value)) throw new Error('statuses must be an array of ack statuses')
+    if (value.length === 0) throw new Error('statuses must not be empty — omit it to wait for any ack')
+    const out: AckStatus[] = []
+    for (const entry of value) {
+      if (typeof entry !== 'string' || !(ALL_ACK_STATUSES as readonly string[]).includes(entry)) {
+        throw new Error(`invalid statuses entry: ${JSON.stringify(entry)} (expected one of ${ALL_ACK_STATUSES.join(' | ')})`)
+      }
+      out.push(entry as AckStatus)
+    }
+    if (terminalOnly) {
+      // Derived from TERMINAL_TASK_STATUSES, never re-typed: the two lists must
+      // not be able to disagree about what "terminal" means.
+      const terminalAcks = TERMINAL_TASK_STATUSES.filter(status => (ALL_ACK_STATUSES as readonly string[]).includes(status))
+      if (!out.some(status => terminalAcks.includes(ackToTaskStatus(status)))) {
+        throw new Error(`statuses and terminalOnly are combined by intersection, and ${out.join(' | ')} contains no terminal ack status (${terminalAcks.join(' | ')}) — the wait could never resolve`)
+      }
+    }
+    return out
   }
   /** Validate an absolute epoch-ms deadline. A deadline already in the past is a
    *  caller mistake, not a message to drop silently — say so at send time. */
@@ -470,6 +537,16 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
           throw new Error(`peer already registered by another connection: ${peerId}`)
         }
         const current = registry.peerFor(sessionId)
+        // `has()` is false for a PARKED peer (idle GC takes it out of the registry
+        // but keeps its mailbox and keeps it addressable), so the check above
+        // missed the same takeover in its other state: claiming such an id
+        // inherits the mail waiting in it, and its owner's return then hits the
+        // very error above. Liveness is the wrong test — ATTACHMENT is: an id no
+        // session holds (a mailbox restored from disk after a restart) is nobody
+        // else's, and the caller reclaims it by its own name or token.
+        if (hub.ownsMailbox(peerId) && current !== peerId && registry.attachedCount(peerId) > 0) {
+          throw new Error(`peer id '${peerId}' is parked but still attached to another connection: it keeps its mailbox and is still addressable`)
+        }
         if (current !== undefined && current !== peerId) {
           if (registry.attachedCount(current) === 1) {
             // Sole session on the old id: atomically re-key the peer —
@@ -491,7 +568,10 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         // hub.profiles (persisted when a stateFile is configured) and receiving
         // mail into a mailbox nobody would ever drain — a ghost peer.
         registry.bindPeer(sessionId, peerId)
-        if (!hub.has(peerId)) hub.register(peerId)
+        // `reclaim`: reaching this line means the id was either free or its
+        // mailbox is unclaimed by any other connection — the parked-takeover case
+        // was refused just above, so unwrapping it is the identity's return.
+        if (!hub.has(peerId)) hub.register(peerId, undefined, { reclaim: true })
         registry.clearSuppress(sessionId)
         hub.touch(peerId)
         if (alias !== undefined) hub.setAlias(peerId, alias)
@@ -535,7 +615,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_rename',
-      description: 'Rename on the hub, two layers: (1) `alias` sets a display name — cosmetic only, it shows up in bridge_peers / bridge_status and the desktop roster while routing, mailboxes, and history keep the immutable peer id; renaming yourself is open to everyone. (2) `peerId` truly re-keys another registered peer (manager rights required): mailbox, waiters, session bindings, and history attribution move atomically, so queued messages and acks stay continuous. Renaming ANOTHER peer (either layer) requires manager rights (hub managerPeers).',
+      description: 'Rename on the hub, two layers: (1) `alias` sets a display name — cosmetic only, it shows up in bridge_peers / bridge_status and the desktop roster while routing, mailboxes, and history keep the immutable peer id; renaming yourself is open to everyone. (2) `peerId` truly re-keys another registered peer (manager rights required): mailbox, waiters, in-flight manual leases, dead letters, session bindings, and history attribution move atomically, so queued messages and acks stay continuous and a lease you took under the old id is still yours to commit. Renaming ANOTHER peer (either layer) requires manager rights (hub managerPeers).',
       inputSchema: schema({
         alias: optStr('New display name (1-64 chars, spaces/CJK allowed; empty string clears back to no alias).'),
         peerId: optStr('New routing id for `peer` — a true rename that moves all state (manager only). Target must be a registered peer.'),
@@ -547,16 +627,45 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         if (!hasAlias && !hasPeerId) {
           throw new Error('nothing to rename: pass alias and/or peerId')
         }
+        if (hasPeerId && args.peer === undefined) {
+          // Kept ahead of the token gate below so the documented path stays the
+          // documented answer: changing YOUR OWN id is bridge_register's job.
+          throw new Error('peerId requires peer — to change your own id, call bridge_register(newId)')
+        }
+        const tokenPeer = registry.tokenFor(sessionId)?.peer
+        if (hasPeerId && tokenPeer !== undefined) {
+          // This is the OTHER door to an id change, and it used to stand wide
+          // open: naming yourself in `peer` made `target === peer`, which skipped
+          // the manager gate — while bridge_register refuses exactly this
+          // (a token owns its session's identity). So a token session could
+          // re-key itself here, which in remote mode is forging an identity.
+          requireManager(peer, `re-keying '${args.peer === undefined ? peer : String(args.peer)}'`, sessionId)
+        }
         let target = args.peer === undefined ? peer : String(args.peer)
         if (target !== peer) requireManager(peer, `renaming '${target}'`, sessionId)
         let previousId: string | undefined
         if (hasPeerId) {
-          if (args.peer === undefined) {
-            throw new Error('peerId requires peer — to change your own id, call bridge_register(newId)')
-          }
           const newId = String(args.peerId)
           if (!PEER_ID_PATTERN.test(newId)) {
             throw new Error(`invalid peerId: ${newId} (expected [A-Za-z0-9._:-]{1,64})`)
+          }
+          // A token MAPPED to `newId` owns that identity. Re-keying another peer
+          // onto it would hand a rename the power to take an operator's id away
+          // (and, since the token decides the peer id at connect, to make two
+          // identities collide).
+          //
+          // The authority is the TOKEN TABLE (`options.tokenPeers`), not the live
+          // bindings: iterating `registry.tokenBindings` only saw tokens with a
+          // session at this instant, so a configured-but-not-yet-connected
+          // operator id looked free. Taking it turns that operator's connect into
+          // an ATTACH (`autoRegisterPeer`: `hub.has(peerId)`), i.e. two tenants on
+          // one mailbox — the cross-tenant takeover this check exists to stop.
+          // The live bindings stay in the union: a session whose token was just
+          // revoked still holds its identity.
+          const boundPeers = new Set<string>(options.tokenPeers?.() ?? [])
+          for (const identity of registry.tokenBindings.values()) boundPeers.add(identity.peer)
+          if (boundPeers.has(newId) && newId !== tokenPeer) {
+            throw new Error(`peerId '${newId}' is bound to an access token — a token's identity cannot be reassigned by a rename`)
           }
           previousId = target
           hub.renamePeer(target, newId)
@@ -576,7 +685,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       description: 'Send a chat message to another agent on the hub. Use bridge_wait (long-poll) or bridge_poll to receive replies. `to` is the target peerId, a group id, or "all" to broadcast. Optional `threadId` groups multi-turn dialogs; optional `ref` marks a reply-to and carries the chain depth in `hop`. Reply chains are counted, not enforced (50 hops for chat/ack, 5 for a task replying to a task): past the ceiling the message and its `ref` are delivered unchanged and only `hop` stops counting, so nothing is ever refused and no correlation is lost.',
       inputSchema: schema(
         {
-          to: str('Target peerId, group id, or "all" to broadcast.'),
+          to: str('Target peerId, group id, or "all" to broadcast. A group id fans out to its members, so you must be one of them.'),
           message: str('The message text.'),
           threadId: optStr('Optional conversation / workflow thread id.'),
           priority: priorityField(),
@@ -597,7 +706,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       description: 'Send a system-flavoured notice to another agent (peer, group id, or "all"). Use it for things the recipient should see differently from chat: "your mailbox dropped 3 messages", "hub restarting", "that task was cancelled". `level` is info | warn | error (default info). The payload is structured ({message, level}) rather than plain text, and the message is a normal routed message — it queues for a parked peer like any other. It does NOT create a task ledger row.',
       inputSchema: schema(
         {
-          to: str('Target peerId, group id, or "all" to broadcast.'),
+          to: str('Target peerId, group id, or "all" to broadcast. A group id fans out to its members, so you must be one of them.'),
           message: str('The notice text.'),
           level: { type: 'string', enum: ['info', 'warn', 'error'], description: 'Severity (default info).' },
           threadId: optStr('Optional conversation / workflow thread id.'),
@@ -622,10 +731,10 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_task',
-      description: 'Delegate a structured task to another agent (peer, group, or "all"). The assignee acks with accepted | working | rejected | done | failed (bridge_ack). Track with bridge_task_status(ref) / bridge_tasks; wait for the ack with bridge_wait({ ref }). Optional timeoutMs marks the task `timeout` when the SLA expires without a terminal ack; any positive duration is honored, including multi-day deadlines (the hub re-arms its timer instead of overflowing it). Optional `ref` names the task this one answers — when the parent is itself a task the new one is a re-delegation, and `hop` counts that chain depth (saturating at 5; the task is always delivered).',
+      description: 'Delegate a structured task to another agent (peer, group, or "all"). The assignee acks with accepted | working | rejected | done | failed (bridge_ack). Track with bridge_task_status(ref) / bridge_tasks; wait for the reply with bridge_wait({ ref }). A `ref` wait can resolve on an intermediate beat (`working`) or on the result chat, so pass `terminalOnly: true` when you want the outcome. Optional timeoutMs marks the task `timeout` when the SLA expires without a terminal ack; any positive duration is honored, including multi-day deadlines (the hub re-arms its timer instead of overflowing it). Optional `ref` names the task this one answers — when the parent is itself a task the new one is a re-delegation, and `hop` counts that chain depth (saturating at 5; the task is always delivered).',
       inputSchema: schema(
         {
-          to: str('Target peerId, group id, or "all" to broadcast.'),
+          to: str('Target peerId, group id, or "all" to broadcast. A group id fans out to its members, so you must be one of them.'),
           prompt: str('What the receiving agent should do.'),
           context: optStr('Optional background information for the task.'),
           deliverable: optStr('Optional expected deliverable description.'),
@@ -676,10 +785,10 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_tasks',
-      description: 'List delegated tasks involving you, newest first. role=sent = tasks you assigned; role=received = tasks assigned to you (or broadcast/group); status filters the ledger state (pending/accepted/working/rejected/done/failed/timeout). Each row carries the full ack timeline and per-assignee state.',
+      description: 'List delegated tasks involving you, newest first. role=sent = tasks you assigned; role=received = tasks assigned to you (or broadcast/group); status filters the ledger state (pending/accepted/working/input-required/rejected/done/failed/timeout/canceled). Each row carries the full ack timeline and per-assignee state.',
       inputSchema: schema({
         role: { type: 'string', enum: ['sent', 'received', 'all'], description: 'Which side of the task to list (default all).' },
-        status: { type: 'string', enum: ['pending', 'accepted', 'working', 'rejected', 'done', 'failed', 'timeout'], description: 'Only tasks whose current ledger status matches.' },
+        status: { type: 'string', enum: [...ALL_TASK_STATUSES], description: 'Only tasks whose current ledger status matches.' },
         peer: optStr('Manager only: "all" or another peerId for the admin board.'),
         limit: int('How many tasks to return (default 50).'),
       }),
@@ -689,14 +798,18 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
           throw new Error(`invalid role: ${role} (expected sent | received | all)`)
         }
         const status = args.status === undefined ? undefined : String(args.status)
-        const validStatus: TaskStatus[] = ['pending', 'accepted', 'working', 'rejected', 'done', 'failed', 'timeout']
-        if (status !== undefined && !validStatus.includes(status as TaskStatus)) {
+        const validStatus: readonly TaskStatus[] = ALL_TASK_STATUSES
+        if (status !== undefined && !(validStatus as readonly string[]).includes(status)) {
           throw new Error(`invalid status: ${status} (expected ${validStatus.join(' | ')})`)
         }
         let target: string = peer
         if (args.peer !== undefined) {
           target = String(args.peer)
-          if (target !== peer) requireManager(peer, `listing tasks of '${target}'`, sessionId)
+          // Same reasoning as bridge_history: the broadcast address is the
+          // "every peer" view, so it is manager-gated even when the caller's own
+          // id happens to BE 'all'.
+          if (target === BROADCAST) requireManager(peer, 'listing the full task ledger', sessionId)
+          else if (target !== peer) requireManager(peer, `listing tasks of '${target}'`, sessionId)
         }
         const tasks = hub.listTasks(target === 'all' ? 'all' : target, {
           ...(role !== undefined ? { role: role as 'sent' | 'received' | 'all' } : {}),
@@ -708,7 +821,7 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_task_status',
-      description: 'Status of one delegated task: current ledger state (pending → accepted/working → done/failed/timeout, or rejected), the original prompt/context/deliverable, per-assignee state, and every ack event (who, status, note, progress, when). Use the task message id (the same id you pass as bridge_ack ref). Readable by the sender, by an assignee (a group task carries the GROUP id in `to`, so its assignees read it through their assignee row) and by a group member; everyone else needs manager rights.',
+      description: 'Status of one delegated task: current ledger state (pending → accepted/working → done/failed/timeout, or input-required/rejected/canceled), the original prompt/context/deliverable, per-assignee state, and every ack event (who, status, note, progress, when). Use the task message id (the same id you pass as bridge_ack ref). Readable by the sender, by an assignee (a group task carries the GROUP id in `to`, so its assignees read it through their assignee row) and by a group member; everyone else needs manager rights.',
       inputSchema: schema({ ref: str('Task message id (the id returned by bridge_task, also used as ack ref).') }, ['ref']),
       handler: wrap(true, async (args, peer, sessionId) => {
         const ref = String(args.ref)
@@ -800,10 +913,19 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
     },
     {
       name: 'bridge_wait',
-      description: 'Wait (long-poll) for the next message addressed to you. Resolves immediately when one is queued; otherwise blocks until one arrives or the timeout fires. `from` narrows to one sender. `ref` waits specifically for the ack of that task id. `threadId` narrows to one conversation thread. Loop this tool to hold a real-time conversation. With `ack: "manual"` the message is LEASED rather than consumed: it comes back (with `attempts` incremented) if you do not call bridge_commit in time, and is dead-lettered after too many hand-outs. Use it when losing a message would be worse than handling one twice.',
+      description: 'Wait (long-poll) for the next message addressed to you. Resolves immediately when one is queued; otherwise blocks until one arrives or the timeout fires. `from` narrows to one sender — but it never hides a notice sent by the hub itself (`from: "hub"`), so a sender waiting with `from: <assignee>` still hears "that delivery was dropped" and "the task is over". Hub notices (`from: "hub"`) are not filtered by `from`, by `ref`, or by `statuses` / `terminalOnly`, so a `ref` wait still hears that its delivery was dropped or that its assignee is gone (a `threadId` filter still narrows them, like any other message). `ref` waits for that task\'s reply: an ack OR the chat an assignee sends the result back in (a chat carrying a task id nobody but that task\'s sender or assignees sent is ignored). An ack is a STATUS BEAT, not a verdict — an assignee that acks `working` and then `done` resolves a plain `ref` wait on the FIRST one, so pass `terminalOnly: true` (or `statuses`) when you need the outcome rather than "it started"; combining the two is an intersection, and a pair that can never match is rejected rather than waited out. A wait that times out returns the task\'s current ledger status under `ref` when you passed a ref and are a party to it (only the sender and the assignees read a task\'s state that way). `threadId` narrows to one conversation thread. Loop this tool to hold a real-time conversation. With `ack: "manual"` the message is LEASED rather than consumed: it comes back (with `attempts` incremented) if you do not call bridge_commit in time, and is dead-lettered after too many hand-outs. Use it when losing a message would be worse than handling one twice.',
       inputSchema: schema({
-        from: optStr('Only wait for messages from this peerId.'),
-        ref: optStr('Only wait for the ack of this task message id (bridge_task id).'),
+        from: optStr('Only wait for messages from this peerId. Hub notices (from "hub") are never filtered out.'),
+        ref: optStr('Only wait for a reply carrying this ref: the ack of that task id (bridge_task id), or a chat answering it. A chat carrying a task id sent by a peer that is neither that task\'s sender nor one of its assignees is ignored.'),
+        statuses: {
+          type: 'array',
+          items: { type: 'string', enum: [...ALL_ACK_STATUSES] },
+          description: 'With `ref`: only resolve on an ack carrying one of these statuses. A chat reply has no status, so it never matches a status filter. An ack whose payload carries no valid status never matches either. Combined with `terminalOnly` by intersection: a list containing no terminal status is rejected instead of waiting out the timeout.',
+        },
+        terminalOnly: {
+          type: 'boolean',
+          description: 'With `ref`: only resolve on a TERMINAL ack (rejected | done | failed | canceled) — skip the `accepted` / `working` / `input-required` beats. A chat reply is not a terminal ack and is skipped as well. Combined with `statuses` by intersection.',
+        },
         threadId: optStr('Only wait for messages carrying this threadId.'),
         timeoutMs: int(`Max wait in milliseconds (default ${DEFAULT_WAIT_MS}, ceiling is server waitTimeoutMs).`),
         maxMessages: int('Take up to this many already-queued messages in one call (default 1). With > 1 the result is {type:"messages", messages:[…]} instead of {type:"message", message:{…}} — the shape follows the request, not how many happened to be queued.'),
@@ -818,13 +940,15 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         args.threadId === undefined ? undefined : String(args.threadId),
         args.ack === 'manual',
         args.maxMessages === undefined ? 1 : Math.max(1, Number(args.maxMessages)),
+        ackStatuses(args.statuses, args.terminalOnly === true),
+        args.terminalOnly === true,
       ))),
     },
     {
       name: 'bridge_poll',
-      description: 'Non-blocking: drain every message currently queued for you. Empty list when nothing is waiting. `from` narrows to one sender. `ack: "manual"` leases what it drains (see bridge_wait) instead of consuming it.',
+      description: 'Non-blocking: drain every message currently queued for you. Empty list when nothing is waiting. `from` narrows to one sender (a hub notice with `from: "hub"` is always included). `ack: "manual"` leases what it drains (see bridge_wait) instead of consuming it.',
       inputSchema: schema({
-        from: optStr('Only drain messages from this peerId.'),
+        from: optStr('Only drain messages from this peerId. Hub notices (from "hub") are never filtered out.'),
         ack: { type: 'string', enum: ['auto', 'manual'], description: '"auto" (default) consumes; "manual" leases until bridge_commit.' },
       }),
       handler: wrap(true, async (args, peer) => ({
@@ -835,16 +959,16 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
       name: 'bridge_commit',
       description: 'Acknowledge messages you received under a manual lease (bridge_wait / bridge_poll with ack: "manual"). Until you commit, the hub keeps them in flight and hands them out again once the lease expires — committing is what makes handling them final. Returns how many leases were released.',
       inputSchema: schema(
-        { ids: { type: 'array', items: { type: 'string' }, description: 'Message ids you received and have finished handling.' } },
+        { ids: { type: 'array', items: { type: 'string' }, description: 'Message ids you received and have finished handling. At most 1000 per call.' } },
         ['ids'],
       ),
       handler: wrap(true, async (args, peer) => ({ committed: hub.commit(peer, idList(args.ids, 'bridge_commit')) })),
     },
     {
       name: 'bridge_nack',
-      description: 'Give leased messages back NOW instead of waiting for the lease to expire — use it when handling failed. They return to the head of your queue (another session of the same peer can retry), their attempt count is kept, and a message that keeps failing ends up dead-lettered instead of looping. It also revives a dead-lettered message (resetting its attempts). Returns how many were requeued.',
+      description: 'Give leased messages back NOW instead of waiting for the lease to expire — use it when handling failed. They go back into your mailbox in normal delivery order (another session of the same peer can retry), their attempt count is kept, and a message that keeps failing ends up dead-lettered instead of looping. It also revives a dead-lettered message (resetting its attempts). Requeued mail competes for a slot like arriving mail, so if the mailbox is already full what does not fit stays dead-lettered (revive it again later). Returns how many were requeued.',
       inputSchema: schema(
-        { ids: { type: 'array', items: { type: 'string' }, description: 'Message ids to give back.' } },
+        { ids: { type: 'array', items: { type: 'string' }, description: 'Message ids to give back. At most 1000 per call.' } },
         ['ids'],
       ),
       handler: wrap(true, async (args, peer) => ({ requeued: hub.nack(peer, idList(args.ids, 'bridge_nack')) })),
@@ -895,8 +1019,13 @@ export function hubTools(hub: AgentHub, registry: SessionRegistry, options: HubT
         }
         const since = sinceRaw
         const target = args.peer === undefined ? peer : String(args.peer)
-        if (target !== peer) {
-          requireManager(peer, `reading ${target === BROADCAST ? 'the full history' : `peer '${target}' history`}`, sessionId)
+        // `target === BROADCAST` is gated on its own, NOT through `target !==
+        // peer`: a caller whose own id literally is 'all' would otherwise make
+        // that test false and read the unfiltered tail with no gate at all.
+        if (target === BROADCAST) {
+          requireManager(peer, 'reading the full history', sessionId)
+        } else if (target !== peer) {
+          requireManager(peer, `reading peer '${target}' history`, sessionId)
         }
         if (args.channel !== undefined) {
           const groupId = String(args.channel)

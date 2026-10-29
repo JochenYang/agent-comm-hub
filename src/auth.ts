@@ -17,7 +17,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { PEER_ID_PATTERN } from './protocol.js'
+import { BROADCAST, HUB_PEER, PEER_ID_PATTERN } from './protocol.js'
 
 /** What a token is allowed to do. `manager` may rename other peers, kick,
  * and read other peers' history (mirrors managerPeers, but authenticated). */
@@ -95,7 +95,10 @@ export function loadTokenFile(file: string): Map<string, TokenIdentity> {
     if (PLACEHOLDER_TOKEN.test(token)) {
       throw new Error(msg('uses the example placeholder token — generate one with `agent-comm-hub auth gen`'))
     }
-    if (typeof peer !== 'string' || !PEER_ID_PATTERN.test(peer) || peer === 'all') {
+    if (typeof peer !== 'string' || !PEER_ID_PATTERN.test(peer) || peer === BROADCAST || peer === HUB_PEER) {
+      // The reserved ids are refused here too: a token map is the other way to
+      // claim an identity, and mapping one to `all` (the broadcast address) or
+      // `hub` (the hub's own notices) would hand that identity to a remote user.
       throw new Error(msg(`has an invalid peer id '${String(peer)}'`))
     }
     if (role !== 'agent' && role !== 'manager') {
@@ -275,7 +278,11 @@ function loadTokenFileVoid(rows: TokenRowJson[]): void {
     if (PLACEHOLDER_TOKEN.test(token)) {
       throw new Error(`example placeholder token for peer '${peer}' — generate one with \`agent-comm-hub auth gen\``)
     }
-    if (!PEER_ID_PATTERN.test(peer) || peer === 'all') throw new Error(`invalid peer id '${peer}'`)
+    // Same rule as the load path (loadTokenFile), from the same constants: when
+    // only 'all' was refused here, the management API could persist a
+    // `peer: 'hub'` row that the loader then rejected — leaving the running hub
+    // on a stale table, `readTokens` throwing, and the next boot unable to start.
+    if (!PEER_ID_PATTERN.test(peer) || peer === BROADCAST || peer === HUB_PEER) throw new Error(`invalid peer id '${peer}'`)
     if (role !== 'agent' && role !== 'manager') throw new Error(`invalid role '${role}'`)
     if (table.has(token)) throw new Error('duplicate token')
     if (peers.has(peer)) throw new Error(`duplicate peer '${peer}'`)
