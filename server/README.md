@@ -76,6 +76,10 @@ agent-comm-hub auth add zhangsan --owner 张三
 - `owner`：可选展示标签（花名册/日志里标注"这是谁的 agent"）。
 - **热更新**：hub 运行中改表约 2 秒生效，无需重启；文件缺失/非法会被启动
   与重载双重校验拒绝（fail-closed）。
+- **保留 id 不能出现在表里**：`peer` 必须是合法 peer id（`[A-Za-z0-9._:-]{1,64}`），
+  且不能是 `all`（广播地址）或 `hub`（hub 发系统通知用的身份）。这两条在读表与
+  写表（管理台 `POST /admin/tokens/add`）两侧都校验；写进去会在下次加载时被拒，
+  进而让整张表 fail-closed——也就是重启后 hub 起不来。
 - 默认表路径 `~/.agent-comm-hub/tokens.json`，用 `--file` 指向别的位置时
   记得让 `--auth-tokens` 也指同一个文件。
 

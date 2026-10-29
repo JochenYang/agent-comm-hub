@@ -180,6 +180,9 @@ export interface WaitResult {
   type: 'message' | 'timeout'
   message?: PresentedMessage
   waitedMs?: number
+  /** Hub >= 0.11: on a timeout, the ledger snapshot of the `ref` this wait was
+   *  about — present only when the caller is that task's sender or an assignee. */
+  ref?: { status: TaskStatus; a2aState: string }
 }
 
 export interface ChatReceipt {
@@ -295,12 +298,21 @@ export const tauri = {
     /** The hub's advertised tool names (`tools/list`). Used at startup to check
      *  the app and the hub still agree on what exists. */
     hubToolsList: () => tauriInvoke<string[]>('hub_tools_list'),
-    bridgeWait: (timeoutMs?: number, from?: string, ref?: string, threadId?: string) =>
+    bridgeWait: (
+      timeoutMs?: number,
+      from?: string,
+      ref?: string,
+      threadId?: string,
+      statuses?: AckStatus[],
+      terminalOnly?: boolean
+    ) =>
       tauriInvoke<WaitResult>(HUB_TOOLS.wait, {
         timeoutMs: timeoutMs ?? null,
         from: from ?? null,
         ref: ref ?? null,
-        threadId: threadId ?? null
+        threadId: threadId ?? null,
+        statuses: statuses ?? null,
+        terminalOnly: terminalOnly ?? null
       }),
     bridgeHistory: (peer?: string, limit?: number) =>
       tauriInvoke<BridgeHistoryResult>(HUB_TOOLS.history, {

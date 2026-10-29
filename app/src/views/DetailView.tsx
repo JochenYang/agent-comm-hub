@@ -148,8 +148,18 @@ export function DetailView({ selfPeerId = SELF_PEER_ID }: Props): React.JSX.Elem
       : t('detail.task_due_minutes', { n: minutes })
   })()
 
-  const canAck =
-    selected.kind === 'task' && (selected.to === selfPeerId || selected.to === 'all') && !isMine && !terminalAcked
+  // Hub 0.11 accepts an ack ONLY from an assignee of that task, so the old
+  // `to === selfPeerId || to === 'all'` test was wrong in both directions: a peer
+  // that connected after a broadcast is not an assignee (the button could only
+  // fail), and a group task's assignees never got the button at all because `to`
+  // is the group id. Decide from the ledger instead. `ledger` is only cleared
+  // when nothing is selected, so it can still be the PREVIOUS task's record while
+  // the new fetch is in flight — compare ids and treat that as "no ledger yet",
+  // falling back to "the task was sent to me".
+  const ledgerForSelected = ledger !== null && ledger.id === selected.id ? ledger : null
+  const iAmAssignee =
+    ledgerForSelected?.assignees.some((assignee) => assignee.peerId === selfPeerId) ?? selected.to === selfPeerId
+  const canAck = selected.kind === 'task' && iAmAssignee && !isMine && !terminalAcked
 
   const handleAck = async (status: AckContent['status'], progress?: number): Promise<void> => {
     setAckSending(status)

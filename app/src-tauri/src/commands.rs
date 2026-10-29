@@ -619,6 +619,8 @@ pub async fn bridge_wait(
     from: Option<String>,
     r#ref: Option<String>,
     thread_id: Option<String>,
+    statuses: Option<Vec<String>>,
+    terminal_only: Option<bool>,
 ) -> CmdResult<Value> {
     let mut args = serde_json::Map::new();
     if let Some(t) = timeout_ms {
@@ -632,6 +634,12 @@ pub async fn bridge_wait(
     }
     if let Some(th) = thread_id {
         args.insert("threadId".into(), json!(th));
+    }
+    if let Some(list) = statuses {
+        args.insert("statuses".into(), json!(list));
+    }
+    if let Some(flag) = terminal_only {
+        args.insert("terminalOnly".into(), json!(flag));
     }
     tools_call_checked(&state, "bridge_wait", Value::Object(args)).await
 }
@@ -879,7 +887,9 @@ pub async fn bridge_task(
     Ok(result)
 }
 
-/// `bridge_ack`: ack a task (or other message). status: accepted/working/rejected/done/failed.
+/// `bridge_ack`: ack a task (or other message). status: accepted | working | input-required |
+/// rejected | done | failed (`canceled` is not an ack — bridge_task_cancel emits it). Hub 0.11
+/// accepts an ack only from an assignee of that task; anyone else gets an error.
 #[tauri::command]
 pub async fn bridge_ack(
     state: State<'_, AppState>,
