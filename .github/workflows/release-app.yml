@@ -148,7 +148,11 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ steps.relname.outputs.name }}
-          body_path: artifacts/release-notes.md
+          # 上传的 artifact 是单文件 /tmp/notes.md，下载到 artifacts/ 后文件名是
+          # notes.md。写成 artifacts/release-notes.md（artifact 名 + .md）时那个文件
+          # 根本不存在，而 softprops/action-gh-release 对缺失的 body_path 不报错，
+          # 于是 1.7.0 之前每次都静默生成一个空说明的 release（CI 全绿）。
+          body_path: artifacts/notes.md
           # 自动发布为 latest（此前 draft: true 需要人工 Publish；产品决策改为直接发布）
           draft: false
           files: |
