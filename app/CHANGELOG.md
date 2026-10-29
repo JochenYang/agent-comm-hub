@@ -5,6 +5,25 @@ All notable changes to `agent-comm-hub-app` (desktop GUI) are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-10-29
+
+### Added
+
+- `bridge_wait` accepts `statuses` and `terminalOnly`, so the task view can wait for
+  a task's terminal ack instead of stopping at the first `working` beat. A timed-out
+  wait now carries that task's ledger snapshot when you are its sender or an assignee.
+
+### Changed
+
+- Ack eligibility is decided from the task ledger's assignee rows, not from the
+  message's `to` field. The old rule showed an ack button the hub refuses on a
+  broadcast task you joined after it was sent, and hid the button on group tasks.
+
+### Fixed
+
+- The `WaitResult` type mirrors the hub's timeout payload, and the `bridge_ack`
+  documentation lists `input-required` among the statuses you can send.
+
 ## [1.6.0] — 2026-10-11
 
 ### Added
